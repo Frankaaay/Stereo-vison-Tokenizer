@@ -93,3 +93,12 @@
 - Decoder 输入严格为 `[B,3,48,1,H',W']`，输出 RGB 与 disparity；主损失显式组合 RGB、normalized disparity、pixel-gradient 与 KL，并保留独立 LPIPS/GAN gate。
 - 所有未完成 calibration 的 loss 权重均为必填 CLI 参数，没有在主类内猜测默认值；GAN 第一阶段可通过 `--gan_enabled` 显式关闭。
 - 新增主类结构化 forward、确定性 eval、backward 与无 codebook/legacy 入口测试；Torch 动态执行留到 H200。
+
+### 模块 7：独立 RGB cache 与 Manifest v3 数据链路
+
+- 状态：已实现，待独立提交；尚未在 H200 生成 cache。
+- `scripts/data/build_stereo_rgb_cache.py` 只读 Manifest v2 与原始 MCAP，按 episode 解码六路 H.264，写入独立 `uint8 [3,2,3,4,256,256]` RGB cache；支持 episode 级分片和已存在 cache 的严格复用。
+- `finalize` 子命令仅在 3407 个引用 cache 全部通过 shape/dtype 校验后生成新的 Manifest v3；v2 Manifest 与 FoundationStereo GT 不被覆盖。
+- `OmniTokenizer/data.py::StereoManifestDataset` 直接读取 RGB/GT cache，构造 `[V,E,C,T,H,W]` RGB、`[V,1,T,H,W]` disparity 和冻结的 confidence valid mask，并返回 fx/baseline。
+- pilot 不提供伪 validation；`--stereo_val_manifest` 为空时 DataModule 返回无 validation loader，正式数据可传独立 v3 Manifest 做 epoch 末完整验证。
+- RGB cache 纯合同测试可在本地执行；Dataset tensor 动态测试与真实 H.264 解码留到经确认后的 H200 阶段。
