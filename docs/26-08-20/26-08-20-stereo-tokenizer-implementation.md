@@ -51,3 +51,11 @@
 - `OmniTokenizer/stereo/fusion.py` 暂时只做兼容转发，保证逐模块迁移期间现有分支仍可导入；完成原主链路接入后将单独删除。
 - `tests/stereo/test_fusion.py` 已改为直接测试原仓库 modules 路径。
 - 本地仅执行 AST、字节码编译和源码边界检查；Torch 动态测试按约定留到 H200。
+
+### 模块 2：Stereo Geometry
+
+- 状态：已实现，等待用户审核与提交。
+- `DepthOutput` 与 `disparity_to_depth` 的唯一实现迁入 `OmniTokenizer/modules/stereo_geometry.py`。
+- 转换只实现 `D=fxB/d`、标定 shape 校验和有效像素传播，不增加 Depth Head 或 depth loss。
+- `OmniTokenizer/stereo/geometry.py` 暂时只做兼容转发，完成原主链路接入后将单独删除。
+- 几何测试已改为直接导入原仓库 modules 路径；Torch 动态数值测试按约定留到 H200。
