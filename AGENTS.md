@@ -102,8 +102,9 @@ git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
 ## H200 数据与存储拓扑
 
 - `/data/shared` 在两台 H200 上是 node-local 视图，不是共享盘。同名路径不代表内容相同。
-- 当前 Stereo OmniTokenizer 工程 pilot 数据和 GT 已分别存放在 `h200-1` 和 `h200-2` 的相同绝对路径；它们是两份 node-local 副本，不是共享存储，使用前仍需分别核对。
-- 2026-08-20 同步后的双节点基线：原始 MCAP 均为 100 个，Manifest v2 均为 7 个文件，GT cache 均为 3407 个，8 个 shard success marker 均存在；原始数据、Manifest、GT 和解码审计的 rsync checksum dry-run 差异均为 0。
+- 当前 Stereo OmniTokenizer 工程 pilot 原始数据、Manifest v2、FoundationStereo GT、独立 RGB cache 和 Manifest v3 已分别存放在 `h200-1` 和 `h200-2` 的相同绝对路径；它们是两份 node-local 副本，不是共享存储，使用前仍需分别核对。
+- 2026-08-20 同步后的双节点基线：原始 MCAP 均为 100 个，Manifest v2 均为 7 个文件，GT cache 均为 3407 个，8 个 shard success marker 均存在；原始数据、Manifest v2、GT 和解码审计的 rsync checksum dry-run 差异均为 0。
+- 2026-08-20 RGB/Manifest v3 双节点同步基线：两端 RGB cache 均为 3407 个，RGB 根目录总字节数均为 `16098848056`，full/smoke/overfit Manifest v3 分别为 3407/32/128 条；`rsync -acni` 的 non-dot change 数为 0。
 - 原始 MCAP 数据根：
   `/data/shared/datasets/umi_raw_data0806`
 - 当前冻结的 Manifest v2 目录：
@@ -115,6 +116,14 @@ git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
 - 固定 smoke/overfit Manifest：
   - `/data/shared/datasets/umi_raw_data0806_stereo_pilot_v2/smoke_32.jsonl`
   - `/data/shared/datasets/umi_raw_data0806_stereo_pilot_v2/overfit_128.jsonl`
+- 独立 RGB cache 与 Manifest v3 根目录：
+  `/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2`
+- 训练/测试使用的 Manifest v3：
+  - full：`/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2/pilot_manifest_v3.jsonl`
+  - smoke：`/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2/smoke_32_v3.jsonl`
+  - overfit：`/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2/overfit_128_v3.jsonl`
+- 每个 sample 的 RGB cache 位于：
+  `/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2/rgb`
 - FoundationStereo GT 根目录：
   `/data/shared/datasets/umi_raw_data0806_stereo_pilot_gt_v2/full`
 - 每个 sample 的 GT cache 位于：
