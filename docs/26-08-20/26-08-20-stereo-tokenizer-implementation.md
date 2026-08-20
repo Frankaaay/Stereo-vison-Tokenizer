@@ -2,7 +2,7 @@
 
 ## 状态
 
-原主链路迁移、旁路清理和 Encoder cleanup 回归修复已在 `frank` 分支完成并 push。2026-08-20 两台 H200 均以 fast-forward-only 同步到数据生成基线 `5d5c78dda21300eabfcb5951b961da02e66d1cdd`；`h200-1` 已完成独立 RGB cache、三份 Manifest v3 和 3407 条全量数据校验。尚未启动动态单测、smoke、训练或评估。
+原主链路迁移、旁路清理和 Encoder cleanup 回归修复已在 `frank` 分支完成并 push。2026-08-20 两台 H200 均以 fast-forward-only 同步到数据生成基线 `5d5c78dda21300eabfcb5951b961da02e66d1cdd`；`h200-1` 已完成独立 RGB cache、三份 Manifest v3 和 3407 条全量数据校验，随后以 checksum 验证的非破坏性 rsync 同步到 `h200-2`。尚未启动动态单测、smoke、训练或评估。
 
 ## 目的
 
@@ -47,12 +47,13 @@
 
 本次未启动训练或评估，因此没有 checkpoint。数据产物与日志如下：
 
-- RGB/Manifest v3 根：`/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2`（`h200-1` node-local，约 16 GB）。
+- RGB/Manifest v3 根：`/data/shared/datasets/umi_raw_data0806_stereo_pilot_rgb_v2`（`h200-1`、`h200-2` 各一份 node-local 副本，约 16 GB）。
 - Full Manifest v3：`pilot_manifest_v3.jsonl`，SHA256 `1e12cdd448e2834f5d20a6c9a373740cbf38be65c7cb5feac053c62becd70934`。
 - Smoke Manifest v3：`smoke_32_v3.jsonl`，SHA256 `3da89faae697d94a86ffc1962d47bf9b2862d5db0673abc8635753a7624b1c14`。
 - Overfit Manifest v3：`overfit_128_v3.jsonl`，SHA256 `3df1278276ef855c605b774af3ff34dcb13a23ca2c8481698698e0faea86700c`。
 - 运行日志：`/data/home/frank/runtime/stereo-rgb-cache-v3/shard-{0..7}.log` 与 `finalize-*.log`。
 - 全量校验结果：`/data/home/frank/runtime/stereo-rgb-cache-v3/validation-full.json`，状态 `PASS`，校验耗时 83.668 秒。
+- 双节点同步日志（`h200-1`）：`/data/home/frank/runtime/stereo-rgb-cache-v3/rsync-h2002-dryrun.txt`、`rsync-h2002.log`、`rsync-h2002-verify.txt`。
 
 ## 当前结论与下一步
 
@@ -68,7 +69,9 @@
 - 校验范围：逐条读取约 16 GB RGB cache 与全部 GT；RGB 合同为唯一 key `rgb`、`uint8 [3,2,3,4,256,256]`，上下各 32 像素 padding 全为 128；GT schema 为 `stereo-foundation-gt-v1`，并核对六个 key、shape/dtype、正值标定和 sample metadata。
 - 数据摘要：RGB value range `[0,255]`、全局均值 `116.87274006593913`；源 MCAP 数 100；无 `.tmp-*` 文件或 cache 进程残留。
 - 异常记录：系统 `/usr/bin/python3` 缺少依赖，因此经确认后复用 `frank` 自有 FoundationStereo 环境；初次 GT 非递归计数为 0，确认实际是按 100 个 episode 子目录分层，递归计数为 3407。两次 Windows→SSH 只读监控命令发生变量/CRLF 引号错误，未影响远端生成进程或数据。
-- 当前结论：数据链路 Gate 通过；smoke/test 尚未启动，必须等待用户确认。
+- 双节点同步：先执行 checksum dry-run，确认目标为空且仅有 3410 个 regular files 待新增；随后从 `h200-1` 以 `rsync -a` 同步到 `h200-2`，未使用 `--delete`。共传输 16.10 GB、3410 个文件，主体耗时 26 秒，删除数为 0。
+- 同步后验证：两端 RGB 根目录均为 `16098848056` bytes、RGB cache 均为 3407 个，三份 Manifest v3 SHA 分别一致；`rsync -acni --itemize-changes` 输出 3512 个以 `.` 开头的已核对条目，non-dot change 为 0。
+- 当前结论：双节点数据链路 Gate 通过；用户已授权在同步与文档更新完成后启动动态测试和 smoke，当前尚未启动。
 
 ## 原主链路迁移进度
 
