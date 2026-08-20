@@ -1,6 +1,8 @@
 import math
 import argparse
 import random
+from dataclasses import dataclass
+from typing import Literal, Optional
 import numpy as np
 from PIL import Image
 import pytorch_lightning as pl
@@ -14,7 +16,7 @@ import torch.utils.checkpoint as checkpoint
 from timm.models.layers import trunc_normal_
 from .quantizer.vector_quantize_pytorch import VectorQuantize
 from .utils import shift_dim, adopt_weight
-from .modules import LPIPS, Codebook
+from .modules import LPIPS, Codebook, StereoFusion, StereoFusionOutput
 from .modules.attention import Transformer
 from .base import Normalize, NLayerDiscriminator, NLayerDiscriminator3D
 from .modules.vae import DiagonalGaussianDistribution
@@ -769,11 +771,22 @@ class VQGAN(pl.LightningModule):
 
   
 
+@dataclass
+class StereoEncoderOutput:
+    """Structured encoder result before the VAE posterior projection."""
+
+    features: torch.Tensor
+    fusion: Optional[StereoFusionOutput]
+    batch_size: int
+    views: int
+
+
 class OmniTokenizer_Encoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, causal_in_temporal_transformer=False, dim=512, 
-                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False, sequence_length=17):
+                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False, sequence_length=17,
+                    stereo_num_views=None, stereo_num_frames=None, stereo_search_radii=None, stereo_search_direction="left"):
         super().__init__()
         self.image_size = pair(image_size)
         self.patch_size = pair(patch_size)
@@ -859,6 +872,43 @@ class OmniTokenizer_Encoder(nn.Module):
 
         self.enc_temporal_transformer = Transformer(
             depth=temporal_depth, block='t' * temporal_depth, **transformer_kwargs)
+
+        self.stereo_num_views = stereo_num_views
+        self.stereo_num_frames = stereo_num_frames
+        self.stereo_embedding_dim = dim
+        if stereo_num_views is not None or stereo_num_frames is not None:
+            if stereo_num_views != 3:
+                raise ValueError("structured Stereo Encoder requires exactly 3 views")
+            if stereo_num_frames != 4:
+                raise ValueError("structured Stereo Encoder requires exactly 4 frames")
+            if patch_embed != "linear":
+                raise ValueError("structured Stereo Encoder requires linear patch embedding")
+            if any(layer not in "tw" for layer in block):
+                raise ValueError("structured Stereo Encoder supports only t/w spatial blocks")
+            if defer_temporal_pool or defer_spatial_pool:
+                raise ValueError("structured Stereo Encoder does not use deferred pooling")
+            if stereo_search_radii is None:
+                raise ValueError("stereo_search_radii must be explicitly configured")
+            if len(stereo_search_radii) != stereo_num_views:
+                raise ValueError("stereo_search_radii must contain one value per view")
+
+            self.stereo_fusion = StereoFusion(
+                dim=dim,
+                heads=heads,
+                head_dim=dim_head,
+                search_radii=stereo_search_radii,
+                search_direction=stereo_search_direction,
+                attention_dropout=attn_dropout,
+            )
+            temporal_projection_width = stereo_num_frames * dim
+            self.stereo_temporal_projection = nn.Sequential(
+                nn.LayerNorm(temporal_projection_width),
+                nn.Linear(temporal_projection_width, dim),
+                nn.LayerNorm(dim),
+            )
+        else:
+            self.stereo_fusion = None
+            self.stereo_temporal_projection = None
         
         if initialize:
             self.apply(self._init_weights)
@@ -914,6 +964,133 @@ class OmniTokenizer_Encoder(nn.Module):
             tokens = torch.cat([first_frame_tokens, rest_frames_tokens], dim=2)
 
         return tokens
+
+    def _encode_stereo_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        """Run the original patch embedding and spatial Transformer per frame."""
+
+        if frames.ndim != 4:
+            raise ValueError(f"stereo frames must use [N,C,H,W], got {frames.shape}")
+        count, _, height, width = frames.shape
+        if (height, width) != self.image_size:
+            raise ValueError(
+                f"expected stereo frame size {self.image_size}, got {(height, width)}"
+            )
+
+        frame_tokens = self.to_patch_emb_first_frame(frames[:, :, None])
+        grid_height, grid_width = frame_tokens.shape[2:4]
+        tokens = rearrange(frame_tokens, "n 1 h w d -> n (h w) d")
+        tokens = self.enc_spatial_transformer(
+            tokens,
+            video_shape=(count, 1, grid_height, grid_width),
+            is_spatial=True,
+        )
+        if tokens.shape[1] != grid_height * grid_width:
+            raise RuntimeError(
+                "structured Stereo Encoder must preserve the spatial token grid"
+            )
+        return rearrange(
+            tokens,
+            "n (h w) d -> n h w d",
+            h=grid_height,
+            w=grid_width,
+        )
+
+    def forward_stereo(
+        self,
+        video: torch.Tensor,
+        *,
+        mode: Literal["mono", "stereo"],
+    ) -> StereoEncoderOutput:
+        """Encode structured clips as 4 raw frames to one temporal slot.
+
+        ``video`` uses ``[B,V,E,C,T,H,W]``. Spatial encoding is applied to
+        every frame independently. StereoFusion runs next, followed by a joint
+        linear 4-to-1 temporal projection. The original temporal Transformer
+        therefore receives exactly one latent slot and never attends between
+        the four raw frames.
+        """
+
+        if self.stereo_fusion is None or self.stereo_temporal_projection is None:
+            raise RuntimeError("structured Stereo Encoder was not configured")
+        if mode not in ("mono", "stereo"):
+            raise ValueError(f"unsupported stereo encoder mode {mode!r}")
+        if video.ndim != 7:
+            raise ValueError(
+                "structured Stereo Encoder expects [B,V,E,C,T,H,W], "
+                f"got {video.shape}"
+            )
+
+        batch, views, eyes, channels, time, height, width = video.shape
+        if views != self.stereo_num_views:
+            raise ValueError(f"expected {self.stereo_num_views} views, got {views}")
+        if time != self.stereo_num_frames:
+            raise ValueError(f"expected T={self.stereo_num_frames}, got T={time}")
+        if channels != 3:
+            raise ValueError(f"expected RGB inputs, got {channels} channels")
+        if mode == "stereo" and eyes != 2:
+            raise ValueError("stereo mode requires exactly two eyes")
+        if mode == "mono" and eyes not in (1, 2):
+            raise ValueError("mono mode accepts one eye or ignores the second eye")
+        if (height, width) != self.image_size:
+            raise ValueError(
+                f"expected stereo frame size {self.image_size}, got {(height, width)}"
+            )
+
+        frame_batch = rearrange(
+            video,
+            "b v e c t h w -> (b v e t) c h w",
+        )
+        frame_features = self._encode_stereo_frames(frame_batch)
+        grid_height, grid_width = frame_features.shape[1:3]
+        frame_features = rearrange(
+            frame_features,
+            "(b v e t) h w d -> b v e t h w d",
+            b=batch,
+            v=views,
+            e=eyes,
+            t=time,
+        )
+
+        left = frame_features[:, :, 0]
+        fusion_output: Optional[StereoFusionOutput]
+        if mode == "stereo":
+            fusion_output = self.stereo_fusion(left, frame_features[:, :, 1])
+            fused = fusion_output.features
+        else:
+            fusion_output = None
+            fused = left
+
+        projected = rearrange(
+            fused,
+            "b v t h w d -> b v h w (t d)",
+        )
+        projected = self.stereo_temporal_projection(projected)[:, :, None]
+
+        temporal_tokens = rearrange(
+            projected,
+            "b v t h w d -> (b v h w) t d",
+        )
+        if temporal_tokens.shape[1] != 1:
+            raise RuntimeError("temporal Transformer must receive one latent slot")
+        temporal_tokens = self.enc_temporal_transformer(
+            temporal_tokens,
+            video_shape=(batch * views, 1, grid_height, grid_width),
+            is_spatial=False,
+        )
+        features = rearrange(
+            temporal_tokens,
+            "(b v h w) t d -> (b v) d t h w",
+            b=batch,
+            v=views,
+            h=grid_height,
+            w=grid_width,
+        )
+        return StereoEncoderOutput(
+            features=features,
+            fusion=fusion_output,
+            batch_size=batch,
+            views=views,
+        )
 
     
     def forward(self, video, is_image, mask=None):

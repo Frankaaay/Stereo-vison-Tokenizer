@@ -68,3 +68,11 @@
 - Loss 权重仍由 resolved config 显式传入，本模块没有写入待 calibration 参数的默认值。
 - `OmniTokenizer/stereo/losses.py` 暂时只做兼容转发，完成原主链路接入后将单独删除。
 - loss 测试已改为直接导入原仓库 modules 路径；Torch 动态数值测试按约定留到 H200。
+
+### 模块 4：Structured Stereo Encoder
+
+- 状态：已实现并独立提交。
+- 结构化入口直接加入原 `OmniTokenizer_Encoder`，不再由旁路 `FrameSpatialEncoder` 或 `StereoTemporalEncoder` 定义。
+- 六路四帧先合并到 batch，复用原 `to_patch_emb_first_frame` 与 `enc_spatial_transformer` 逐帧编码；随后执行 StereoFusion 和 `4×D→D` 联合线性投影。
+- 原 `enc_temporal_transformer` 保留，但显式断言其输入 temporal length 为 1，因此不会在四个 raw frames 之间执行 attention。
+- 新增独立 shape、mono bypass 与梯度测试；Torch 动态执行留到 H200。
