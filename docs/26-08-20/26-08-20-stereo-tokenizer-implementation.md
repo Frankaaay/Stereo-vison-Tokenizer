@@ -157,3 +157,11 @@
 - 修复 cleanup commit `36febdf` 将 Decoder Head 初始化误贴入 Encoder 的问题；恢复 Encoder 对 views、frames、block 和 search radii 的校验。
 - 恢复共享 `StereoFusion` 和 `LayerNorm(4D) → Linear(4D,D) → LayerNorm(D)` temporal projection；Encoder 不再引用 disparity scale/bias/epsilon 或创建 Decoder Heads。
 - 新增无 Torch 依赖的 AST 回归测试，直接约束 Encoder/Decoder 的参数所有权；真实实例化与 forward 仍须在 H200 验证。
+
+### 模块 11：Stereo 测试导入边界修复
+
+- 状态：已实现，待 H200 动态验证。
+- `h200-2` 的项目环境 `omnitokenizer-e2` 已具备 Torch 2.7.1、CUDA 12.8 和主要训练依赖，但初次导入被 legacy 数据依赖阻塞：`decord` 缺失，且当前 Python 3.12 pip 源没有 `imagenet-stubs` distribution。
+- `OmniTokenizer/data.py` 不再在模块加载时导入仅供 legacy `ImageDataset` 使用的 `imagenet_stubs`；该依赖改为构造 legacy dataset 时按需导入，Stereo Manifest 主路径不再被无关依赖阻塞。
+- `decord==0.6.0` 仍按原仓库数据模块合同安装到用户确认的项目环境，不通过源码伪造或旁路该依赖。
+- `tests/stereo/test_source_boundary.py` 新增 AST 回归检查，约束 `imagenet_stubs` 不得重新成为 `data.py` 的顶层导入，同时保留 legacy 类内部的真实依赖。

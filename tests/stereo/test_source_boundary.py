@@ -5,6 +5,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STEREO_SOURCE = ROOT / "OmniTokenizer" / "stereo"
+DATA_SOURCE = ROOT / "OmniTokenizer" / "data.py"
 TOKENIZER_SOURCES = (
     ROOT / "OmniTokenizer" / "omnitokenizer.py",
     ROOT / "OmniTokenizer" / "modules" / "stereo_fusion.py",
@@ -35,6 +36,35 @@ class SourceBoundaryTest(unittest.TestCase):
         self.assertNotIn("def forward(self, video, is_image", source)
         self.assertNotIn("def forward(self, tokens, is_image", source)
         self.assertNotIn("self.codebook", source)
+
+    def test_legacy_imagenet_dependency_is_not_imported_at_module_load(self) -> None:
+        tree = ast.parse(DATA_SOURCE.read_text(encoding="utf-8"))
+        top_level_modules = {
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module is not None
+        }
+        self.assertNotIn(
+            "imagenet_stubs.imagenet_2012_labels", top_level_modules
+        )
+
+        image_dataset = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "ImageDataset"
+        )
+        constructor = next(
+            node
+            for node in image_dataset.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.ImportFrom)
+                and node.module == "imagenet_stubs.imagenet_2012_labels"
+                for node in ast.walk(constructor)
+            )
+        )
 
     def test_encoder_owns_fusion_and_not_decoder_heads(self) -> None:
         tree = ast.parse(TOKENIZER_SOURCES[0].read_text(encoding="utf-8"))

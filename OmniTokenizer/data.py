@@ -26,7 +26,6 @@ from .video_utils import VideoNorm, load_video_from_path_decord, load_video_from
 from .coinrun.coinrun_data import CoinRunDataset
 from .coinrun.coinrun_data_v2 import CoinRunDatasetV2
 from .coinrun.tokenizer import tokenizer
-from imagenet_stubs.imagenet_2012_labels import label_to_name
 
 try:
     from torchvision.transforms import InterpolationMode
@@ -65,6 +64,8 @@ class ImageDataset(data.Dataset):
             sequence_length: length of extracted video sequences
         """
         super().__init__()
+        from imagenet_stubs.imagenet_2012_labels import label_to_name
+
         self.train = train
         self.data_folder = data_folder
         self.data_list = data_list
