@@ -3,7 +3,7 @@ import unittest
 import torch
 
 from OmniTokenizer.modules.stereo_geometry import disparity_to_depth
-from OmniTokenizer.stereo.losses import (
+from OmniTokenizer.modules.stereo_losses import (
     masked_disparity_gradient_loss,
     masked_smooth_l1_disparity_loss,
     posterior_kl_loss,

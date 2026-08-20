@@ -59,3 +59,12 @@
 - 转换只实现 `D=fxB/d`、标定 shape 校验和有效像素传播，不增加 Depth Head 或 depth loss。
 - `OmniTokenizer/stereo/geometry.py` 暂时只做兼容转发，完成原主链路接入后将单独删除。
 - 几何测试已改为直接导入原仓库 modules 路径；Torch 动态数值测试按约定留到 H200。
+
+### 模块 3：Stereo Losses
+
+- 状态：已实现，等待用户审核与提交。
+- RGB、masked normalized-disparity、pixel-disparity gradient 和 posterior KL 的唯一实现迁入 `OmniTokenizer/modules/stereo_losses.py`。
+- disparity 与 gradient 继续按有效像素分视角归一化后等权平均；任一视角没有有效监督时 fail closed。
+- Loss 权重仍由 resolved config 显式传入，本模块没有写入待 calibration 参数的默认值。
+- `OmniTokenizer/stereo/losses.py` 暂时只做兼容转发，完成原主链路接入后将单独删除。
+- loss 测试已改为直接导入原仓库 modules 路径；Torch 动态数值测试按约定留到 H200。
