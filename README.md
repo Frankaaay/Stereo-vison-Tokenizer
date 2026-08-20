@@ -1,5 +1,36 @@
 # OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation
 
+> **Stereo-only development branch.** The public tokenizer in this branch is
+> no longer the upstream image/video VQGAN. It accepts structured
+> `[B,3,2,3,4,256,256]` stereo samples, produces a raw
+> `[B,3,48,1,16,16]` VAE latent, and decodes left-view RGB plus disparity.
+> Legacy image-mode and VQ codebook paths are not supported. The upstream
+> model-zoo checkpoints and LM/DiT/Latte entrypoints below are retained as
+> historical repository context and are not strict-load compatible with this
+> Stereo model.
+
+## Stereo OmniTokenizer
+
+The implementation lives in the original repository path:
+
+- `OmniTokenizer/omnitokenizer.py`: shared per-frame Spatial Encoder,
+  StereoFusion, `4→1` temporal projection, VAE posterior, original
+  one-slot temporal/spatial Decoder, RGB/disparity heads, and training losses.
+- `OmniTokenizer/modules/stereo_*.py`: fusion, geometry, and masked loss
+  primitives.
+- `OmniTokenizer/data.py`: Manifest v3 loader for independent RGB and
+  FoundationStereo GT caches.
+- `scripts/data/build_stereo_rgb_cache.py`: independent RGB-cache builder and
+  Manifest v3 finalizer.
+- `vqgan_train.py`, `vqgan_eval.py`, and `scripts/recons/train.sh`: Stereo-only
+  training/evaluation entrypoints.
+
+The tokenizer intentionally does not implement downstream DiT
+patchify/unpatchify. See `doc/Stereo Tokenizer Plan.md` for the frozen tensor,
+data, supervision, and validation contracts. H200 smoke/overfit execution is a
+separate gated step; the repository does not contain datasets, caches,
+checkpoints, or run outputs.
+
 Official pytorch implementation of the following paper:
 <p align="left"> 
 <a href="https://arxiv.org/abs/2406.09399">OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation</a>.
@@ -35,7 +66,7 @@ pip3 install -r requirements.txt
 
 Then download the datasets from the official websites. You can download the [annotation.zip](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/annotations.zip) processed by us and put them under ```./annotations```.
 
-## Model Zoo for VQVAE and VAE
+## Upstream Model Zoo for VQVAE and VAE (incompatible with Stereo-only class)
 
 We release both VQVAE and VAE version of OmniTokenizer, that are pretrained on a wide range of image and video datasets:
 
@@ -58,44 +89,33 @@ We release both VQVAE and VAE version of OmniTokenizer, that are pretrained on a
 [^1] We train this model w/o *scaled_dot_product_attention*, please comment line 446-460 in ```OmniTokenizer/modules/attention.py``` to reproduce this result.
 
 
-We recommand you to try [imagenet_k600.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_k600.ckpt) as it is trained on large-scale image and video data. 
+These links and reported metrics describe the upstream implementation. They
+must not be used as pretrained weights for this branch: Stereo training starts
+from scratch and evaluation uses strict checkpoint loading through
+`vqgan_eval.py`.
 
-You can easily incorporate OmniTokenizer into your language model or diffusion model with:
-```
-from OmniTokenizer import OmniTokenizer_VQGAN
-vqgan = OmniTokenizer_VQGAN.load_from_checkpoint(vqgan_ckpt, strict=False)
+## Stereo Tokenizer Training
 
-# tokens = vqgan.encode(img)
-# recons = vqgan.decode(tokens)
-
-```
-
-## Tokenizer (VQVAE and VAE)
-
-The training of VQVAE includes two stages: image-only training on a fixed resolution, and image-video joint training on multiple resolutions. After this, finetune the VQVAE model w/ KL loss to obtain a VAE model.
-
-<p align="left">
-    <img src=assets/training.png width="852" height="384" />
-</p>
-
-Please refer to ```scripts/recons/train.sh``` for the training of omnitokenizer. Explanation of the flags that are opted to change according to different settings:
-
-- patch_size & temporal_patch_size: shape of the patches in patch embedding layer, also determine the downsample ratio
-- enc_block: type of encoder blocks, 't' indices plain attention and 'w' indicates window attention
-- n_codes: codebook size
-- spatial_pos: type of spatial positional encoding
-- use_vae: train in VAE mode or VQVAE mode
-- resolution & sequence_length: spatial and temporal resolution for training
-- resolution_scale: for multiple resolution training, proportion of the specificed resolution
-
-For the evaluation of omnitokenizer, please refer to ```scripts/recons/eval_image_inet.sh```, ```scripts/recons/eval_image_face.sh```, ```scripts/recons/eval_video.sh```.
+`scripts/recons/train.sh` is the canonical recipe template. It requires the
+Manifest v3/cache paths and all not-yet-calibrated loss, batch, warmup, and
+step-budget values as environment variables. GAN is explicitly disabled in
+the first smoke/overfit recipe. A validation Manifest is optional for the
+engineering pilot; when supplied for formal data, the complete validation
+split runs once at each epoch end.
 
 
 ## LM-based Visual Synthesis
 
+The upstream LM scripts below target discrete codebook tokens and are not an
+entrypoint for the raw 48-channel Stereo VAE latent.
+
 Please refer to ```scripts/lm_train``` and ```scripts/lm_gen``` for the training and evaluation of language model. We provide the checkpoints for ImageNet[[imagenet_class_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_class_lm.ckpt)], UCF [[ucf_class_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/ucf_class_lm.ckpt)], and Kinetics-600 [[k600_fp_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/k600_fp_lm.ckpt)]. 
 
 ## Diffusion-based Visual Synthesis
+
+The upstream diffusion scripts below are historical. Downstream Stereo latent
+normalization and DiT patchify/unpatchify belong to the consuming model and are
+not implemented in this tokenizer.
 
 We adopt [DiT](https://github.com/facebookresearch/DiT?tab=readme-ov-file) and [Latte](https://github.com/Vchitect/Latte) for diffusion-based visual generation. Please refer to [diffusion.md](Diffusion/README.md) for the training and evaluation instructions.
 

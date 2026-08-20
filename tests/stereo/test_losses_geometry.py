@@ -8,7 +8,6 @@ from OmniTokenizer.modules.stereo_losses import (
     masked_smooth_l1_disparity_loss,
     posterior_kl_loss,
 )
-from OmniTokenizer.stereo.training import StereoTrainingLossConfig
 
 
 class _PosteriorStub:
@@ -94,11 +93,6 @@ class GeometryTest(unittest.TestCase):
             output.depth[0, :, 0, :, 0, 1],
             torch.tensor(((1.0, 1.0), (2.0, 2.0), (3.0, 3.0))),
         )
-
-    def test_loss_config_has_no_implicit_weights(self) -> None:
-        with self.assertRaises(TypeError):
-            StereoTrainingLossConfig(mode="stereo")
-
 
 if __name__ == "__main__":
     unittest.main()

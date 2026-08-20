@@ -40,7 +40,7 @@ flowchart LR
 |每个视角输入|Left RGB、Right RGB|
 |输入分辨率|256×256|
 |当前训练 sample|连续同步 4 帧，无 anchor|
-|Legacy 兼容|保留原 `OmniTokenizer` 的 image\-mode，不把它并入新 `StereoTokenizer`；新类第一版只接受结构化 `T=4` 输入|
+|模式边界|原 `OmniTokenizer` 主类直接改为 Stereo-only；不保留 legacy image-mode，也不维护旁路 `StereoTokenizer` 实现|
 |源视频与采样|源视频约 30 FPS；训练帧间隔 0.1 秒（等效 10 FPS）|
 |Sample stride|0.4 秒，4 帧半开窗口不重叠|
 |OmniTokenizer spatial patch size|16×16 pixels|
@@ -143,7 +143,7 @@ $[B,3,4,512,16,16]
 
 投影前后均使用与 OmniTokenizer patch embedding 对齐的归一化层。随后保留原 temporal Transformer，其输入 temporal length 已经是 1，因此它不在 4 个 raw frames 之间执行 self-attention。4 帧内部只有上述联合线性投影；不同 latent slots 之间的 temporal attention 由下游世界模型实现。
 
-新 `StereoTokenizer` 第一版严格要求 $T=4$，不实现 anchor 模式，也不实现自身的单帧分支。原 `OmniTokenizer` 类保持不变，继续承担 legacy image-mode 兼容。
+主 `OmniTokenizer` 第一版严格要求结构化 $T=4$，不实现 anchor、单帧或 legacy image-mode；Stereo 能力直接进入原 Encoder、Decoder 和训练主类，不保留旁路 tokenizer。
 
 ### 3\.5 VAE Posterior
 
@@ -902,7 +902,7 @@ Manifest、统计文件、calibration 报告或 resolved config 任一缺失，�
 
 ### 9\.2 模型闭环验收
 
-- 原 `OmniTokenizer` 的 legacy image-mode 行为不因新增 `StereoTokenizer` 而改变；新类不承担该模式；
+- 原 `OmniTokenizer` 主类改为 Stereo-only，legacy image-mode 和旁路 `StereoTokenizer` 均不保留；
 
 - 当前无 anchor 4 帧链路 forward/backward 通过，shape 为 `4 raw frames→1 temporal latent slot→4 reconstructed frames`；
 
@@ -1032,7 +1032,7 @@ Manifest、统计文件、calibration 报告或 resolved config 任一缺失，�
 
 - 实现 Shared Spatial Encoder、StereoFusion、Temporal Encoder、48\-channel VAE posterior 和共享 Decoder；
 
-- 保持原 `OmniTokenizer` 类和 legacy image-mode 不变；新 `StereoTokenizer` 第一版只接受结构化 `T=4` 输入；
+- 直接修改原 `OmniTokenizer` 主类为 Stereo-only，第一版只接受结构化 `T=4` 输入；
 
 - Tokenizer 只输出 `[B,3,48,1,16,16]` latent，不实现或配置下游 DiT patchify/unpatchify；
 
