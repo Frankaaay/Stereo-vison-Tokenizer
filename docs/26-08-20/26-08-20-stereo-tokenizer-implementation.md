@@ -102,3 +102,12 @@
 - `OmniTokenizer/data.py::StereoManifestDataset` 直接读取 RGB/GT cache，构造 `[V,E,C,T,H,W]` RGB、`[V,1,T,H,W]` disparity 和冻结的 confidence valid mask，并返回 fx/baseline。
 - pilot 不提供伪 validation；`--stereo_val_manifest` 为空时 DataModule 返回无 validation loader，正式数据可传独立 v3 Manifest 做 epoch 末完整验证。
 - RGB cache 纯合同测试可在本地执行；Dataset tensor 动态测试与真实 H.264 解码留到经确认后的 H200 阶段。
+
+### 模块 8：原训练与评估入口
+
+- 状态：已实现，待独立提交；尚未启动训练或评估。
+- `vqgan_train.py` 已移除 legacy checkpoint inflation、自动扫描恢复和 image/video dataset 分支假设；只接受 Stereo Manifest loader，训练 posterior sample，validation 每个 epoch 末完整运行一次。
+- 当前 pilot 没有 validation Manifest，因此显式设置 `limit_val_batches=0`；提供正式 validation v3 Manifest 时使用 `limit_val_batches=1.0`，不做 batch 子采样。
+- checkpoint 每个 epoch 保存一次；是否 resume 只由 Lightning 的显式 CLI 参数决定，不再静默选择目录中最近 checkpoint。
+- `vqgan_eval.py` 使用 posterior mean 且 strict load，输出 RGB L1、分视角 disparity EPE、派生 depth AbsRel/RMSE 和有效像素数，不再计算 codebook usage。
+- `scripts/recons/train.sh` 已替换为结构化 Stereo recipe；数据路径、loss 权重、KL/optimizer warmup、micro batch、gradient accumulation 和 step budget 都必须由调用方显式设置，避免在 calibration 前写入猜测值。

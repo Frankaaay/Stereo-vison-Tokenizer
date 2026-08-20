@@ -761,7 +761,7 @@ class VideoData(pl.LightningDataModule):
                     dset,
                     num_replicas=dist.get_world_size(),
                     rank=dist.get_rank(),
-                    shuffle=train,
+                    shuffle=train and self.shuffle,
                 )
             else:
                 sampler = None
@@ -772,7 +772,7 @@ class VideoData(pl.LightningDataModule):
                 num_workers=self.args.num_workers,
                 pin_memory=False,
                 sampler=sampler,
-                shuffle=sampler is None and train,
+                shuffle=sampler is None and train and self.shuffle,
                 drop_last=train,
             )
 

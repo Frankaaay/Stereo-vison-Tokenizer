@@ -1,43 +1,100 @@
-# Stage1: Image-only training on a fixed resolution
-python3 vqgan_train.py --tokenizer 'omnitokenizer' --patch_embed 'linear' --patch_size 8 --temporal_patch_size 2 --spatial_depth 4 --temporal_depth 4 --embedding_dim 512 --disc_layers 3 \
-                      --enc_block "ttww" --dec_block "tttt" --twod_window_size 8 \
-                      --causal_in_temporal_transformer --causal_in_peg --dim_head 64 --heads 8 \
-                      --n_codes 8192 --codebook_dim 8 --l2_code --commitment_weight 1.0 --no_random_restart \
-                      --num_nodes 4 --gpus 8 --sync_batchnorm --batch_size 8 --num_workers 8 --grad_accumulates 1 --grad_clip_val 1.0 --apply_noise --apply_blur \
-                      --lr 1e-3 --lr_min 5e-5 --warmup_steps 50000 --warmup_lr_init 0. --dis_lr_multiplier 0.1 --dis_minlr_multiplier --dis_warmup_steps 500000 \
-                      --progress_bar_refresh_rate 500 --max_steps 500000 \
-                      --loader_type 'joint' --data_path {IMAGE_DIR} \
-                      --default_root_dir {PATH_TO_SAVE_CKPT} \
-                      --train_datalist {IMAGE_DATALIST} --val_datalist {IMAGE_DATALIST} \
-                      --resolution 256 --sequence_length 17 --discriminator_iter_start 0 --norm_type batch \
-                      --perceptual_weight 4 --image_gan_weight 0.01 --video_gan_weight 1  --gan_feat_weight 4 --logitslaplace_weight 0.4 --initialize_vit --disloss_check_thres 0.001
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Stage2: Image and Video joint training on multiple resolutions
-python3 vqgan_train.py --tokenizer 'omnitokenizer' --patch_embed 'linear' --patch_size 8 --temporal_patch_size 4 --spatial_depth 4 --temporal_depth 4 --embedding_dim 512 --disc_layers 3 \
-                      --enc_block "ttww" --dec_block "tttt" --twod_window_size 8 \
-                      --causal_in_temporal_transformer --causal_in_peg --dim_head 64 --heads 8 \
-                      --n_codes 8192 --codebook_dim 8 --l2_code --commitment_weight 1.0 --no_random_restart \
-                      --num_nodes 4 --gpus 8 --sync_batchnorm --num_workers 8 --grad_accumulates 2 --force_alternation --grad_clip_val 1.0 --apply_noise \
-                      --lr 5e-5 --lr_min 5e-5 --warmup_steps 50000 --warmup_lr_init 0. --dis_lr_multiplier 0.1 --dis_minlr_multiplier --dis_warmup_steps 500000 \
-                      --progress_bar_refresh_rate 500 --max_steps 500000 \
-                      --loader_type 'joint' --batch_size 4 8 --sample_ratio 1 1 \
-                      --data_path {VIDEO_DIR} {IMAGE_DIR} \
-                      --default_root_dir {PATH_TO_SAVE_CKPT} \
-                      --train_datalist {VIDEO_DATALIST} {IMAGE_DATALIST} --val_datalist {VIDEO_DATALIST} {IMAGE_DATALIST} \
-                      --resolution 256 --sequence_length 17 --fps -1 --discriminator_iter_start 0 --norm_type batch \
-                      --perceptual_weight 4 --image_gan_weight 0 --video_gan_weight 0.01  --gan_feat_weight 4 --disloss_check_thres 0.001 --pretrained {CKPT_OF_PREVIOUS_STAGE} --no_init_idis --init_vgen "average" --activation_in_disc "leaky_relu" --resolution_scale 0.5 0.75 1.0 1.25 --spatial_pos "rope"
+: "${STEREO_TRAIN_MANIFEST:?set a Manifest v3 training path}"
+: "${STEREO_RGB_ROOT:?set the independent RGB cache root}"
+: "${STEREO_GT_ROOT:?set the FoundationStereo GT root}"
+: "${OUTPUT_ROOT:?set a repository-external output directory}"
+: "${GPU_COUNT:?set the number of visible GPUs}"
+: "${GLOBAL_BATCH_SIZE:?set the intended global batch size}"
+: "${PER_DEVICE_BATCH_SIZE:?set the per-GPU micro batch}"
+: "${GRAD_ACCUMULATES:?set gradient accumulation}"
+: "${MAX_STEPS:?set the smoke/overfit step budget}"
+: "${LEARNING_RATE:?set the generator learning rate}"
+: "${MIN_LEARNING_RATE:?set the cosine minimum learning rate}"
+: "${WARMUP_STEPS:?set optimizer warmup steps}"
+: "${KL_WARMUP_STEPS:?set KL warmup steps}"
+: "${RGB_WEIGHT:?set the calibrated RGB loss weight}"
+: "${DISPARITY_WEIGHT:?set the calibrated disparity loss weight}"
+: "${GRADIENT_WEIGHT:?set the calibrated gradient loss weight}"
+: "${KL_WEIGHT:?set the calibrated KL loss weight}"
+: "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
 
-# Stage3: Finetuning w/ KL loss to train a VAE
-python3 vqgan_train.py --tokenizer 'omnitokenizer' --patch_embed 'linear' --patch_size 8 --temporal_patch_size 4 --spatial_depth 4 --temporal_depth 4 --embedding_dim 512 --disc_layers 3 \
-                      --enc_block "ttww" --dec_block "tttt" --twod_window_size 8 \
-                      --causal_in_temporal_transformer --causal_in_peg --dim_head 64 --heads 8 \
-                      --n_codes 8192 --codebook_dim 8 --l2_code --commitment_weight 1.0 --no_random_restart \
-                      --num_nodes 4 --gpus 8 --sync_batchnorm --num_workers 8 --grad_accumulates 2 --force_alternation --grad_clip_val 1.0 --apply_noise \
-                      --lr 5e-5 --lr_min 5e-5 --warmup_steps 50000 --warmup_lr_init 0. --dis_lr_multiplier 0.1 --dis_minlr_multiplier --dis_warmup_steps 500000 \
-                      --progress_bar_refresh_rate 500 --max_steps 500000 \
-                      --loader_type 'joint' --batch_size 4 8 --sample_ratio 1 1 \
-                      --data_path {VIDEO_DIR} {IMAGE_DIR} \
-                      --default_root_dir {PATH_TO_SAVE_CKPT} \
-                      --train_datalist {VIDEO_DATALIST} {IMAGE_DATALIST} --val_datalist {VIDEO_DATALIST} {IMAGE_DATALIST} \
-                      --resolution 256 --sequence_length 17 --fps -1 --discriminator_iter_start 0 --norm_type batch \
-                      --perceptual_weight 4 --image_gan_weight 0 --video_gan_weight 0.01  --gan_feat_weight 4 --disloss_check_thres 0.001 --pretrained {CKPT_OF_PREVIOUS_STAGE} --init_vgen "keep" --init_vdis "keep" --activation_in_disc "leaky_relu" --resolution_scale 0.5 0.75 1.0 1.25 --spatial_pos "rope" --use_vae --kl_weight 1e-6
+EXPECTED_GLOBAL_BATCH_SIZE=$((GPU_COUNT * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
+if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
+  echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
+  exit 2
+fi
+
+VALIDATION_ARGS=()
+if [[ -n "${STEREO_VAL_MANIFEST:-}" ]]; then
+  VALIDATION_ARGS+=(--stereo_val_manifest "${STEREO_VAL_MANIFEST}")
+fi
+
+WANDB_ARGS=()
+if [[ "${DISABLE_WANDB:-0}" == "1" ]]; then
+  WANDB_ARGS+=(--disable_wandb)
+fi
+
+python3 vqgan_train.py \
+  --tokenizer omnitokenizer \
+  --loader_type stereo_manifest \
+  --stereo_train_manifest "${STEREO_TRAIN_MANIFEST}" \
+  --stereo_rgb_root "${STEREO_RGB_ROOT}" \
+  --stereo_gt_root "${STEREO_GT_ROOT}" \
+  "${VALIDATION_ARGS[@]}" \
+  --resolution 256 \
+  --sequence_length 4 \
+  --image_channels 3 \
+  --patch_embed linear \
+  --patch_size 16 \
+  --temporal_patch_size 4 \
+  --spatial_depth 4 \
+  --temporal_depth 4 \
+  --embedding_dim 512 \
+  --codebook_dim 48 \
+  --enc_block ttww \
+  --dec_block tttt \
+  --twod_window_size 8 \
+  --spatial_pos rope \
+  --causal_in_temporal_transformer \
+  --causal_in_peg \
+  --dim_head 64 \
+  --heads 8 \
+  --initialize_vit \
+  --stereo_num_views 3 \
+  --stereo_num_frames 4 \
+  --stereo_search_radii 7 7 7 \
+  --stereo_search_direction left \
+  --stereo_disparity_scale 128 128 128 \
+  --stereo_disparity_bias -2.572 \
+  --stereo_disparity_epsilon 1e-6 \
+  --stereo_mode stereo \
+  --stereo_disparity_min_px 0.5 \
+  --stereo_disparity_max_px 112.0 \
+  --stereo_lr_error_abs_threshold_px 1.0 \
+  --stereo_lr_error_relative_threshold 0.05 \
+  --geometry_gradient_scale_px 16.0 \
+  --rgb_weight "${RGB_WEIGHT}" \
+  --disparity_weight "${DISPARITY_WEIGHT}" \
+  --gradient_weight "${GRADIENT_WEIGHT}" \
+  --kl_weight "${KL_WEIGHT}" \
+  --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
+  --image_gan_weight 0 \
+  --video_gan_weight 0 \
+  --gan_feat_weight 0 \
+  --recon_loss_type l1 \
+  --smooth_l1_beta 1.0 \
+  --batch_size "${PER_DEVICE_BATCH_SIZE}" \
+  --num_workers "${NUM_WORKERS:-8}" \
+  --grad_accumulates "${GRAD_ACCUMULATES}" \
+  --grad_clip_val 1.0 \
+  --lr "${LEARNING_RATE}" \
+  --lr_min "${MIN_LEARNING_RATE}" \
+  --warmup_steps "${WARMUP_STEPS}" \
+  --kl_warmup_steps "${KL_WARMUP_STEPS}" \
+  --max_steps "${MAX_STEPS}" \
+  --default_root_dir "${OUTPUT_ROOT}" \
+  --gpus "${GPU_COUNT}" \
+  --bf16 \
+  "${WANDB_ARGS[@]}"

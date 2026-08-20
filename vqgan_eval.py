@@ -1,238 +1,189 @@
-import os
-import tqdm
-import json
-import torch
-import torch.nn.functional as F
 import argparse
-import numpy as np
-import torch.nn as nn
-from torchvision.models.inception import inception_v3
-from einops import rearrange
+import json
+from pathlib import Path
+
+import torch
 from tqdm import tqdm
-from PIL import Image
 
-from OmniTokenizer import VideoData
-from OmniTokenizer import OmniTokenizer_VQGAN, VQGAN
-from OmniTokenizer.utils import save_video_grid
-from OmniTokenizer.utils import shift_dim
-from OmniTokenizer.fvd.fvd import get_fvd_logits, frechet_distance, load_fvd_model
+from OmniTokenizer import OmniTokenizer_VQGAN, VQGAN, VideoData
 
 
-def calculate_batch_codebook_usage_percentage(batch_encoding_indices,n_codes):
-    # Flatten the batch of encoding indices into a single 1D tensor
-    all_indices = batch_encoding_indices.flatten()
-
-    # Initialize a tensor to store the percentage usage of each code
-    codebook_usage = torch.zeros(n_codes, dtype=torch.long)
-    
-    # Count the number of occurrences of each index and get their frequency as percentages
-    unique_indices, counts = torch.unique(all_indices, return_counts=True)
-    
-    # Populate the corresponding percentages in the codebook_usage_percentage tensor
-    codebook_usage[unique_indices.long()] = counts
-    
-    return codebook_usage
+VIEW_NAMES = ("head", "lefthand", "righthand")
 
 
-def disabled_train(self, mode=True):
-    """Overwrite model.train with this function to make sure train/eval mode
-    does not change anymore."""
-    return self
-
-parser = argparse.ArgumentParser()
-parser = VideoData.add_data_specific_args(parser)
-parser = VQGAN.add_model_specific_args(parser)
-parser = OmniTokenizer_VQGAN.add_model_specific_args(parser)
-parser.add_argument('--tokenizer', type=str, default="omnitokenizer")
-parser.add_argument('--vqgan_ckpt', type=str, default=None)
-parser.add_argument('--train', action="store_true")
-parser.add_argument('--inference_type', type=str, choices=["image", "video"])
-parser.add_argument('--infer_downsample', type=int, default=None)
-parser.add_argument('--replacewithgt', type=int, default=None)
-parser.add_argument('--save', type=str, default='./results/tats')
-parser.add_argument('--dataset', type=str, default='ucf101')
-parser.add_argument('--save_videos', action='store_true')
-args = parser.parse_args()
-
-n_row = 1 # int(np.sqrt(args.batch_size))
-
-device = torch.device('cuda')
-
-vqgan = OmniTokenizer_VQGAN(args)
-load_weights = torch.load(args.vqgan_ckpt, map_location=torch.device("cpu"))["state_dict"]
-
-vids_weights = {k: v for k, v in load_weights.items() if "video_discriminator" in k}
-for k in vids_weights.keys():
-    del load_weights[k]
-
-msg = vqgan.load_state_dict(load_weights, strict=False)
-print(f"Model loaded from {args.vqgan_ckpt}.")
-print(f"Missing: {msg.missing_keys}")
-print(f"Unexpected: {msg.unexpected_keys}")
+def build_parser():
+    parser = argparse.ArgumentParser()
+    parser = VQGAN.add_model_specific_args(parser)
+    parser = OmniTokenizer_VQGAN.add_model_specific_args(parser)
+    parser = VideoData.add_data_specific_args(parser)
+    parser.add_argument("--vqgan_ckpt", type=Path, required=True)
+    parser.add_argument("--eval_split", choices=["train", "val"], default="val")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--max_batches", type=int, default=None)
+    parser.add_argument("--output_json", type=Path, required=True)
+    return parser
 
 
-vqgan.to(device)
+def validate_args(args):
+    if args.loader_type != "stereo_manifest":
+        raise ValueError("Stereo evaluation requires loader_type=stereo_manifest")
+    manifest = (
+        args.stereo_train_manifest
+        if args.eval_split == "train"
+        else args.stereo_val_manifest
+    )
+    if manifest is None:
+        raise ValueError(f"no Manifest v3 configured for split {args.eval_split}")
+    if args.max_batches is not None and args.max_batches <= 0:
+        raise ValueError("--max_batches must be positive")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"requested {args.device}, but CUDA is unavailable")
 
-vqgan.encoder.image_size = (args.resolution, args.resolution)
-vqgan.decoder.image_size = (args.resolution, args.resolution)
 
-try:
-    num_codes = vqgan.codebook.n_codes
-except:
-    num_codes = vqgan.codebook.codebook_size
+def load_model(args, device):
+    model = OmniTokenizer_VQGAN(args)
+    checkpoint = torch.load(args.vqgan_ckpt, map_location="cpu")
+    if "state_dict" not in checkpoint:
+        raise ValueError(f"{args.vqgan_ckpt}: missing state_dict")
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    model.to(device).eval()
+    return model
 
-vqgan.codebook._need_init = False
-vqgan.train = disabled_train
-vqgan.to(device).eval()
 
-save_dir = '%s/%s'%(args.save, args.dataset)
-print('generating and saving video to %s...'%save_dir)
-os.makedirs(save_dir, exist_ok=True)
-
-data = VideoData(args)
-
-if args.train:
-    loader = data.train_dataloader()[0]
-else:
+def selected_loader(data, split):
+    if split == "train":
+        loaders = data.train_dataloader()
+        if len(loaders) != 1:
+            raise RuntimeError("Stereo evaluation expects one training loader")
+        return loaders[0]
     loader = data.val_dataloader()
+    if loader is None:
+        raise RuntimeError("validation loader is unavailable")
+    return loader
 
 
-use_vae = vqgan.use_vae
-
-if args.inference_type == "video":
-    i3d = load_fvd_model(device)
-
-    os.makedirs(os.path.join(save_dir, "gt"), exist_ok=True)
-    os.makedirs(os.path.join(save_dir, "recons"), exist_ok=True)
-
-    real_embeddings = []
-    fake_embeddings = []
-
-    total_usage = torch.zeros(num_codes).to(device)
-
-    print('computing fvd embeddings for real/fake videos')
-    i = 0
-    for batch in tqdm(loader):
-        with torch.no_grad():
-            input_ = batch['video'] # B C T H W
-            B = input_.shape[0]
-            _, _, x, x_recons, vq_output = vqgan(input_.to(device), log_image=True)
-
-            if args.infer_downsample is not None:
-                real_videos = batch['video'] + 0.5
-                fake_videos = torch.clamp(x_recons.detach().cpu()+0.5, 0, 1)
-                B, C, T, H, W = real_videos.shape
-                real_videos = rearrange(real_videos, "b c t h w -> (b t) c h w")
-                fake_videos = rearrange(fake_videos, "b c t h w -> (b t) c h w")
-                real_videos = F.interpolate(
-                    real_videos, scale_factor=1/args.infer_downsample, mode="bilinear", align_corners=False
-                )
-                fake_videos = F.interpolate(
-                    fake_videos, scale_factor=1/args.infer_downsample, mode="bilinear", align_corners=False
-                )
-
-                real_videos = rearrange(real_videos, "(b t) c h w -> b c t h w", b=B)
-                fake_videos = rearrange(fake_videos, "(b t) c h w -> b c t h w", b=B)
-                
-            else:
-                real_videos = batch['video'] + 0.5
-                fake_videos = torch.clamp(x_recons.detach().cpu()+0.5, 0, 1)
-
-            
-            if args.replacewithgt is not None:
-                # B C T H W
-                fake_videos = torch.cat((real_videos[:, :, :args.replacewithgt], fake_videos[:, :, args.replacewithgt:]), dim=2)
-                assert fake_videos.shape[2] == args.sequence_length
-
-            real_embeddings.append(get_fvd_logits(shift_dim(real_videos * 255, 1, -1).byte().data.numpy(), i3d=i3d, device=device))
-            fake_embeddings.append(get_fvd_logits(shift_dim(fake_videos * 255, 1, -1).byte().data.numpy(), i3d=i3d, device=device))
-        
-
-        if not use_vae:
-            batch_codebook_usage = vq_output["batch_usage"]
-            total_usage += batch_codebook_usage
-
-        if args.save_videos:
-            save_video_grid(fake_videos, os.path.join(save_dir, "recons", f'{args.dataset}_{i}.gif'), n_row)
-            save_video_grid(real_videos, os.path.join(save_dir, "gt", f'{args.dataset}_{i}.gif'), n_row)
-        
-        i += 1
-        
-    print('caoncat fvd embeddings for real videos')
-    real_embeddings = torch.cat(real_embeddings, 0)
-    print('caoncat fvd embeddings for fake videos')
-    fake_embeddings = torch.cat(fake_embeddings, 0)
-
-    print('FVD = %.2f'%(frechet_distance(fake_embeddings, real_embeddings)))
-    print('Usage = %.2f'%((total_usage > 0.).sum() / num_codes))
+def empty_accumulator(device):
+    return {
+        "sample_count": torch.zeros((), dtype=torch.long, device=device),
+        "rgb_abs_sum": torch.zeros((), dtype=torch.float64, device=device),
+        "rgb_count": torch.zeros((), dtype=torch.long, device=device),
+        "disp_abs_sum": torch.zeros(3, dtype=torch.float64, device=device),
+        "valid_count": torch.zeros(3, dtype=torch.long, device=device),
+        "depth_abs_rel_sum": torch.zeros(3, dtype=torch.float64, device=device),
+        "depth_sq_sum": torch.zeros(3, dtype=torch.float64, device=device),
+    }
 
 
-else:
-    total_usage = torch.zeros(num_codes).to(device)
-    total_counts = torch.zeros(num_codes)
+def update_metrics(accumulator, batch, output):
+    rgb_target = batch["video"][:, :, 0]
+    rgb_error = (output.rgb - rgb_target).abs()
+    accumulator["sample_count"] += rgb_target.shape[0]
+    accumulator["rgb_abs_sum"] += rgb_error.double().sum()
+    accumulator["rgb_count"] += rgb_error.numel()
 
-    inception_model = inception_v3(pretrained=True, transform_input=False).to(device)
-    inception_model.eval()
-    up = nn.Upsample(size=(299, 299), mode='bilinear').to(device)
-    def get_pred(x, resize=True):
-        if resize:
-            x = up(x)
-        x = inception_model(x)
-        return F.softmax(x).data.cpu().numpy()
-    
+    disparity_target = batch["disparity"]
+    valid = batch["valid_mask"]
+    disparity_error = (output.disparity - disparity_target).abs()
+    reduction_dims = (0, 2, 3, 4, 5)
+    accumulator["disp_abs_sum"] += (
+        disparity_error.double().masked_fill(~valid, 0).sum(dim=reduction_dims)
+    )
+    accumulator["valid_count"] += valid.sum(dim=reduction_dims)
 
-    i = 0
-    for batch in tqdm(loader):
-        with torch.no_grad():
-            _, _, x, x_recons, vq_output = vqgan(batch['video'].to(device), log_image=True)
-        # fake_embeddings.append(get_fvd_logits(shift_dim((x_recons.detach().cpu()+0.5)*255, 1, -1).byte().data.numpy(), i3d=i3d, device=device))
-        
-        if not use_vae:
-            encoding_indices = vq_output["encodings"].detach().cpu()
-            code_counts = calculate_batch_codebook_usage_percentage(encoding_indices, num_codes)
-            total_counts += code_counts
+    calibration = (batch["fx"] * batch["baseline_m"]).reshape(
+        batch["fx"].shape[0], 3, 1, 1, 1, 1
+    )
+    target_depth = calibration / disparity_target
+    predicted_depth = calibration / output.disparity
+    depth_error = predicted_depth - target_depth
+    accumulator["depth_abs_rel_sum"] += (
+        (depth_error.abs() / target_depth)
+        .double()
+        .masked_fill(~valid, 0)
+        .sum(dim=reduction_dims)
+    )
+    accumulator["depth_sq_sum"] += (
+        depth_error.square()
+        .double()
+        .masked_fill(~valid, 0)
+        .sum(dim=reduction_dims)
+    )
 
-            batch_codebook_usage = vq_output["batch_usage"]
-            total_usage += batch_codebook_usage
-        
-        paths = batch["path"]
-        assert len(paths) == x.shape[0]
 
-        for p, input_, recon_ in zip(paths, x, x_recons):
-            path = os.path.join(save_dir, "input", p)
-            os.makedirs(os.path.split(path)[0], exist_ok=True)
-            input_ = input_.permute(1, 2, 0).detach().cpu()
-            input_ = ((input_ + 0.5).numpy() * 255).astype(np.uint8)
-            img = Image.fromarray(input_)
-            if args.infer_downsample is not None:
-                img = img.resize((args.resolution // args.infer_downsample, args.resolution // args.infer_downsample), Image.ANTIALIAS)
-            
-            img.save(path)
+def finalize_metrics(accumulator):
+    if accumulator["sample_count"].item() == 0:
+        raise ValueError("evaluation loader produced no samples")
+    if torch.any(accumulator["valid_count"] == 0):
+        raise ValueError("at least one view has no valid disparity pixels")
+    valid_count = accumulator["valid_count"].double()
+    result = {
+        "sample_count": int(accumulator["sample_count"].item()),
+        "rgb_l1": float(
+            (accumulator["rgb_abs_sum"] / accumulator["rgb_count"]).item()
+        ),
+        "views": {},
+    }
+    for view_index, view_name in enumerate(VIEW_NAMES):
+        result["views"][view_name] = {
+            "valid_pixels": int(accumulator["valid_count"][view_index].item()),
+            "disparity_epe_px": float(
+                (accumulator["disp_abs_sum"][view_index] / valid_count[view_index]).item()
+            ),
+            "depth_abs_rel": float(
+                (
+                    accumulator["depth_abs_rel_sum"][view_index]
+                    / valid_count[view_index]
+                ).item()
+            ),
+            "depth_rmse_m": float(
+                torch.sqrt(
+                    accumulator["depth_sq_sum"][view_index]
+                    / valid_count[view_index]
+                ).item()
+            ),
+        }
+    return result
 
-            path = os.path.join(save_dir, "recon", p)
-            os.makedirs(os.path.split(path)[0], exist_ok=True)
-            recon_ = recon_.permute(1, 2, 0).detach().cpu()
-            recon_ = (torch.clamp((recon_ + 0.5), 0, 1).numpy() * 255).astype(np.uint8)
-            
-            rec = Image.fromarray(recon_)
-            if args.infer_downsample is not None:
-                rec = rec.resize((args.resolution // args.infer_downsample, args.resolution // args.infer_downsample), Image.ANTIALIAS)
-            rec.save(path)
-        
-        i += 1
-    
-    
-    if "imagenet" in args.train_datalist[0]:
-        os.system(
-            f"python3 evaluation/pytorch-fid/src/pytorch_fid/__main__.py {os.path.join(save_dir, 'input', 'val')} {os.path.join(save_dir, 'recon', 'val')}"
-        )
-    elif "celebahq" in args.train_datalist[0]:
-        os.system(
-            f"python3 evaluation/pytorch-fid/src/pytorch_fid/__main__.py {os.path.join(save_dir, 'input/CelebAMask-HQ/CelebA-HQ-img')} {os.path.join(save_dir, 'recon/CelebAMask-HQ/CelebA-HQ-img')}"
-        )
-    elif "ffhq" in args.train_datalist[0]:
-        os.system(
-            f"python3 evaluation/pytorch-fid/src/pytorch_fid/__main__.py {os.path.join(save_dir, 'input', 'val')} {os.path.join(save_dir, 'recon', 'val')}"
-        )
-    
-    print('Usage = %.2f'%((total_usage > 0.).sum() / num_codes))
+
+def main():
+    args = build_parser().parse_args()
+    validate_args(args)
+    device = torch.device(args.device)
+    model = load_model(args, device)
+    loader = selected_loader(VideoData(args, shuffle=False), args.eval_split)
+    accumulator = empty_accumulator(device)
+
+    with torch.inference_mode():
+        for batch_index, batch in enumerate(tqdm(loader)):
+            if args.max_batches is not None and batch_index >= args.max_batches:
+                break
+            tensor_batch = {
+                key: value.to(device, non_blocking=True)
+                if isinstance(value, torch.Tensor)
+                else value
+                for key, value in batch.items()
+            }
+            output = model(
+                tensor_batch["video"],
+                sample_posterior=False,
+            )
+            update_metrics(accumulator, tensor_batch, output)
+
+    result = {
+        "checkpoint": str(args.vqgan_ckpt.expanduser().resolve()),
+        "split": args.eval_split,
+        "posterior": "mean",
+        "metrics": finalize_metrics(accumulator),
+    }
+    if args.output_json.exists():
+        raise FileExistsError(f"refusing to overwrite {args.output_json}")
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    args.output_json.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
