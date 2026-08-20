@@ -41,3 +41,13 @@
 ## 当前结论与下一步
 
 代码已完成本地静态审查。下一步是在具备项目 PyTorch 依赖的环境运行全部 `tests/stereo/` 动态测试；通过后再进入另行授权的 smoke-32、overfit-128 与 Loss calibration。任何 H200 运行均不在本次授权范围内。
+
+## 原主链路迁移进度
+
+### 模块 1：StereoFusion
+
+- 状态：已实现，等待用户审核与提交。
+- 唯一实现迁入 `OmniTokenizer/modules/stereo_fusion.py`；它现在属于原仓库的网络组件层，不再由旁路 tokenizer 定义。
+- `OmniTokenizer/stereo/fusion.py` 暂时只做兼容转发，保证逐模块迁移期间现有分支仍可导入；完成原主链路接入后将单独删除。
+- `tests/stereo/test_fusion.py` 已改为直接测试原仓库 modules 路径。
+- 本地仅执行 AST、字节码编译和源码边界检查；Torch 动态测试按约定留到 H200。
