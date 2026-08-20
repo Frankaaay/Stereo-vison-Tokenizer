@@ -11,8 +11,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("inflate_gen", source)
         self.assertNotIn("inflate_dis", source)
         self.assertNotIn("os.listdir", source)
-        self.assertIn('"limit_val_batches": 1.0 if has_validation else 0', source)
-        self.assertIn('"check_val_every_n_epoch": 1', source)
+        self.assertIn("limit_val_batches=1.0 if has_validation else 0", source)
+        self.assertIn("check_val_every_n_epoch=1", source)
 
     def test_evaluation_is_deterministic_and_strict(self):
         source = (ROOT / "vqgan_eval.py").read_text(encoding="utf-8")

@@ -180,3 +180,4 @@
 - `scripts/recons/train.sh` 将旧 `--gpus` 参数改为 `--devices`，仍由 `GPU_COUNT` 控制单节点可见设备数。
 - `OmniTokenizer/modules/callbacks.py` 更新 `rank_zero_only` 导入和 batch-end hook 签名；本地图像与视频写到 `trainer.default_root_dir`，不再依赖 WandB logger。禁用 WandB 时不构造要求 logger 存在的 `LearningRateMonitor`。
 - `tests/stereo/test_source_boundary.py` 新增无 Torch 静态回归，约束不得重新引入 Lightning 1.x Trainer API、旧 `--gpus` 参数、旧 hook 签名或 `pl_module.logger.save_dir`。
+- H200 首轮完整测试发现 `tests/stereo/test_entrypoints_source.py` 仍匹配旧 `trainer_overrides` 字典文本；测试合同已改为检查 Lightning 2.5 `Trainer(...)` 的等价显式关键字，不为满足旧字符串格式回改生产代码。
