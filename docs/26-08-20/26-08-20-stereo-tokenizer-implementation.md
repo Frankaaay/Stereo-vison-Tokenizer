@@ -2,11 +2,11 @@
 
 ## 状态
 
-本地实现与可用静态验证已完成。本记录对应本地 `frank` 分支，基线 commit 为 `701b619003b3e941e769269c7626dbf111d0377e`；实现 commit 为包含本记录的当前提交，精确 SHA 在提交后由 Git 确定并在同步记录中引用。未创建 worktree，也未连接 H200 或启动训练。
+原主链路迁移正在按模块提交。本记录对应本地 `frank` 分支，基线 commit 为 `701b619003b3e941e769269c7626dbf111d0377e`。未创建 worktree，也未连接 H200 或启动训练。
 
 ## 目的
 
-实现第一版结构化 `T=4` StereoTokenizer：逐帧共享 Spatial Encoder、StereoFusion 后 `4→1` temporal reduction、48-channel VAE posterior、无 anchor 的 `1 slot→4 frames` Decoder，以及 RGB/disparity/gradient/KL/LPIPS/GAN 训练合同。原 `OmniTokenizer` legacy image-mode 保留，Tokenizer 不实现下游 DiT patchify/unpatchify。
+实现第一版结构化 `T=4` StereoTokenizer：逐帧共享 Spatial Encoder、StereoFusion 后 `4→1` temporal reduction、48-channel VAE posterior、无 anchor 的 `1 slot→4 frames` Decoder，以及 RGB/disparity/gradient/KL/LPIPS/GAN 训练合同。原主类改为 Stereo-only，不保留 legacy image-mode；Tokenizer 不实现下游 DiT patchify/unpatchify。
 
 ## 数据与配置合同
 
@@ -84,3 +84,12 @@
 - 输入严格为每视角一个 latent slot；共享 Decoder 主干后才分成 RGB 与 disparity 两个线性投影，并分别展开为四帧。
 - disparity 使用 resolved per-view scale、`softplus+epsilon` 和 resolved raw bias；不增加独立 Depth Head。
 - 新增双 Head shape、bias、正值与 shared-backward 测试；Torch 动态执行留到 H200。
+
+### 模块 6：Stereo-only VAE 主类与训练核心
+
+- 状态：已实现，待独立提交。
+- 原 `OmniTokenizer/omnitokenizer.py::VQGAN` 已直接改为结构化 Stereo-only VAE；删除主类中的 VQ codebook、legacy image/video 分支和旧 checkpoint inflation 假设。
+- Encoder 输出经原位置的 `pre_vq_conv` 产生 48-channel 对角高斯 posterior；训练默认 sample，验证、评估和日志默认使用 posterior mean。
+- Decoder 输入严格为 `[B,3,48,1,H',W']`，输出 RGB 与 disparity；主损失显式组合 RGB、normalized disparity、pixel-gradient 与 KL，并保留独立 LPIPS/GAN gate。
+- 所有未完成 calibration 的 loss 权重均为必填 CLI 参数，没有在主类内猜测默认值；GAN 第一阶段可通过 `--gan_enabled` 显式关闭。
+- 新增主类结构化 forward、确定性 eval、backward 与无 codebook/legacy 入口测试；Torch 动态执行留到 H200。

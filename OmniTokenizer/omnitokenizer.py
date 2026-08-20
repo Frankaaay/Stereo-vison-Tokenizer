@@ -1,22 +1,25 @@
+from __future__ import annotations
+
 import math
 import argparse
-import random
 from dataclasses import dataclass
 from typing import Literal, Optional
-import numpy as np
-from PIL import Image
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat, pack, unpack
+from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import trunc_normal_
-from .quantizer.vector_quantize_pytorch import VectorQuantize
-from .utils import shift_dim, adopt_weight
-from .modules import LPIPS, Codebook, StereoFusion, StereoFusionOutput
+from .modules import (
+    LPIPS,
+    StereoFusion,
+    StereoFusionOutput,
+    StereoLossBreakdown,
+    StereoReconstructionKLLoss,
+)
 from .modules.attention import Transformer
 from .base import Normalize, NLayerDiscriminator, NLayerDiscriminator3D
 from .modules.vae import DiagonalGaussianDistribution
@@ -62,714 +65,843 @@ def vanilla_d_loss(logits_real, logits_fake):
     return d_loss
 
 
+@dataclass
+class StructuredDiagonalGaussianPosterior:
+    """VAE posterior that preserves the explicit batch/view axes."""
+
+    distribution: DiagonalGaussianDistribution
+    batch_size: int
+    views: int
+
+    def _structured(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.shape[0] != self.batch_size * self.views:
+            raise RuntimeError("posterior batch no longer matches batch/view contract")
+        return rearrange(
+            tensor,
+            "(b v) c t h w -> b v c t h w",
+            b=self.batch_size,
+            v=self.views,
+        )
+
+    @property
+    def mean(self) -> torch.Tensor:
+        return self._structured(self.distribution.mean)
+
+    @property
+    def logvar(self) -> torch.Tensor:
+        return self._structured(self.distribution.logvar)
+
+    def sample(self) -> torch.Tensor:
+        return self._structured(self.distribution.sample())
+
+    def mode(self) -> torch.Tensor:
+        return self._structured(self.distribution.mode())
+
+    def kl(self) -> torch.Tensor:
+        return rearrange(
+            self.distribution.kl(),
+            "(b v) -> b v",
+            b=self.batch_size,
+            v=self.views,
+        )
+
+
+@dataclass
+class StereoEncodeOutput:
+    latent: torch.Tensor
+    posterior: StructuredDiagonalGaussianPosterior
+    fusion: Optional[StereoFusionOutput]
+
+
+@dataclass
+class StereoTokenizerOutput:
+    rgb: torch.Tensor
+    disparity: torch.Tensor
+    normalized_disparity: torch.Tensor
+    latent: torch.Tensor
+    posterior: StructuredDiagonalGaussianPosterior
+    fusion: Optional[StereoFusionOutput]
+
+
+@dataclass
+class StereoCoreLossOutput:
+    model: StereoTokenizerOutput
+    loss: StereoLossBreakdown
+    normalized_disparity_target: torch.Tensor
+    effective_kl_weight: float
+
+
 class VQGAN(pl.LightningModule):
+    """Stereo-only OmniTokenizer VAE built on the original Transformer trunk."""
+
     def __init__(self, args):
         super().__init__()
         self.args = args
+        self._validate_configuration(args)
+
         self.embedding_dim = args.embedding_dim
-        self.n_codes = args.n_codes
-        
-        if not hasattr(args, 'enc_block'):
-            args.enc_block = 't' * args.spatial_depth
-        
-        if not hasattr(args, 'dec_block'):
-            args.dec_block = 't' * args.spatial_depth
-        
-        if not hasattr(args, 'twod_window_size'):
-            args.twod_window_size = 4
-
-        if not hasattr(args, 'defer_temporal_pool'):
-            args.defer_temporal_pool = False
-            args.defer_spatial_pool = False
-        
-        if not hasattr(args, "spatial_pos"):
-            args.spatial_pos = "rel"
-
-        if not hasattr(args, "logitslaplace_weight"):
-            args.logitslaplace_weight = 0.
-        
-        self.logitslaplace_weight = args.logitslaplace_weight
-
-        if not hasattr(args, "gen_upscale"):
-            args.gen_upscale = None
-
-        self.gen_upscale = args.gen_upscale
-
-        if not hasattr(args, "initialize_vit"):
-            args.initialize_vit = False
-        
-
-
+        self.latent_channels = args.codebook_dim
+        self.stereo_num_views = args.stereo_num_views
+        self.stereo_num_frames = args.stereo_num_frames
+        self.stereo_mode = args.stereo_mode
         self.resolution = args.resolution
         self.patch_size = args.patch_size
-        
+
         self.encoder = OmniTokenizer_Encoder(
-            image_size = args.resolution, image_channel=args.image_channels, norm_type=args.norm_type, 
-            block=args.enc_block, window_size=args.twod_window_size, spatial_pos=args.spatial_pos,
-            patch_embed = args.patch_embed, patch_size = args.patch_size, temporal_patch_size= args.temporal_patch_size, defer_temporal_pool=args.defer_temporal_pool, defer_spatial_pool=args.defer_spatial_pool,
-            spatial_depth=args.spatial_depth, temporal_depth=args.temporal_depth, causal_in_temporal_transformer=args.causal_in_temporal_transformer, causal_in_peg=args.causal_in_peg, 
-            dim = args.embedding_dim, dim_head=args.dim_head, heads=args.heads, attn_dropout=args.attn_dropout, ff_dropout=args.ff_dropout, ff_mult=args.ff_mult,
-            initialize=args.initialize_vit, sequence_length=args.sequence_length,
+            image_size=args.resolution,
+            image_channel=args.image_channels,
+            norm_type=args.norm_type,
+            block=args.enc_block,
+            window_size=args.twod_window_size,
+            spatial_pos=args.spatial_pos,
+            patch_embed=args.patch_embed,
+            patch_size=args.patch_size,
+            temporal_patch_size=args.temporal_patch_size,
+            defer_temporal_pool=args.defer_temporal_pool,
+            defer_spatial_pool=args.defer_spatial_pool,
+            spatial_depth=args.spatial_depth,
+            temporal_depth=args.temporal_depth,
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
+            causal_in_peg=args.causal_in_peg,
+            dim=args.embedding_dim,
+            dim_head=args.dim_head,
+            heads=args.heads,
+            attn_dropout=args.attn_dropout,
+            ff_dropout=args.ff_dropout,
+            ff_mult=args.ff_mult,
+            initialize=args.initialize_vit,
+            sequence_length=args.stereo_num_frames,
+            stereo_num_views=args.stereo_num_views,
+            stereo_num_frames=args.stereo_num_frames,
+            stereo_search_radii=tuple(args.stereo_search_radii),
+            stereo_search_direction=args.stereo_search_direction,
         )
-        
         self.decoder = OmniTokenizer_Decoder(
-            image_size = args.resolution, image_channel=args.image_channels, norm_type=args.norm_type, block=args.dec_block, window_size=args.twod_window_size, spatial_pos=args.spatial_pos,
-            patch_embed = args.patch_embed, patch_size = args.patch_size, temporal_patch_size= args.temporal_patch_size, defer_temporal_pool=args.defer_temporal_pool, defer_spatial_pool=args.defer_spatial_pool,
-            spatial_depth=len(args.dec_block), temporal_depth=args.temporal_depth, causal_in_temporal_transformer=args.causal_in_temporal_transformer, causal_in_peg=args.causal_in_peg, 
-            dim = args.embedding_dim, dim_head=args.dim_head, heads=args.heads, attn_dropout=args.attn_dropout, ff_dropout=args.ff_dropout, ff_mult=args.ff_mult, gen_upscale=args.gen_upscale, 
-            initialize=args.initialize_vit, sequence_length=args.sequence_length,
+            image_size=args.resolution,
+            image_channel=args.image_channels,
+            norm_type=args.norm_type,
+            block=args.dec_block,
+            window_size=args.twod_window_size,
+            spatial_pos=args.spatial_pos,
+            patch_embed=args.patch_embed,
+            patch_size=args.patch_size,
+            temporal_patch_size=args.temporal_patch_size,
+            defer_temporal_pool=args.defer_temporal_pool,
+            defer_spatial_pool=args.defer_spatial_pool,
+            spatial_depth=args.spatial_depth,
+            temporal_depth=args.temporal_depth,
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
+            causal_in_peg=args.causal_in_peg,
+            dim=args.embedding_dim,
+            dim_head=args.dim_head,
+            heads=args.heads,
+            attn_dropout=args.attn_dropout,
+            ff_dropout=args.ff_dropout,
+            ff_mult=args.ff_mult,
+            gen_upscale=None,
+            initialize=args.initialize_vit,
+            sequence_length=1,
+            stereo_num_views=args.stereo_num_views,
+            stereo_num_frames=args.stereo_num_frames,
+            stereo_disparity_scale=tuple(args.stereo_disparity_scale),
+            stereo_disparity_bias=args.stereo_disparity_bias,
+            stereo_disparity_epsilon=args.stereo_disparity_epsilon,
+        )
+        self.pre_vq_conv = nn.Sequential(
+            Rearrange("b c t h w -> b t h w c"),
+            nn.Linear(args.embedding_dim, 2 * args.codebook_dim),
+            Rearrange("b t h w c -> b c t h w"),
+        )
+        self.post_vq_conv = nn.Sequential(
+            Rearrange("b c t h w -> b t h w c"),
+            nn.Linear(args.codebook_dim, args.embedding_dim),
+            Rearrange("b t h w c -> b c t h w"),
         )
 
-        if not hasattr(args, "use_vae"):
-            args.use_vae = False
-        
-        if not hasattr(args, "kl_weight"):
-            args.kl_weight = 0.000001
-        
-
-        self.use_vae = args.use_vae
+        self.core_objective = StereoReconstructionKLLoss(
+            rgb_weight=args.rgb_weight,
+            disparity_weight=args.disparity_weight,
+            gradient_weight=args.gradient_weight,
+            kl_weight=args.kl_weight,
+            smooth_l1_beta=args.smooth_l1_beta,
+            rgb_loss_type=args.recon_loss_type,
+        )
         self.kl_weight = args.kl_weight
-
-        if args.use_external_codebook:
-            if args.codebook_type == 'vq':
-                self.codebook = VectorQuantize(
-                    accept_image_fmap=True, dim=args.embedding_dim, codebook_size=args.n_codes, use_cosine_sim=args.l2_code, commitment_weight=args.commitment_weight, codebook_dim=args.codebook_dim
-                )
-                self.pre_vq_conv = nn.Identity()
-                self.post_vq_conv = nn.Identity()
-
-            else:
-                raise NotImplementedError
-        else:
-            self.codebook = Codebook(args.n_codes, args.codebook_dim, no_random_restart=args.no_random_restart, restart_thres=args.restart_thres)
-            if not self.use_vae:
-                self.pre_vq_conv = nn.Sequential(
-                    Rearrange("b c t h w -> b t h w c"),
-                    nn.Linear(args.embedding_dim, args.codebook_dim),
-                    Rearrange("b t h w c -> b c t h w")
-                )
-            else:
-                self.pre_vq_conv = nn.Sequential(
-                    Rearrange("b c t h w -> b t h w c"),
-                    nn.Linear(args.embedding_dim, args.codebook_dim * 2),
-                    Rearrange("b t h w c -> b c t h w")
-                )
-
-            self.post_vq_conv = nn.Sequential(
-                Rearrange("b c t h w -> b t h w c"),
-                nn.Linear(args.codebook_dim, args.embedding_dim),
-                Rearrange("b t h w c -> b c t h w")
-            )
-
-        self.use_external_codebook = args.use_external_codebook
-        self.l2_code = args.l2_code
-        self.apply_allframes = args.apply_allframes
-
-        self.gan_feat_weight = args.gan_feat_weight
-
-        if not hasattr(args, "apply_diffaug"):
-            args.apply_diffaug = False
-
-        if not hasattr(args, "apply_noise"):
-            args.apply_noise = False
-        
-        if not hasattr(args, "apply_blur"):
-            args.apply_blur = False
-        
-        # input_nc, ndf=64, n_layers=3, norm_type="batch", use_sigmoid=False, getIntermFeat=True, activation="leaky_relu", apply_blur=False, apply_noise=False
-        if not hasattr(args, "sigmoid_in_disc"):
-            args.sigmoid_in_disc = False
-        
-        if not hasattr(args, "activation_in_disc"):
-            args.activation_in_disc = "leaky_relu"
-        
-        self.image_discriminator = NLayerDiscriminator(args.image_channels, args.disc_channels, args.disc_layers, args.norm_type, use_sigmoid=args.sigmoid_in_disc, activation=args.activation_in_disc, apply_blur=args.apply_blur, apply_noise=args.apply_noise)
-        self.video_discriminator = NLayerDiscriminator3D(args.image_channels, args.disc_channels, args.disc_layers, args.norm_type, use_sigmoid=args.sigmoid_in_disc, activation=args.activation_in_disc, apply_blur=args.apply_blur, apply_noise=args.apply_noise)
-        
-
-        if args.disc_loss_type == 'vanilla':
-            self.disc_loss = vanilla_d_loss
-        elif args.disc_loss_type == 'hinge':
-            self.disc_loss = hinge_d_loss
-
-        self.perceptual_model = LPIPS().eval()
-        # self.video_perceptual_model = load_i3d_perceptual().eval()
-
+        self.kl_warmup_steps = args.kl_warmup_steps
+        self.geometry_gradient_scale_px = args.geometry_gradient_scale_px
+        self.perceptual_weight = args.perceptual_weight
+        self.gan_enabled = args.gan_enabled
         self.image_gan_weight = args.image_gan_weight
         self.video_gan_weight = args.video_gan_weight
+        self.gan_feat_weight = args.gan_feat_weight
+        self.apply_diffaug = args.apply_diffaug
 
-        self.perceptual_weight = args.perceptual_weight
+        if self.perceptual_weight > 0:
+            self.perceptual_model = LPIPS().eval()
+            self.perceptual_model.requires_grad_(False)
+        else:
+            self.perceptual_model = None
 
-        if not hasattr(args, "video_perceptual_weight"):
-            args.video_perceptual_weight = 0.
-
-        self.video_perceptual_weight = args.video_perceptual_weight
-
-        self.recon_loss_type = args.recon_loss_type
-        self.l1_weight = args.l1_weight
-        self.save_hyperparameters()
+        if self.gan_enabled:
+            discriminator_kwargs = dict(
+                input_nc=args.image_channels,
+                ndf=args.disc_channels,
+                n_layers=args.disc_layers,
+                norm_type=args.norm_type,
+                use_sigmoid=args.sigmoid_in_disc,
+                activation=args.activation_in_disc,
+                apply_blur=args.apply_blur,
+                apply_noise=args.apply_noise,
+            )
+            self.image_discriminator = NLayerDiscriminator(**discriminator_kwargs)
+            self.video_discriminator = NLayerDiscriminator3D(
+                **discriminator_kwargs
+            )
+            self.disc_loss = (
+                vanilla_d_loss
+                if args.disc_loss_type == "vanilla"
+                else hinge_d_loss
+            )
+        else:
+            self.image_discriminator = None
+            self.video_discriminator = None
+            self.disc_loss = None
 
         self.automatic_optimization = False
         self.grad_accumulates = args.grad_accumulates
         self.grad_clip_val = args.grad_clip_val
-
-        if not hasattr(args, "grad_clip_val_disc"):
-            args.grad_clip_val_disc = 1.0
-        
         self.grad_clip_val_disc = args.grad_clip_val_disc
-        
-        if not hasattr(args, "disloss_check_thres"):
-            args.disloss_check_thres = None
-        
-        if not hasattr(args, "perloss_check_thres"):
-            args.perloss_check_thres = None
-        
-        if not hasattr(args, "recloss_check_thres"):
-            args.recloss_check_thres = None
+        self._micro_step = 0
+        self.save_hyperparameters(vars(args))
 
-        self.apply_diffaug = args.apply_diffaug
-        
-        self.disloss_check_thres = args.disloss_check_thres
-        self.perloss_check_thres = args.perloss_check_thres
-        self.recloss_check_thres = args.recloss_check_thres
+    @staticmethod
+    def _validate_configuration(args) -> None:
+        if args.image_channels != 3:
+            raise ValueError("Stereo OmniTokenizer requires image_channels=3")
+        if args.stereo_num_views != 3:
+            raise ValueError("Stereo OmniTokenizer requires exactly three views")
+        if args.stereo_num_frames != 4:
+            raise ValueError("Stereo OmniTokenizer requires exactly four frames")
+        if args.codebook_dim != 48:
+            raise ValueError("Stereo OmniTokenizer latent_channels must be 48")
+        if args.patch_embed != "linear":
+            raise ValueError("Stereo OmniTokenizer requires linear patch embedding")
+        if args.defer_temporal_pool or args.defer_spatial_pool:
+            raise ValueError("Stereo OmniTokenizer does not use deferred pooling")
+        if len(args.enc_block) != args.spatial_depth:
+            raise ValueError("enc_block length must equal spatial_depth")
+        if len(args.dec_block) != args.spatial_depth:
+            raise ValueError("dec_block length must equal spatial_depth")
+        if len(args.stereo_search_radii) != args.stereo_num_views:
+            raise ValueError("one stereo search radius is required per view")
+        if len(args.stereo_disparity_scale) != args.stereo_num_views:
+            raise ValueError("one disparity scale is required per view")
+        explicit_nonnegative = (
+            "rgb_weight",
+            "disparity_weight",
+            "gradient_weight",
+            "kl_weight",
+            "perceptual_weight",
+            "image_gan_weight",
+            "video_gan_weight",
+            "gan_feat_weight",
+        )
+        for name in explicit_nonnegative:
+            value = getattr(args, name)
+            if value is None or value < 0:
+                raise ValueError(f"{name} must be explicitly set and non-negative")
+        if args.geometry_gradient_scale_px <= 0:
+            raise ValueError("geometry_gradient_scale_px must be positive")
+        if args.grad_accumulates <= 0:
+            raise ValueError("grad_accumulates must be positive")
+        if args.gan_enabled and (
+            args.image_gan_weight == 0 and args.video_gan_weight == 0
+        ):
+            raise ValueError("GAN is enabled but both GAN weights are zero")
 
-
-        if not hasattr(args, "resolution_scale"):
-            args.resolution_scale = None
-        
-        self.resolution_scale = args.resolution_scale
-        
     @property
     def latent_shape(self):
-        input_shape = (self.args.sequence_length//self.args.sample_every_n_frames, self.args.resolution,
-                       self.args.resolution)
-        return tuple([s // d for s, d in zip(input_shape,
-                                             self.args.downsample)])
+        height = self.resolution // self.patch_size
+        width = self.resolution // self.patch_size
+        return (
+            self.stereo_num_views,
+            self.latent_channels,
+            1,
+            height,
+            width,
+        )
 
-    def encode(self, x, is_image, include_embeddings=False):
-        h = self.pre_vq_conv(self.encoder(x, is_image))
+    @staticmethod
+    def _flatten_view_videos(video: torch.Tensor) -> torch.Tensor:
+        return rearrange(video, "b v c t h w -> (b v) c t h w")
 
-        if not self.use_vae:
-            if self.l2_code and not self.use_external_codebook:
-                h = F.normalize(h, p=2, dim=1)
-            
-            vq_output = self.codebook(h)
-            if include_embeddings:
-                return vq_output['embeddings'], vq_output['encodings']
-            else:
-                return vq_output['encodings']
-        
-        else:
-            posterior = DiagonalGaussianDistribution(h)
-            z = posterior.sample()
-            if is_image:
-                return z.squeeze(2) # b c t h w -> b c h w
-            else:
-                return z
-    
-    def decode(self, encodings, is_image):
-        if not self.use_vae:
-            z = F.embedding(encodings, self.codebook.embeddings)
-            if is_image:
-                if z.ndim == 3:
-                    hw = z.shape[1]
-                    h = int(math.sqrt(hw))
-                    z = rearrange(z, "b (h w) c -> b c 1 h w", h=h)
-                
-                else:
-                    z = rearrange(z, "b t h w c -> b c t h w")
-                
-                z = self.post_vq_conv(z)
-            
-            else:
-                if z.ndim == 3:
-                    h = self.resolution // self.patch_size
-                    w = h
-                    z = rearrange(z, "b (t h w) c -> b c t h w", h=h, w=w)
-                else:
-                    z = rearrange(z, "b t h w c -> b c t h w")
-                
-                z = self.post_vq_conv(z)
-            
-            return self.decoder(z, is_image)
-        else:
-            z = encodings
+    @staticmethod
+    def _flatten_view_frames(video: torch.Tensor) -> torch.Tensor:
+        return rearrange(video, "b v c t h w -> (b v t) c h w")
 
-            if is_image:
-                if z.ndim == 3:
-                    hw = z.shape[1]
-                    h = int(math.sqrt(hw))
-                    z = rearrange(z, "b (h w) c -> b c 1 h w", h=h)
-                
-                else:
-                    z = rearrange(z, "b c h w -> b c 1 h w")
-                
-                z = self.post_vq_conv(z)
-            
-            else:
-                if z.ndim == 3:
-                    h = self.resolution // self.patch_size
-                    w = h
-                    z = rearrange(z, "b (t h w) c -> b c t h w", h=h, w=w)
-                else:
-                    z = rearrange(z, "b t h w c -> b c t h w")
-                
-                z = self.post_vq_conv(z)
-            
-            return self.decoder(z, is_image)
-        
-        
-    
-    def prepare_video_4_log(self, video_recons):
-        _, C, _, H, _ = video_recons.shape
-        video_recons = video_recons[0].detach().cpu() # C, T, H, W
-        video_recons = video_recons.permute(2, 1, 3, 0).contiguous().view(H, -1, C).numpy()
-        video_recons = video_recons * 0.5 + 0.5
-        video_pil = Image.fromarray(np.clip(video_recons * 255.0, 0, 255.0).astype('uint8'))
-        return video_pil
+    @staticmethod
+    def _unwrap_batch(batch):
+        if isinstance(batch, (list, tuple)):
+            if len(batch) != 1:
+                raise ValueError("Stereo training accepts exactly one dataset batch")
+            return batch[0]
+        return batch
 
+    @staticmethod
+    def _set_requires_grad(module: nn.Module, enabled: bool) -> None:
+        for parameter in module.parameters():
+            parameter.requires_grad_(enabled)
 
-    def forward(self, x, optimizer_idx=None, log_image=False):
-        is_image = x.ndim == 4
-        if not is_image:
-            B, C, T, H, W = x.shape
-            if self.resolution_scale is not None:
-                x = rearrange(x, "b c t h w -> (b t) c h w")
-                target_resolution_scale = random.choices(self.resolution_scale)[0]
-                target_resolution = int(H * target_resolution_scale)
-                x = F.interpolate(
-                    x, size=(target_resolution, target_resolution), mode="bilinear", align_corners=True
-                )
+    def _validate_video(self, video: torch.Tensor) -> None:
+        expected = (
+            self.stereo_num_views,
+            2,
+            3,
+            self.stereo_num_frames,
+            self.resolution,
+            self.resolution,
+        )
+        if video.ndim != 7 or tuple(video.shape[1:]) != expected:
+            raise ValueError(
+                "video must use [B,3,2,3,4,H,W] with configured square H/W; "
+                f"expected (*,{expected}), got {tuple(video.shape)}"
+            )
+        if not torch.is_floating_point(video):
+            raise TypeError("video must be floating point and normalized to [-0.5,0.5]")
+        if not torch.isfinite(video).all():
+            raise ValueError("video contains NaN/Inf")
 
-                x = rearrange(x, "(b t) c h w -> b c t h w", b=B)
-                H = W = target_resolution
+    def encode(
+        self,
+        video: torch.Tensor,
+        *,
+        mode: Optional[Literal["mono", "stereo"]] = None,
+        sample_posterior: Optional[bool] = None,
+    ) -> StereoEncodeOutput:
+        self._validate_video(video)
+        resolved_mode = self.stereo_mode if mode is None else mode
+        encoded = self.encoder.forward_stereo(video, mode=resolved_mode)
+        parameters = self.pre_vq_conv(encoded.features)
+        posterior = StructuredDiagonalGaussianPosterior(
+            distribution=DiagonalGaussianDistribution(parameters),
+            batch_size=encoded.batch_size,
+            views=encoded.views,
+        )
+        should_sample = self.training if sample_posterior is None else sample_posterior
+        latent = posterior.sample() if should_sample else posterior.mode()
+        return StereoEncodeOutput(
+            latent=latent,
+            posterior=posterior,
+            fusion=encoded.fusion,
+        )
 
-        else:
-            B, C, H, W = x.shape
-            T = 1
+    def decode(self, latent: torch.Tensor) -> StereoDecoderOutput:
+        if latent.ndim != 6:
+            raise ValueError(
+                f"latent must use [B,V,C,1,H,W], got {tuple(latent.shape)}"
+            )
+        if latent.shape[1] != self.stereo_num_views:
+            raise ValueError("latent view count does not match configuration")
+        if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
+            raise ValueError("latent must contain 48 channels and one temporal slot")
+        flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
+        return self.decoder.forward_stereo(self.post_vq_conv(flattened))
 
-            if self.resolution_scale is not None:
-                target_resolution_scale = random.choices(self.resolution_scale)[0]
-                target_resolution = int(H * target_resolution_scale)
-                x = F.interpolate(
-                    x, size=(target_resolution, target_resolution), mode="bilinear", align_corners=True
-                )
-                H = W = target_resolution
-        
-        z = self.pre_vq_conv(self.encoder(x, is_image))
-        
-        if not self.use_vae:
-            if self.l2_code and not self.use_external_codebook:
-                z = F.normalize(z, p=2, dim=1)
+    def forward(
+        self,
+        video: torch.Tensor,
+        *,
+        mode: Optional[Literal["mono", "stereo"]] = None,
+        sample_posterior: Optional[bool] = None,
+    ) -> StereoTokenizerOutput:
+        encoded = self.encode(
+            video,
+            mode=mode,
+            sample_posterior=sample_posterior,
+        )
+        decoded = self.decode(encoded.latent)
+        return StereoTokenizerOutput(
+            rgb=decoded.rgb,
+            disparity=decoded.disparity,
+            normalized_disparity=decoded.normalized_disparity,
+            latent=encoded.latent,
+            posterior=encoded.posterior,
+            fusion=encoded.fusion,
+        )
 
-            vq_output = self.codebook(z)
-            x_recon = self.decoder(self.post_vq_conv(vq_output['embeddings']), is_image)
-        
-        else:
-            posterior = DiagonalGaussianDistribution(z)
-            z = posterior.sample()
-            z = self.post_vq_conv(z)
-            x_recon = self.decoder(z, is_image)
+    def _effective_kl_weight(self) -> float:
+        if self.kl_warmup_steps == 0:
+            return self.kl_weight
+        fraction = min(1.0, float(self.global_step) / self.kl_warmup_steps)
+        return self.kl_weight * fraction
 
-            kl_loss = posterior.kl()
-            kl_loss = torch.sum(kl_loss) / kl_loss.shape[0] * self.kl_weight
-            
-            vq_output = {
-                "commitment_loss": kl_loss
-            }
+    def compute_core_loss(
+        self,
+        batch,
+        *,
+        sample_posterior: Optional[bool] = None,
+    ) -> StereoCoreLossOutput:
+        batch = self._unwrap_batch(batch)
+        model_output = self(
+            batch["video"],
+            sample_posterior=sample_posterior,
+        )
+        rgb_target = batch["video"][:, :, 0]
+        disparity_target = batch["disparity"]
+        valid_mask = batch["valid_mask"]
+        scale = self.decoder.stereo_disparity_scale.to(
+            device=disparity_target.device,
+            dtype=disparity_target.dtype,
+        )
+        normalized_target = disparity_target / scale
+        effective_kl_weight = self._effective_kl_weight()
+        loss = self.core_objective(
+            rgb_prediction=model_output.rgb,
+            rgb_target=rgb_target,
+            normalized_disparity_prediction=model_output.normalized_disparity,
+            normalized_disparity_target=normalized_target,
+            pixel_disparity_prediction=model_output.disparity,
+            pixel_disparity_target=disparity_target,
+            valid_mask=valid_mask,
+            posterior=model_output.posterior,
+            gradient_scale_px=self.geometry_gradient_scale_px,
+            kl_weight_override=effective_kl_weight,
+        )
+        return StereoCoreLossOutput(
+            model=model_output,
+            loss=loss,
+            normalized_disparity_target=normalized_target,
+            effective_kl_weight=effective_kl_weight,
+        )
 
-        if x.shape != x_recon.shape:
-            assert self.gen_upscale is not None
-            if is_image:
-                x = F.interpolate(x, scale_factor=self.gen_upscale, mode="bilinear", align_corners=True)
-            else:
-                x = rearrange(x, "b c t h w -> (b t) c h w")
-                x = F.interpolate(x, scale_factor=self.gen_upscale, mode="bilinear", align_corners=True)
-                x = rearrange(x, "(b t) c h w -> b c t h w", frames.shape[0])
+    def _perceptual_loss(
+        self, prediction: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        if self.perceptual_model is None:
+            return prediction.new_zeros(())
+        prediction_frames = self._flatten_view_frames(prediction)
+        target_frames = self._flatten_view_frames(target)
+        return (
+            self.perceptual_model(
+                prediction_frames * 2.0,
+                target_frames * 2.0,
+            ).mean()
+            * self.perceptual_weight
+        )
 
-        if self.recon_loss_type == 'l1':
-            recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
-        else:
-            recon_loss = F.mse_loss(x_recon, x) * self.l1_weight
+    @staticmethod
+    def _feature_matching_loss(fake_features, real_features):
+        if len(fake_features) != len(real_features):
+            raise RuntimeError("discriminator feature structures do not match")
+        losses = [
+            F.l1_loss(fake, real.detach())
+            for fake, real in zip(fake_features[:-1], real_features[:-1])
+        ]
+        if not losses:
+            return fake_features[0].new_zeros(())
+        return torch.stack(losses).mean()
 
-        if self.recon_loss_type != 'l1':
-            recon_loss += logits_laplace(x, x_recon) * self.logitslaplace_weight
+    def _gan_is_active(self) -> bool:
+        return self.gan_enabled and self.global_step >= self.args.discriminator_iter_start
 
-        if is_image: # handle the cases with 4 dims
-            frames = x
-            frames_recon = x_recon
-        
-        else:
-            frame_idx = torch.randint(0, T, [B]).cuda()
-            frame_idx_selected = frame_idx.reshape(-1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
-            frames = torch.gather(x, 2, frame_idx_selected).squeeze(2)
-            frames_recon = torch.gather(x_recon, 2, frame_idx_selected).squeeze(2)
-        
-            all_frames = x.permute(0, 2, 1, 3, 4).contiguous().view(-1, 3, H, W)
-            all_frames_recon = x_recon.permute(0, 2, 1, 3, 4).contiguous().view(-1, 3, H, W)
+    def _generator_adversarial_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+    ):
+        zero = prediction.new_zeros(())
+        if not self._gan_is_active():
+            return zero, zero, zero, zero
+        self._set_requires_grad(self.image_discriminator, False)
+        self._set_requires_grad(self.video_discriminator, False)
 
-        if log_image:
-            if self.use_vae:
-                return frames, frames_recon, x, x_recon, None
-            else:
-                return frames, frames_recon, x, x_recon, vq_output
+        image_gan = zero
+        video_gan = zero
+        image_features = zero
+        video_features = zero
+        if self.image_gan_weight > 0:
+            fake_images = self._flatten_view_frames(prediction)
+            real_images = self._flatten_view_frames(target)
+            fake_logits, fake_feature_list = self.image_discriminator(
+                fake_images, False
+            )
+            with torch.no_grad():
+                _, real_feature_list = self.image_discriminator(real_images, False)
+            image_gan = -fake_logits.mean()
+            image_features = self._feature_matching_loss(
+                fake_feature_list, real_feature_list
+            )
+        if self.video_gan_weight > 0:
+            fake_videos = self._flatten_view_videos(prediction)
+            real_videos = self._flatten_view_videos(target)
+            fake_logits, fake_feature_list = self.video_discriminator(
+                fake_videos, False
+            )
+            with torch.no_grad():
+                _, real_feature_list = self.video_discriminator(real_videos, False)
+            video_gan = -fake_logits.mean()
+            video_features = self._feature_matching_loss(
+                fake_feature_list, real_feature_list
+            )
 
+        adversarial = (
+            self.image_gan_weight * image_gan
+            + self.video_gan_weight * video_gan
+        )
+        feature_matching = self.gan_feat_weight * (
+            self.image_gan_weight * image_features
+            + self.video_gan_weight * video_features
+        )
+        return adversarial, feature_matching, image_gan, video_gan
 
-        if optimizer_idx == 0:
-            # autoencoder
-            perceptual_loss = 0
-            if self.perceptual_weight > 0:
-                if self.apply_allframes:
-                    perceptual_loss = self.perceptual_model(all_frames, all_frames_recon).mean() * self.perceptual_weight
-                    logits_image_fake, pred_image_fake = self.image_discriminator(all_frames_recon, False)
-                else:
-                    perceptual_loss = self.perceptual_model(frames, frames_recon).mean() * self.perceptual_weight
-                    logits_image_fake, pred_image_fake = self.image_discriminator(frames_recon, False)
-            
+    def _discriminator_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+    ):
+        zero = prediction.new_zeros(())
+        if not self._gan_is_active():
+            return zero, zero, zero
+        self._set_requires_grad(self.image_discriminator, True)
+        self._set_requires_grad(self.video_discriminator, True)
 
-            perceptual_video_loss = 0
-            # if self.video_perceptual_weight > 0 and T > 1:
-            #     perceptual_video_loss = self.video_perceptual_model.extract_perceptual(x, x_recon).mean() * self.video_perceptual_weight
+        image_loss = zero
+        video_loss = zero
+        if self.image_gan_weight > 0:
+            real_logits, _ = self.image_discriminator(
+                self._flatten_view_frames(target).detach(),
+                self.apply_diffaug,
+            )
+            fake_logits, _ = self.image_discriminator(
+                self._flatten_view_frames(prediction).detach(),
+                self.apply_diffaug,
+            )
+            image_loss = self.disc_loss(real_logits, fake_logits)
+        if self.video_gan_weight > 0:
+            real_logits, _ = self.video_discriminator(
+                self._flatten_view_videos(target).detach(),
+                self.apply_diffaug,
+            )
+            fake_logits, _ = self.video_discriminator(
+                self._flatten_view_videos(prediction).detach(),
+                self.apply_diffaug,
+            )
+            video_loss = self.disc_loss(real_logits, fake_logits)
+        total = (
+            self.image_gan_weight * image_loss
+            + self.video_gan_weight * video_loss
+        )
+        return total, image_loss, video_loss
 
-            g_image_loss = -torch.mean(logits_image_fake)
-            
-            if T > 1:
-                logits_video_fake, pred_video_fake = self.video_discriminator(x_recon, False)
-                g_video_loss = -torch.mean(logits_video_fake)
-            else:
-                logits_video_fake, pred_video_fake = None, None
-                g_video_loss = 0.
-            
-            g_loss = self.image_gan_weight*g_image_loss + self.video_gan_weight*g_video_loss
-            
-            disc_factor = adopt_weight(self.global_step, threshold=self.args.discriminator_iter_start)
-            aeloss = disc_factor * g_loss
+    @staticmethod
+    def _as_sequence(value):
+        return list(value) if isinstance(value, (list, tuple)) else [value]
 
-            # gan feature matching loss
-            image_gan_feat_loss = 0
-            video_gan_feat_loss = 0
-            feat_weights = 4.0 / (3 + 1)
-            if self.image_gan_weight > 0:
-                if self.apply_allframes:
-                    logits_image_real, pred_image_real = self.image_discriminator(all_frames, False)
-                else:
-                    logits_image_real, pred_image_real = self.image_discriminator(frames, False)
-                for i in range(len(pred_image_fake)-1):
-                    image_gan_feat_loss += feat_weights * F.l1_loss(pred_image_fake[i], pred_image_real[i].detach()) * (self.image_gan_weight>0)
-            
-            if self.video_gan_weight > 0 and T > 1:
-                logits_video_real, pred_video_real = self.video_discriminator(x, False)
-                for i in range(len(pred_video_fake)-1):
-                    video_gan_feat_loss += feat_weights * F.l1_loss(pred_video_fake[i], pred_video_real[i].detach()) * (self.video_gan_weight>0)
-
-            gan_feat_loss = disc_factor * self.gan_feat_weight * (image_gan_feat_loss + video_gan_feat_loss)
-            
-            if T > 1:
-                self.log("train/video_gan_feat_loss", video_gan_feat_loss, logger=True, on_step=True, on_epoch=True)
-                self.log("train/g_video_loss", g_video_loss, logger=True, on_step=True, on_epoch=True)
-                self.log("train/video_perceptual_loss", perceptual_video_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            else:
-                self.log("train/image_gan_feat_loss", image_gan_feat_loss, logger=True, on_step=True, on_epoch=True)
-                self.log("train/perceptual_loss", perceptual_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-                self.log("train/g_image_loss", g_image_loss, logger=True, on_step=True, on_epoch=True)
-            
-
-            perceptual_loss += perceptual_video_loss
-
-            self.log("train/recon_loss", recon_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log("train/aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-
-            if not self.use_vae:
-                self.log("train/commitment_loss", vq_output['commitment_loss'], prog_bar=True, logger=True, on_step=True, on_epoch=True)
-                self.log('train/perplexity', vq_output['perplexity'], prog_bar=True, logger=True, on_step=True, on_epoch=True)
-                self.log('train/usage', vq_output['avg_usage'], prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            else:
-                self.log("train/kl_loss", kl_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-
-            return recon_loss, x_recon, vq_output, aeloss, perceptual_loss, gan_feat_loss
-
-        if optimizer_idx == 1:
-            # discriminator
-            if self.apply_allframes:
-                logits_image_real, _ = self.image_discriminator(all_frames.detach(), self.apply_diffaug)
-                logits_image_fake, _ = self.image_discriminator(all_frames_recon.detach(), self.apply_diffaug)
-            else:
-                logits_image_real, _ = self.image_discriminator(frames.detach(), self.apply_diffaug)
-                logits_image_fake, _ = self.image_discriminator(frames_recon.detach(), self.apply_diffaug)
-
-            d_image_loss = self.disc_loss(logits_image_real, logits_image_fake)
-
-            if T > 1:
-                logits_video_real, _ = self.video_discriminator(x.detach(), self.apply_diffaug)
-                logits_video_fake, _ = self.video_discriminator(x_recon.detach(), self.apply_diffaug)
-                d_video_loss = self.disc_loss(logits_video_real, logits_video_fake)
-            else:
-                logits_video_real, logits_video_fake = None, None
-                d_video_loss = 0.
-            
-            disc_factor = adopt_weight(self.global_step, threshold=self.args.discriminator_iter_start)
-            discloss = disc_factor * (self.image_gan_weight*d_image_loss + self.video_gan_weight*d_video_loss)
-            
-            self.log("train/logits_image_real", logits_image_real.mean().detach(), logger=True, on_step=True, on_epoch=True)
-            self.log("train/logits_image_fake", logits_image_fake.mean().detach(), logger=True, on_step=True, on_epoch=True)
-            self.log("train/logits_video_real", logits_video_real.mean().detach() if logits_video_real is not None else 0., logger=True, on_step=True, on_epoch=True)
-            self.log("train/logits_video_fake", logits_video_fake.mean().detach() if logits_video_fake is not None else 0., logger=True, on_step=True, on_epoch=True)
-            self.log("train/d_image_loss", d_image_loss, logger=True, on_step=True, on_epoch=True)
-            self.log("train/d_video_loss", d_video_loss, logger=True, on_step=True, on_epoch=True)
-            self.log("train/discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            return discloss
-
-        if self.apply_allframes:
-            perceptual_loss = self.perceptual_model(all_frames, all_frames_recon) * self.perceptual_weight
-        else:
-            perceptual_loss = self.perceptual_model(frames, frames_recon) * self.perceptual_weight
-        
-        return recon_loss, x_recon, vq_output, perceptual_loss
+    def _log_loss_breakdown(self, prefix: str, result: StereoCoreLossOutput) -> None:
+        metrics = {
+            f"{prefix}/loss": result.loss.total,
+            f"{prefix}/rgb_loss": result.loss.rgb,
+            f"{prefix}/disparity_loss": result.loss.disparity,
+            f"{prefix}/gradient_loss": result.loss.disparity_gradient,
+            f"{prefix}/kl_loss": result.loss.kl,
+            f"{prefix}/kl_weight": result.model.rgb.new_tensor(
+                result.effective_kl_weight
+            ),
+        }
+        for view in range(self.stereo_num_views):
+            metrics[f"{prefix}/disparity_loss_view_{view}"] = (
+                result.loss.disparity_per_view[view]
+            )
+            metrics[f"{prefix}/valid_pixels_view_{view}"] = (
+                result.loss.disparity_valid_count[view].float()
+            )
+        self.log_dict(
+            metrics,
+            prog_bar=False,
+            logger=True,
+            on_step=prefix == "train",
+            on_epoch=True,
+            sync_dist=True,
+        )
 
     def training_step(self, batch, batch_idx):
-        if len(batch) == 1:
-            batch = batch[0]
-        else:
-            assert len(batch) == len(self.args.sample_ratio)
-            if not self.args.force_alternation:
-                sample_ratios = self.args.sample_ratio
-                sample_ratios = [r / sum(sample_ratios) for r in sample_ratios]
-                batch = random.choices(batch, weights=sample_ratios, k=1)[0]
-            
-            else:
-                num_datasets = len(batch)
-                batch = batch[batch_idx % num_datasets]
+        batch = self._unwrap_batch(batch)
+        result = self.compute_core_loss(batch, sample_posterior=True)
+        rgb_target = batch["video"][:, :, 0]
+        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        adversarial, feature_matching, image_gan, video_gan = (
+            self._generator_adversarial_loss(result.model.rgb, rgb_target)
+        )
+        generator_loss = (
+            result.loss.total + perceptual + adversarial + feature_matching
+        )
 
-        # print(batch_idx, batch["video"].shape)
+        optimizers = self._as_sequence(self.optimizers())
+        schedulers = self._as_sequence(self.lr_schedulers())
+        generator_optimizer = optimizers[0]
+        self.manual_backward(generator_loss / self.grad_accumulates)
 
-        x = batch['video']
-        sch1, sch2 = self.lr_schedulers()
-        opt1, opt2 = self.optimizers()
+        self._micro_step += 1
+        should_step = self._micro_step % self.grad_accumulates == 0
+        if should_step:
+            if self.grad_clip_val is not None:
+                self.clip_gradients(
+                    generator_optimizer,
+                    gradient_clip_val=self.grad_clip_val,
+                )
+            generator_optimizer.step()
+            generator_optimizer.zero_grad()
+            schedulers[0].step(self.global_step)
 
-        # if optimizer_idx == 0:
-        recon_loss, _, vq_output, aeloss, perceptual_loss, gan_feat_loss = self.forward(x, optimizer_idx=0)
-        commitment_loss = vq_output['commitment_loss']
-        loss_generator = (recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss) / self.grad_accumulates
-
-        self.manual_backward(loss_generator)
-
-        cur_global_step = self.global_step
-        if (cur_global_step + 1) % self.grad_accumulates == 0:
-            optim_gen = True
-            """if self.grad_check_thres is not None:
-                for p in opt1.param_groups[0]['params']:
-                    if p.grad is not None and torch.any(p.grad > self.grad_check_thres):
-                        optim = False""" 
-
-            if cur_global_step > 100000:
-                if self.recloss_check_thres is not None:
-                    if recon_loss.item() > self.recloss_check_thres:
-                        optim_gen = False
-                
-                if self.perloss_check_thres is not None:
-                    if perceptual_loss.item() > self.perloss_check_thres:
-                        optim_gen = False
-
-            
-            if optim_gen:
-                if self.grad_clip_val is not None:
-                    self.clip_gradients(opt1, gradient_clip_val=self.grad_clip_val)
-                
-                opt1.step()
-            
-            sch1.step(cur_global_step)
-            opt1.zero_grad()
-
-        # if optimizer_idx == 1:
-        discloss = self.forward(x, optimizer_idx=1)
-        loss_discriminator = discloss / self.grad_accumulates
-
-        self.manual_backward(loss_discriminator)
-
-        if (cur_global_step + 1) % self.grad_accumulates == 0:
-            optim_disc = True
-            
-            """if self.grad_check_thres is not None:
-                for p in opt2.param_groups[0]['params']:
-                    if p.grad is not None and torch.any(p.grad > self.grad_check_thres):
-                        optim = False"""
-
-            if self.disloss_check_thres is not None:
-                if discloss.item() < self.disloss_check_thres:
-                    optim_disc = False
-
-            if optim_disc and optim_gen:
+        discriminator_total = result.model.rgb.new_zeros(())
+        discriminator_image = result.model.rgb.new_zeros(())
+        discriminator_video = result.model.rgb.new_zeros(())
+        if self._gan_is_active():
+            (
+                discriminator_total,
+                discriminator_image,
+                discriminator_video,
+            ) = self._discriminator_loss(result.model.rgb, rgb_target)
+            self.manual_backward(discriminator_total / self.grad_accumulates)
+            if should_step:
+                discriminator_optimizer = optimizers[1]
                 if self.grad_clip_val_disc is not None:
-                    self.clip_gradients(opt2, gradient_clip_val=self.grad_clip_val_disc)
-                opt2.step()
-            
-            sch2.step(cur_global_step)
-            opt2.zero_grad()
+                    self.clip_gradients(
+                        discriminator_optimizer,
+                        gradient_clip_val=self.grad_clip_val_disc,
+                    )
+                discriminator_optimizer.step()
+                discriminator_optimizer.zero_grad()
+                schedulers[1].step(self.global_step)
 
+        self._log_loss_breakdown("train", result)
+        self.log_dict(
+            {
+                "train/generator_loss": generator_loss,
+                "train/perceptual_loss": perceptual,
+                "train/adversarial_loss": adversarial,
+                "train/feature_matching_loss": feature_matching,
+                "train/g_image_loss": image_gan,
+                "train/g_video_loss": video_gan,
+                "train/discriminator_loss": discriminator_total,
+                "train/d_image_loss": discriminator_image,
+                "train/d_video_loss": discriminator_video,
+            },
+            logger=True,
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        return {"loss": generator_loss.detach()}
 
     def validation_step(self, batch, batch_idx):
-        x = batch['video'] # TODO: batch['stft']
-        recon_loss, _, vq_output, perceptual_loss = self.forward(x)
-        self.log('val/recon_loss', recon_loss, prog_bar=True)
-        self.log('val/perceptual_loss', perceptual_loss, prog_bar=True)
-
-        if not self.use_vae:
-            self.log('val/perplexity', vq_output['perplexity'], prog_bar=True)
-            self.log('val/commitment_loss', vq_output['commitment_loss'], prog_bar=True)
-        else:
-            self.log("val/kl_loss", vq_output['commitment_loss'], prog_bar=True)
+        result = self.compute_core_loss(batch, sample_posterior=False)
+        rgb_target = self._unwrap_batch(batch)["video"][:, :, 0]
+        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        self._log_loss_breakdown("val", result)
+        self.log(
+            "val/perceptual_loss",
+            perceptual,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val/total_loss",
+            result.loss.total + perceptual,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
 
     def configure_optimizers(self):
-        opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
-                                    list(self.decoder.parameters())+
-                                    list(self.pre_vq_conv.parameters())+
-                                    list(self.post_vq_conv.parameters())+
-                                    list(self.codebook.parameters()),
-                                    lr=self.args.lr, betas=(0.5, 0.9))
-        
-        opt_disc = torch.optim.Adam(list(self.image_discriminator.parameters())+
-                                    list(self.video_discriminator.parameters()),
-                                    lr=self.args.lr * self.args.dis_lr_multiplier, betas=(0.5, 0.9))
-        
-        lr_min = self.args.lr_min
-        train_iters = self.args.max_steps
-        warmup_steps = self.args.warmup_steps
-        warmup_lr_init = self.args.warmup_lr_init
-
-       
-        sch_ae = CosineLRScheduler(
-            opt_ae,
-            lr_min = lr_min,
-            t_initial = train_iters,
-            warmup_lr_init=warmup_lr_init,
-            warmup_t=warmup_steps,
-            cycle_mul = 1.,
-            cycle_limit=1,
-            t_in_epochs=True,
+        generator_parameters = (
+            list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+            + list(self.pre_vq_conv.parameters())
+            + list(self.post_vq_conv.parameters())
         )
-
-        if self.args.dis_warmup_steps == 0:
-            self.args.dis_warmup_steps = warmup_steps
-
-        sch_disc = CosineLRScheduler(
-            opt_disc,
-            lr_min = lr_min * self.args.dis_lr_multiplier if self.args.dis_minlr_multiplier else lr_min,
-            t_initial = train_iters,
-            warmup_lr_init=warmup_lr_init,
-            warmup_t=self.args.dis_warmup_steps,
-            cycle_mul = 1.,
-            cycle_limit=1,
-            t_in_epochs=True,
+        generator_optimizer = torch.optim.Adam(
+            generator_parameters,
+            lr=self.args.lr,
+            betas=(0.5, 0.9),
         )
+        generator_scheduler = CosineLRScheduler(
+            generator_optimizer,
+            lr_min=self.args.lr_min,
+            t_initial=self.args.max_steps,
+            warmup_lr_init=self.args.warmup_lr_init,
+            warmup_t=self.args.warmup_steps,
+            cycle_mul=1.0,
+            cycle_limit=1,
+            t_in_epochs=False,
+        )
+        optimizers = [generator_optimizer]
+        schedulers = [
+            {"scheduler": generator_scheduler, "interval": "step"}
+        ]
 
-        return [opt_ae, opt_disc], [{"scheduler": sch_ae, "interval": "step"}, {"scheduler": sch_disc, "interval": "step"}]
-
-    """def lr_scheduler_step(self, scheduler):
-        print(scheduler)
-        print(self.current_epoch)
-        print(self.global_step)
-        scheduler.step(epoch=self.current_epoch)  # timm's scheduler need the epoch value"""
-
+        if self.gan_enabled:
+            discriminator_optimizer = torch.optim.Adam(
+                list(self.image_discriminator.parameters())
+                + list(self.video_discriminator.parameters()),
+                lr=self.args.lr * self.args.dis_lr_multiplier,
+                betas=(0.5, 0.9),
+            )
+            discriminator_scheduler = CosineLRScheduler(
+                discriminator_optimizer,
+                lr_min=(
+                    self.args.lr_min * self.args.dis_lr_multiplier
+                    if self.args.dis_minlr_multiplier
+                    else self.args.lr_min
+                ),
+                t_initial=self.args.max_steps,
+                warmup_lr_init=self.args.warmup_lr_init,
+                warmup_t=(
+                    self.args.dis_warmup_steps
+                    if self.args.dis_warmup_steps > 0
+                    else self.args.warmup_steps
+                ),
+                cycle_mul=1.0,
+                cycle_limit=1,
+                t_in_epochs=False,
+            )
+            optimizers.append(discriminator_optimizer)
+            schedulers.append(
+                {"scheduler": discriminator_scheduler, "interval": "step"}
+            )
+        return optimizers, schedulers
 
     def log_images(self, batch, **kwargs):
-        log = dict()
-        if isinstance(batch, list):
-            batch = batch[0]
-        
-        x = batch['video']
-        x = x.to(self.device)
-        frames, frames_rec, _, _, _ = self(x, log_image=True)
-        log["inputs"] = frames
-        log["reconstructions"] = frames_rec
-        return log
+        batch = self._unwrap_batch(batch)
+        output = self(batch["video"], sample_posterior=False)
+        return {
+            "inputs": self._flatten_view_frames(batch["video"][:, :, 0]),
+            "reconstructions": self._flatten_view_frames(output.rgb),
+        }
 
     def log_videos(self, batch, **kwargs):
-        log = dict()
-        if isinstance(batch, list):
-            batch = batch[0]
-        x = batch['video']
-        _, _, x, x_rec, _ = self(x, log_image=True)
-        log["inputs"] = x
-        log["reconstructions"] = x_rec
-        return log
+        batch = self._unwrap_batch(batch)
+        output = self(batch["video"], sample_posterior=False)
+        return {
+            "inputs": self._flatten_view_videos(batch["video"][:, :, 0]),
+            "reconstructions": self._flatten_view_videos(output.rgb),
+        }
 
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = argparse.ArgumentParser(parents=[parent_parser], add_help=False)
-        
-        # training configurations
-        parser.add_argument('--lr_min', type=float, default=0.)
-        parser.add_argument('--warmup_steps', type=int, default=0)
-        parser.add_argument('--warmup_lr_init', type=float, default=0.)
-        parser.add_argument('--grad_accumulates', type=int, default=1)
-        parser.add_argument('--grad_clip_val', type=float, default=1.0)
-        parser.add_argument('--grad_clip_val_disc', type=float, default=1.0)
 
-        parser.add_argument('--disloss_check_thres', type=float, default=None)
-        parser.add_argument('--perloss_check_thres', type=float, default=None)
-        parser.add_argument('--recloss_check_thres', type=float, default=None)
+        parser.add_argument("--lr_min", type=float, default=0.0)
+        parser.add_argument("--warmup_steps", type=int, default=0)
+        parser.add_argument("--warmup_lr_init", type=float, default=0.0)
+        parser.add_argument("--grad_accumulates", type=int, default=1)
+        parser.add_argument("--grad_clip_val", type=float, default=1.0)
+        parser.add_argument("--grad_clip_val_disc", type=float, default=1.0)
+        parser.add_argument("--kl_weight", type=float, required=True)
+        parser.add_argument("--kl_warmup_steps", type=int, default=0)
+        parser.add_argument("--initialize_vit", action="store_true")
 
-        parser.add_argument('--force_alternation', action="store_true")
-        
+        parser.add_argument("--sigmoid_in_disc", action="store_true")
+        parser.add_argument(
+            "--activation_in_disc",
+            type=str,
+            default="leaky_relu",
+            choices=["leaky_relu", "tanh"],
+        )
+        parser.add_argument("--apply_blur", action="store_true")
+        parser.add_argument("--apply_noise", action="store_true")
+        parser.add_argument("--apply_diffaug", action="store_true")
+        parser.add_argument("--dis_warmup_steps", type=int, default=0)
+        parser.add_argument("--dis_lr_multiplier", type=float, default=1.0)
+        parser.add_argument("--dis_minlr_multiplier", action="store_true")
 
-        parser.add_argument('--kl_weight', type=float, default=0.)
-        parser.add_argument('--use_vae', action="store_true")
+        parser.add_argument(
+            "--recon_loss_type",
+            type=str,
+            default="l1",
+            choices=["l1", "l2"],
+        )
+        parser.add_argument("--patch_size", type=int, default=16)
+        parser.add_argument(
+            "--patch_embed",
+            type=str,
+            default="linear",
+            choices=["linear"],
+        )
+        parser.add_argument("--enc_block", type=str, default="tttt")
+        parser.add_argument("--dec_block", type=str, default="tttt")
+        parser.add_argument("--twod_window_size", type=int, default=4)
+        parser.add_argument("--temporal_patch_size", type=int, default=4)
+        parser.add_argument("--defer_temporal_pool", action="store_true")
+        parser.add_argument("--defer_spatial_pool", action="store_true")
+        parser.add_argument(
+            "--spatial_pos",
+            type=str,
+            default="rel",
+            choices=["rel", "rope"],
+        )
+        parser.add_argument("--spatial_depth", type=int, default=4)
+        parser.add_argument("--temporal_depth", type=int, default=4)
+        parser.add_argument(
+            "--causal_in_temporal_transformer", action="store_true"
+        )
+        parser.add_argument("--causal_in_peg", action="store_true")
+        parser.add_argument("--dim_head", type=int, default=64)
+        parser.add_argument("--heads", type=int, default=8)
+        parser.add_argument("--attn_dropout", type=float, default=0.0)
+        parser.add_argument("--ff_dropout", type=float, default=0.0)
+        parser.add_argument("--ff_mult", type=float, default=4.0)
+        parser.add_argument("--codebook_dim", type=int, default=48)
 
-        parser.add_argument('--video_perceptual_weight', type=float, default=0.)
-        parser.add_argument('--initialize_vit', action="store_true")
-
-
-        # configuration for discriminator
-        parser.add_argument('--sigmoid_in_disc', action="store_true")
-        parser.add_argument('--activation_in_disc', type=str, default="leaky_relu")
-        parser.add_argument('--apply_blur', action="store_true")
-        parser.add_argument('--apply_noise', action="store_true")
-        parser.add_argument('--apply_diffaug', action="store_true")
-
-        parser.add_argument('--logitslaplace_weight', type=float, default=0.)
-        
-
-        parser.add_argument('--dis_warmup_steps', type=int, default=0)
-        parser.add_argument('--dis_lr_multiplier', type=float, default=1.)
-        parser.add_argument('--dis_minlr_multiplier', action="store_true")
-
-        parser.add_argument("--recon_loss_type", type=str, default='l1', choices=['l1', 'l2'])
-        parser.add_argument('--patch_size', type=int, default=16)
-        parser.add_argument('--gen_upscale', type=int, default=None)
-        parser.add_argument('--patch_embed', type=str, default='linear', choices=['linear', 'cnn', 'pixelshuffle'])
-        
-        parser.add_argument('--enc_block', type=str, default='tttt')
-        parser.add_argument('--dec_block', type=str, default='tttt')
-
-        parser.add_argument('--twod_window_size', type=int, default=4)
-        parser.add_argument('--temporal_patch_size', type=int, default=2)
-        parser.add_argument('--defer_temporal_pool', action="store_true")
-        parser.add_argument('--defer_spatial_pool', action="store_true")
-        parser.add_argument('--spatial_pos', type=str, default="rel", choices=["rel", "rope"])
-
-        parser.add_argument('--spatial_depth', type=int, default=4)
-        parser.add_argument('--temporal_depth', type=int, default=4)
-        parser.add_argument('--causal_in_temporal_transformer', action="store_true") # tune the param
-        parser.add_argument('--causal_in_peg', action="store_true")
-        parser.add_argument('--dim_head', type=int, default=64)
-        parser.add_argument('--heads', type=int, default=8)
-        parser.add_argument('--attn_dropout', type=float, default=0.)
-        parser.add_argument('--ff_dropout', type=float, default=0.)
-        parser.add_argument('--ff_mult', type=float, default=4.)
-
-        parser.add_argument('--use_external_codebook', action="store_true")
-        parser.add_argument('--fp32_quant', action="store_true")
-        parser.add_argument('--codebook_type', type=str, default='vq')
-        parser.add_argument('--codebook_dim', type=int, default=None)
-        parser.add_argument('--l2_code', action="store_true")
-        parser.add_argument('--commitment_weight', type=float, default=0.25)
-
-        parser.add_argument('--resolution_scale', default=None, nargs='+', type=float)
-
-
+        parser.add_argument("--stereo_num_views", type=int, default=3)
+        parser.add_argument("--stereo_num_frames", type=int, default=4)
+        parser.add_argument(
+            "--stereo_search_radii",
+            nargs=3,
+            type=int,
+            required=True,
+        )
+        parser.add_argument(
+            "--stereo_search_direction",
+            choices=["left", "right"],
+            default="left",
+        )
+        parser.add_argument(
+            "--stereo_disparity_scale",
+            nargs=3,
+            type=float,
+            required=True,
+        )
+        parser.add_argument(
+            "--stereo_disparity_bias",
+            type=float,
+            required=True,
+        )
+        parser.add_argument(
+            "--stereo_disparity_epsilon",
+            type=float,
+            default=1e-6,
+        )
+        parser.add_argument(
+            "--stereo_mode",
+            choices=["mono", "stereo"],
+            default="stereo",
+        )
+        parser.add_argument("--rgb_weight", type=float, required=True)
+        parser.add_argument("--disparity_weight", type=float, required=True)
+        parser.add_argument("--gradient_weight", type=float, required=True)
+        parser.add_argument(
+            "--geometry_gradient_scale_px",
+            type=float,
+            required=True,
+        )
+        parser.add_argument("--smooth_l1_beta", type=float, default=1.0)
+        parser.add_argument("--gan_enabled", action="store_true")
         return parser
 
-  
 
 @dataclass
 class StereoEncoderOutput:
