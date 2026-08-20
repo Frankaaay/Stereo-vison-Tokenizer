@@ -165,3 +165,10 @@
 - `OmniTokenizer/data.py` 不再在模块加载时导入仅供 legacy `ImageDataset` 使用的 `imagenet_stubs`；该依赖改为构造 legacy dataset 时按需导入，Stereo Manifest 主路径不再被无关依赖阻塞。
 - `decord==0.6.0` 仍按原仓库数据模块合同安装到用户确认的项目环境，不通过源码伪造或旁路该依赖。
 - `tests/stereo/test_source_boundary.py` 新增 AST 回归检查，约束 `imagenet_stubs` 不得重新成为 `data.py` 的顶层导入，同时保留 legacy 类内部的真实依赖。
+
+### 模块 12：LPIPS pretrained 名称比较修复
+
+- 状态：已实现，待 H200 动态验证。
+- H200 Python 3.12 import preflight 暴露 `LPIPS.from_pretrained` 使用 `is not` 比较字符串的 `SyntaxWarning`；虽然当前 Stereo smoke 直接调用 `LPIPS()`，该 classmethod 仍可能对动态构造的同值字符串误判。
+- `OmniTokenizer/modules/lpips.py` 改为 `name != "vgg_lpips"`，只修正字符串值比较，不改权重加载、网络结构、forward 或 loss 配置。
+- 源码边界测试新增 AST 检查，要求该条件使用 `NotEq`，并禁止重新引入字符串 identity comparison。

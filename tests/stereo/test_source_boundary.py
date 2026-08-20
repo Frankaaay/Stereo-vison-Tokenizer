@@ -6,6 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STEREO_SOURCE = ROOT / "OmniTokenizer" / "stereo"
 DATA_SOURCE = ROOT / "OmniTokenizer" / "data.py"
+LPIPS_SOURCE = ROOT / "OmniTokenizer" / "modules" / "lpips.py"
 TOKENIZER_SOURCES = (
     ROOT / "OmniTokenizer" / "omnitokenizer.py",
     ROOT / "OmniTokenizer" / "modules" / "stereo_fusion.py",
@@ -63,6 +64,39 @@ class SourceBoundaryTest(unittest.TestCase):
                 isinstance(node, ast.ImportFrom)
                 and node.module == "imagenet_stubs.imagenet_2012_labels"
                 for node in ast.walk(constructor)
+            )
+        )
+
+    def test_lpips_pretrained_name_uses_value_comparison(self) -> None:
+        tree = ast.parse(LPIPS_SOURCE.read_text(encoding="utf-8"))
+        lpips = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "LPIPS"
+        )
+        from_pretrained = next(
+            node
+            for node in lpips.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "from_pretrained"
+        )
+        comparisons = [
+            node for node in ast.walk(from_pretrained) if isinstance(node, ast.Compare)
+        ]
+        self.assertTrue(
+            any(
+                isinstance(node.ops[0], ast.NotEq)
+                and isinstance(node.comparators[0], ast.Constant)
+                and node.comparators[0].value == "vgg_lpips"
+                for node in comparisons
+            )
+        )
+        self.assertFalse(
+            any(
+                isinstance(node.ops[0], (ast.Is, ast.IsNot))
+                and isinstance(node.comparators[0], ast.Constant)
+                and isinstance(node.comparators[0].value, str)
+                for node in comparisons
             )
         )
 
