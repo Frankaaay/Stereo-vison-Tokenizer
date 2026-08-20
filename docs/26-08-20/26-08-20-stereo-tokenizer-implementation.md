@@ -76,3 +76,11 @@
 - 六路四帧先合并到 batch，复用原 `to_patch_emb_first_frame` 与 `enc_spatial_transformer` 逐帧编码；随后执行 StereoFusion 和 `4×D→D` 联合线性投影。
 - 原 `enc_temporal_transformer` 保留，但显式断言其输入 temporal length 为 1，因此不会在四个 raw frames 之间执行 attention。
 - 新增独立 shape、mono bypass 与梯度测试；Torch 动态执行留到 H200。
+
+### 模块 5：Structured Stereo Decoder
+
+- 状态：已实现并独立提交。
+- 结构化出口直接加入原 `OmniTokenizer_Decoder`，复用原 `dec_temporal_transformer` 和 `dec_spatial_transformer`。
+- 输入严格为每视角一个 latent slot；共享 Decoder 主干后才分成 RGB 与 disparity 两个线性投影，并分别展开为四帧。
+- disparity 使用 resolved per-view scale、`softplus+epsilon` 和 resolved raw bias；不增加独立 Depth Head。
+- 新增双 Head shape、bias、正值与 shared-backward 测试；Torch 动态执行留到 H200。

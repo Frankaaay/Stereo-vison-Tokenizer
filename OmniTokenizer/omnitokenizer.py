@@ -1124,12 +1124,23 @@ class OmniTokenizer_Encoder(nn.Module):
         return self.encode(tokens)
 
 
+@dataclass
+class StereoDecoderOutput:
+    """Four-frame RGB and disparity decoded for each structured view."""
+
+    rgb: torch.Tensor
+    disparity: torch.Tensor
+    normalized_disparity: torch.Tensor
+
+
 class OmniTokenizer_Decoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, causal_in_temporal_transformer=False, dim=512, 
                     causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
-                    sequence_length=17):
+                    sequence_length=17, stereo_num_views=None, stereo_num_frames=None,
+                    stereo_disparity_scale=None, stereo_disparity_bias=None,
+                    stereo_disparity_epsilon=1e-6):
         super().__init__()
         self.gen_upscale = gen_upscale
         if gen_upscale is not None:
@@ -1213,9 +1224,67 @@ class OmniTokenizer_Decoder(nn.Module):
         
         else:
             raise NotImplementedError
+
+        self.stereo_num_views = stereo_num_views
+        self.stereo_num_frames = stereo_num_frames
+        self.stereo_disparity_epsilon = stereo_disparity_epsilon
+        if stereo_num_views is not None or stereo_num_frames is not None:
+            if stereo_num_views != 3:
+                raise ValueError("structured Stereo Decoder requires exactly 3 views")
+            if stereo_num_frames != 4:
+                raise ValueError("structured Stereo Decoder requires exactly 4 frames")
+            if image_channel != 3:
+                raise ValueError("structured Stereo Decoder requires RGB output")
+            if patch_embed != "linear":
+                raise ValueError("structured Stereo Decoder requires linear pixel projection")
+            if any(layer not in "tw" for layer in block):
+                raise ValueError("structured Stereo Decoder supports only t/w spatial blocks")
+            if defer_temporal_pool or defer_spatial_pool:
+                raise ValueError("structured Stereo Decoder does not use deferred pooling")
+            if gen_upscale is not None:
+                raise ValueError("structured Stereo Decoder does not use gen_upscale")
+            if stereo_disparity_scale is None:
+                raise ValueError("stereo_disparity_scale must be explicitly configured")
+            if len(stereo_disparity_scale) != stereo_num_views:
+                raise ValueError(
+                    "stereo_disparity_scale must contain one value per view"
+                )
+            if any(scale <= 0 for scale in stereo_disparity_scale):
+                raise ValueError("every stereo disparity scale must be positive")
+            if stereo_disparity_bias is None or not math.isfinite(
+                stereo_disparity_bias
+            ):
+                raise ValueError("stereo_disparity_bias must be finite")
+            if stereo_disparity_epsilon <= 0:
+                raise ValueError("stereo_disparity_epsilon must be positive")
+
+            patch_area = patch_height * patch_width
+            self.stereo_rgb_head = nn.Linear(
+                dim,
+                image_channel * stereo_num_frames * patch_area,
+            )
+            self.stereo_disparity_head = nn.Linear(
+                dim,
+                stereo_num_frames * patch_area,
+            )
+            self.register_buffer(
+                "stereo_disparity_scale",
+                torch.as_tensor(
+                    stereo_disparity_scale, dtype=torch.float32
+                ).reshape(1, stereo_num_views, 1, 1, 1, 1),
+                persistent=True,
+            )
+        else:
+            self.stereo_rgb_head = None
+            self.stereo_disparity_head = None
+            self.stereo_disparity_scale = None
     
         if initialize:
             self.apply(self._init_weights)
+        if self.stereo_disparity_head is not None:
+            nn.init.constant_(
+                self.stereo_disparity_head.bias, stereo_disparity_bias
+            )
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -1233,13 +1302,12 @@ class OmniTokenizer_Decoder(nn.Module):
         else:
             return int(self.image_size[0] // self.patch_size[0] * self.gen_upscale), int(self.image_size[1] // self.patch_size[1] * self.gen_upscale)
 
-    def decode(
+    def _decode_transformer_features(
         self,
         tokens,
     ):
         b = tokens.shape[0]
         # h, w = self.patch_height_width
-        is_image = tokens.shape[1] == 1
         video_shape = tuple(tokens.shape[:-1]) # b t h' w' d
         h = tokens.shape[2]
         w = tokens.shape[3]
@@ -1262,6 +1330,14 @@ class OmniTokenizer_Decoder(nn.Module):
 
         tokens = rearrange(tokens, '(b t) (h w) d -> b t h w d', b=b, h=h, w=w)
 
+        return tokens
+
+    def decode(
+        self,
+        tokens,
+    ):
+        tokens = self._decode_transformer_features(tokens)
+
         # to pixels
         first_frame_token, rest_frames_tokens = tokens[:, :1], tokens[:, 1:]
         first_frame = self.to_pixels_first_frame(first_frame_token)
@@ -1273,6 +1349,72 @@ class OmniTokenizer_Decoder(nn.Module):
             recon_video = first_frame
         
         return recon_video
+
+    def _unpatch_stereo(
+        self,
+        patches: torch.Tensor,
+        *,
+        output_channels: int,
+    ) -> torch.Tensor:
+        if patches.ndim != 5 or patches.shape[1] != 1:
+            raise ValueError(
+                "structured decoder patches must use [B*V,1,H,W,D]"
+            )
+        patch_height, patch_width = self.patch_size
+        return rearrange(
+            patches,
+            "n 1 h w (c t p1 p2) -> n c t (h p1) (w p2)",
+            c=output_channels,
+            t=self.stereo_num_frames,
+            p1=patch_height,
+            p2=patch_width,
+        )
+
+    def forward_stereo(self, tokens: torch.Tensor) -> StereoDecoderOutput:
+        """Decode one latent slot into four RGB and disparity frames."""
+
+        if self.stereo_rgb_head is None or self.stereo_disparity_head is None:
+            raise RuntimeError("structured Stereo Decoder was not configured")
+        if tokens.ndim != 5:
+            raise ValueError(
+                f"structured decoder expects [B*V,D,1,H,W], got {tokens.shape}"
+            )
+        if tokens.shape[2] != 1:
+            raise ValueError("structured Stereo Decoder requires exactly one slot")
+        if tokens.shape[0] % self.stereo_num_views:
+            raise ValueError("flattened decoder batch must be divisible by views")
+
+        features = rearrange(tokens, "n d t h w -> n t h w d")
+        features = self._decode_transformer_features(features)
+        if features.shape[1] != 1:
+            raise RuntimeError("decoder temporal Transformer must preserve one slot")
+
+        rgb = self._unpatch_stereo(
+            self.stereo_rgb_head(features), output_channels=3
+        )
+        raw_disparity = self._unpatch_stereo(
+            self.stereo_disparity_head(features), output_channels=1
+        )
+        batch = tokens.shape[0] // self.stereo_num_views
+        rgb = rearrange(rgb, "(b v) c t h w -> b v c t h w", b=batch, v=self.stereo_num_views)
+        raw_disparity = rearrange(
+            raw_disparity,
+            "(b v) c t h w -> b v c t h w",
+            b=batch,
+            v=self.stereo_num_views,
+        )
+        normalized_disparity = (
+            F.softplus(raw_disparity) + self.stereo_disparity_epsilon
+        )
+        disparity = normalized_disparity * self.stereo_disparity_scale.to(
+            device=normalized_disparity.device,
+            dtype=normalized_disparity.dtype,
+        )
+        return StereoDecoderOutput(
+            rgb=rgb,
+            disparity=disparity,
+            normalized_disparity=normalized_disparity,
+        )
     
 
     def forward(self, tokens, is_image, mask=None):
