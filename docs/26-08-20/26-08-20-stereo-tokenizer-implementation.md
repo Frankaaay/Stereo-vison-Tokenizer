@@ -1,0 +1,43 @@
+# Stereo Tokenizer 实施记录
+
+## 状态
+
+本地实现与可用静态验证已完成。本记录对应本地 `frank` 分支，基线 commit 为 `701b619003b3e941e769269c7626dbf111d0377e`；实现 commit 为包含本记录的当前提交，精确 SHA 在提交后由 Git 确定并在同步记录中引用。未创建 worktree，也未连接 H200 或启动训练。
+
+## 目的
+
+实现第一版结构化 `T=4` StereoTokenizer：逐帧共享 Spatial Encoder、StereoFusion 后 `4→1` temporal reduction、48-channel VAE posterior、无 anchor 的 `1 slot→4 frames` Decoder，以及 RGB/disparity/gradient/KL/LPIPS/GAN 训练合同。原 `OmniTokenizer` legacy image-mode 保留，Tokenizer 不实现下游 DiT patchify/unpatchify。
+
+## 数据与配置合同
+
+- 当前工程 pilot：100 MCAP、3407 个 `pilot_train` sample；smoke-32 与 overfit-128 为固定训练子集，没有独立 validation。
+- 输入：`[B,3,2,3,4,256,256]`，帧间隔 0.1 秒，sample stride 0.4 秒。
+- StereoFusion：共享权重，三个视角分别构造 mask，当前 `w=(7,7,7)`、offsets `[0..7]`、left query 向负 x 搜索。
+- Disparity：`128×(softplus(raw)+eps)`，raw head bias `-2.572`；有效范围 `[0.5,112.0]`。
+- Gradient：pixel disparity gradient 独立除以 `16.0 px`，不复用 128 disparity scale。
+- 当前 pilot validation 显式关闭；仅在独立 validation Manifest 存在时允许 epoch 末完整验证一次。
+- 首轮 smoke/overfit 启用 RGB、disparity、gradient、KL、LPIPS，GAN 显式关闭；GAN 权重与 start step 必须由后续 gate 冻结。
+
+## 修改范围
+
+- `OmniTokenizer/stereo/model.py`：结构化 Encoder/Decoder、VAE posterior、raw disparity bias。
+- `OmniTokenizer/stereo/fusion.py`：共享水平 cross-attention、分视角 mask、有效候选数 entropy、detached confidence gate。
+- `OmniTokenizer/stereo/losses.py`：逐视角 masked loss、独立 pixel gradient scale、KL 口径。
+- `OmniTokenizer/stereo/training.py`：确定性 core、LPIPS、共享 image/video discriminator、显式 GAN gate、Adam `(0.5,0.9)`、warmup-cosine 配置和 validation policy。
+- `tests/stereo/`：shape、forward/backward、mask、geometry、训练 gate、优化器和源码责任边界测试。
+- `doc/Stereo Tokenizer Plan.md`：同步最终架构与当前 pilot 数据合同。
+
+## 验证
+
+- `python tests/stereo/test_source_boundary.py`：通过，2/2。
+- 对 `OmniTokenizer/stereo/*.py`、`tests/stereo/*.py` 和 `OmniTokenizer/__init__.py` 执行 AST 解析：通过，13 个文件。
+- 本轮相关文件 trailing-whitespace 检查：通过。
+- 当前本机 Python 环境没有 PyTorch，因此 `test_fusion.py`、`test_model.py`、`test_losses_geometry.py` 和 `test_training_stage.py` 的动态 tensor/forward/backward 测试未运行，不能记为通过。
+
+## Checkpoint、输出与日志
+
+本次未启动训练或评估，因此没有 checkpoint、训练 output、tmux session 或运行日志。
+
+## 当前结论与下一步
+
+代码已完成本地静态审查。下一步是在具备项目 PyTorch 依赖的环境运行全部 `tests/stereo/` 动态测试；通过后再进入另行授权的 smoke-32、overfit-128 与 Loss calibration。任何 H200 运行均不在本次授权范围内。
