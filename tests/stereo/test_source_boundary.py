@@ -7,6 +7,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 STEREO_SOURCE = ROOT / "OmniTokenizer" / "stereo"
 DATA_SOURCE = ROOT / "OmniTokenizer" / "data.py"
 LPIPS_SOURCE = ROOT / "OmniTokenizer" / "modules" / "lpips.py"
+CALLBACKS_SOURCE = ROOT / "OmniTokenizer" / "modules" / "callbacks.py"
+TRAIN_SOURCE = ROOT / "vqgan_train.py"
+TRAIN_LAUNCHER_SOURCE = ROOT / "scripts" / "recons" / "train.sh"
 TOKENIZER_SOURCES = (
     ROOT / "OmniTokenizer" / "omnitokenizer.py",
     ROOT / "OmniTokenizer" / "modules" / "stereo_fusion.py",
@@ -99,6 +102,66 @@ class SourceBoundaryTest(unittest.TestCase):
                 for node in comparisons
             )
         )
+
+    def test_training_entrypoint_uses_lightning_2_trainer_api(self) -> None:
+        source = TRAIN_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn("Trainer.add_argparse_args", source)
+        self.assertNotIn("Trainer.from_argparse_args", source)
+        self.assertIn('parser.add_argument("--devices"', source)
+        self.assertIn('precision = "bf16-mixed"', source)
+
+        launcher = TRAIN_LAUNCHER_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('--devices "${GPU_COUNT}"', launcher)
+        self.assertNotIn('--gpus "${GPU_COUNT}"', launcher)
+
+    def test_callbacks_use_lightning_2_hooks_and_trainer_output_root(self) -> None:
+        tree = ast.parse(CALLBACKS_SOURCE.read_text(encoding="utf-8"))
+        imports = {
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+        }
+        self.assertIn("pytorch_lightning.utilities", imports)
+        self.assertNotIn("pytorch_lightning.utilities.distributed", imports)
+
+        callback_classes = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name in {"ImageLogger", "VideoLogger"}
+        }
+        self.assertEqual(set(callback_classes), {"ImageLogger", "VideoLogger"})
+        for callback in callback_classes.values():
+            methods = {
+                node.name: node
+                for node in callback.body
+                if isinstance(node, ast.FunctionDef)
+            }
+            train_hook = methods["on_train_batch_end"]
+            self.assertEqual(
+                [argument.arg for argument in train_hook.args.args],
+                ["self", "trainer", "pl_module", "outputs", "batch", "batch_idx"],
+            )
+            self.assertTrue(
+                any(
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "trainer"
+                    and node.attr == "default_root_dir"
+                    for node in ast.walk(callback)
+                )
+            )
+            self.assertFalse(
+                any(
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Attribute)
+                    and isinstance(node.value.value, ast.Name)
+                    and node.value.value.id == "pl_module"
+                    and node.value.attr == "logger"
+                    and node.attr == "save_dir"
+                    for node in ast.walk(callback)
+                )
+            )
 
     def test_encoder_owns_fusion_and_not_decoder_heads(self) -> None:
         tree = ast.parse(TOKENIZER_SOURCES[0].read_text(encoding="utf-8"))

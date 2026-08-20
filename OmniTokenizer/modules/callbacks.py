@@ -5,7 +5,7 @@ from PIL import Image
 import torch
 import torchvision
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities import rank_zero_only
 
 from ..utils import save_video_grid
 
@@ -41,13 +41,11 @@ class ImageLogger(Callback):
             os.makedirs(os.path.split(path)[0], exist_ok=True)
             Image.fromarray(grid).save(path)
 
-    def log_img(self, pl_module, batch, batch_idx, split="train"):
+    def log_img(self, trainer, pl_module, batch, batch_idx, split="train"):
         if (self.check_frequency(batch_idx) and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_images") and
                 callable(pl_module.log_images) and
                 self.max_images > 0):
-            logger = type(pl_module.logger)
-
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
@@ -63,7 +61,7 @@ class ImageLogger(Callback):
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -0.5, 0.5)
 
-            self.log_local(pl_module.logger.save_dir, split, images,
+            self.log_local(trainer.default_root_dir, split, images,
                            pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             if is_train:
@@ -78,11 +76,13 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        self.log_img(pl_module, batch, batch_idx, split="train")
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.log_img(trainer, pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        self.log_img(pl_module, batch, batch_idx, split="val")
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
+    ):
+        self.log_img(trainer, pl_module, batch, batch_idx, split="val")
 
 
 
@@ -113,15 +113,13 @@ class VideoLogger(Callback):
             os.makedirs(os.path.split(path)[0], exist_ok=True)
             save_video_grid(grid, path)
 
-    def log_vid(self, pl_module, batch, batch_idx, split="train"):
+    def log_vid(self, trainer, pl_module, batch, batch_idx, split="train"):
         # print(batch_idx, self.batch_freq, self.check_frequency(batch_idx) and hasattr(pl_module, "log_videos") and callable(pl_module.log_videos) and self.max_videos > 0)
         if (self.check_frequency(batch_idx) and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_videos") and
                 callable(pl_module.log_videos) and
                 self.max_videos > 0):
             # print(batch_idx, self.batch_freq,  self.check_frequency(batch_idx))
-            logger = type(pl_module.logger)
-
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
@@ -137,7 +135,7 @@ class VideoLogger(Callback):
                     if self.clamp:
                         videos[k] = torch.clamp(videos[k], -0.5, 0.5)
 
-            self.log_local(pl_module.logger.save_dir, split, videos,
+            self.log_local(trainer.default_root_dir, split, videos,
                            pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             if is_train:
@@ -152,8 +150,10 @@ class VideoLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        self.log_vid(pl_module, batch, batch_idx, split="train")
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.log_vid(trainer, pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        self.log_vid(pl_module, batch, batch_idx, split="val")
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
+    ):
+        self.log_vid(trainer, pl_module, batch, batch_idx, split="val")

@@ -95,6 +95,6 @@ python3 vqgan_train.py \
   --kl_warmup_steps "${KL_WARMUP_STEPS}" \
   --max_steps "${MAX_STEPS}" \
   --default_root_dir "${OUTPUT_ROOT}" \
-  --gpus "${GPU_COUNT}" \
+  --devices "${GPU_COUNT}" \
   --bf16 \
   "${WANDB_ARGS[@]}"

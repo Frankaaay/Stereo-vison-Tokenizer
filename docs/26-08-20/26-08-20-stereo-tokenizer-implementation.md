@@ -172,3 +172,11 @@
 - H200 Python 3.12 import preflight 暴露 `LPIPS.from_pretrained` 使用 `is not` 比较字符串的 `SyntaxWarning`；虽然当前 Stereo smoke 直接调用 `LPIPS()`，该 classmethod 仍可能对动态构造的同值字符串误判。
 - `OmniTokenizer/modules/lpips.py` 改为 `name != "vgg_lpips"`，只修正字符串值比较，不改权重加载、网络结构、forward 或 loss 配置。
 - 源码边界测试新增 AST 检查，要求该条件使用 `NotEq`，并禁止重新引入字符串 identity comparison。
+
+### 模块 13：PyTorch Lightning 2.5 训练入口兼容
+
+- 状态：已实现，待 H200 动态验证。
+- `vqgan_train.py` 移除 Lightning 1.x 已删除的 `Trainer.add_argparse_args` 与 `Trainer.from_argparse_args`，显式声明 `devices`、`num_nodes`、`max_steps` 和 `default_root_dir`，并按 Lightning 2.5 接口构造 GPU Trainer；bf16/fp16 分别使用 `bf16-mixed`/`16-mixed`。
+- `scripts/recons/train.sh` 将旧 `--gpus` 参数改为 `--devices`，仍由 `GPU_COUNT` 控制单节点可见设备数。
+- `OmniTokenizer/modules/callbacks.py` 更新 `rank_zero_only` 导入和 batch-end hook 签名；本地图像与视频写到 `trainer.default_root_dir`，不再依赖 WandB logger。禁用 WandB 时不构造要求 logger 存在的 `LearningRateMonitor`。
+- `tests/stereo/test_source_boundary.py` 新增无 Torch 静态回归，约束不得重新引入 Lightning 1.x Trainer API、旧 `--gpus` 参数、旧 hook 签名或 `pl_module.logger.save_dir`。

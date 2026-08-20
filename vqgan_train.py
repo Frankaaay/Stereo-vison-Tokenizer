@@ -19,7 +19,10 @@ def build_parser():
     parser.add_argument("--wandb_project", type=str, default="stereo-omnitokenizer")
     parser.add_argument("--image_log_every_n_steps", type=int, default=750)
     parser.add_argument("--video_log_every_n_steps", type=int, default=1500)
-    parser = pl.Trainer.add_argparse_args(parser)
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--num_nodes", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, required=True)
+    parser.add_argument("--default_root_dir", type=str, required=True)
     parser = VQGAN.add_model_specific_args(parser)
     parser = OmniTokenizer_VQGAN.add_model_specific_args(parser)
     parser = VideoData.add_data_specific_args(parser)
@@ -39,6 +42,12 @@ def validate_runtime_args(args):
         raise ValueError("--stereo_rgb_root and --stereo_gt_root are required")
     if args.bf16 and args.fp16:
         raise ValueError("--bf16 and --fp16 are mutually exclusive")
+    if args.devices < 1:
+        raise ValueError("--devices must be positive")
+    if args.num_nodes < 1:
+        raise ValueError("--num_nodes must be positive")
+    if args.max_steps < 1:
+        raise ValueError("--max_steps must be positive")
 
 
 def build_callbacks(args, has_validation):
@@ -49,7 +58,6 @@ def build_callbacks(args, has_validation):
             save_last=True,
             filename="{epoch}-{step}",
         ),
-        LearningRateMonitor(logging_interval="step"),
         ImageLogger(
             batch_frequency=args.image_log_every_n_steps,
             max_images=4,
@@ -61,6 +69,8 @@ def build_callbacks(args, has_validation):
             clamp=True,
         ),
     ]
+    if not args.disable_wandb:
+        callbacks.append(LearningRateMonitor(logging_interval="step"))
     if has_validation:
         callbacks.append(
             ModelCheckpoint(
@@ -94,20 +104,27 @@ def main():
             config=vars(args),
         )
 
-    trainer_overrides = {
-        "logger": logger,
-        "callbacks": callbacks,
-        "log_every_n_steps": 1,
-        "limit_val_batches": 1.0 if has_validation else 0,
-        "num_sanity_val_steps": 0,
-        "check_val_every_n_epoch": 1,
-    }
+    precision = "32-true"
     if args.bf16:
-        trainer_overrides["precision"] = "bf16"
+        precision = "bf16-mixed"
     elif args.fp16:
-        trainer_overrides["precision"] = 16
+        precision = "16-mixed"
 
-    trainer = pl.Trainer.from_argparse_args(args, **trainer_overrides)
+    trainer = pl.Trainer(
+        accelerator="gpu",
+        devices=args.devices,
+        num_nodes=args.num_nodes,
+        strategy="ddp" if args.devices * args.num_nodes > 1 else "auto",
+        precision=precision,
+        max_steps=args.max_steps,
+        default_root_dir=args.default_root_dir,
+        logger=logger,
+        callbacks=callbacks,
+        log_every_n_steps=1,
+        limit_val_batches=1.0 if has_validation else 0,
+        num_sanity_val_steps=0,
+        check_val_every_n_epoch=1,
+    )
     trainer.fit(model, datamodule=data)
 
 
