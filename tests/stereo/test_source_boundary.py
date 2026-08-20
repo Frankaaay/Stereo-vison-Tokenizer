@@ -36,6 +36,37 @@ class SourceBoundaryTest(unittest.TestCase):
         self.assertNotIn("def forward(self, tokens, is_image", source)
         self.assertNotIn("self.codebook", source)
 
+    def test_encoder_owns_fusion_and_not_decoder_heads(self) -> None:
+        tree = ast.parse(TOKENIZER_SOURCES[0].read_text(encoding="utf-8"))
+        encoder = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "OmniTokenizer_Encoder"
+        )
+        constructor = next(
+            node
+            for node in encoder.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        self_attributes = {
+            node.attr
+            for node in ast.walk(constructor)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        }
+        loaded_names = {
+            node.id for node in ast.walk(constructor) if isinstance(node, ast.Name)
+        }
+        self.assertIn("stereo_fusion", self_attributes)
+        self.assertIn("stereo_temporal_projection", self_attributes)
+        self.assertFalse(
+            any(name.startswith("stereo_disparity_") for name in loaded_names)
+        )
+        self.assertNotIn("stereo_rgb_head", self_attributes)
+        self.assertNotIn("stereo_disparity_head", self_attributes)
+
 
 if __name__ == "__main__":
     unittest.main()

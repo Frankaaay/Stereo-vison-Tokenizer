@@ -31,7 +31,7 @@
 
 ## 验证
 
-- `python tests/stereo/test_source_boundary.py`：通过，4/4。
+- `python tests/stereo/test_source_boundary.py`：通过，5/5（含 Encoder/Decoder 参数所有权回归检查）。
 - `python tests/stereo/test_entrypoints_source.py`：通过，3/3。
 - `python tests/stereo/test_rgb_cache_contract.py`：通过，2/2。
 - 17 个主实现、入口和测试 Python 文件 AST/bytecode 编译：通过。
@@ -124,3 +124,10 @@
 - 原 `OmniTokenizer_Encoder/Decoder` 中不可达的 legacy temporal patch embedding、legacy pixel projection、image-mode `forward` 和对应参数已删除。
 - `OmniTokenizer/__init__.py` 不再导出旁路 `StereoTokenizer`；源码边界测试改为检查唯一主实现、无 codebook/legacy image forward、无 DiT patchify。
 - 设计文档和 README 已同步说明：本分支是 Stereo-only，原 model-zoo checkpoint 和离散 codebook 下游入口与当前主类不兼容。
+
+### 模块 10：Encoder cleanup 回归修复
+
+- 状态：已修复，待独立提交。
+- 修复 cleanup commit `36febdf` 将 Decoder Head 初始化误贴入 Encoder 的问题；恢复 Encoder 对 views、frames、block 和 search radii 的校验。
+- 恢复共享 `StereoFusion` 和 `LayerNorm(4D) → Linear(4D,D) → LayerNorm(D)` temporal projection；Encoder 不再引用 disparity scale/bias/epsilon 或创建 Decoder Heads。
+- 新增无 Torch 依赖的 AST 回归测试，直接约束 Encoder/Decoder 的参数所有权；真实实例化与 forward 仍须在 H200 验证。

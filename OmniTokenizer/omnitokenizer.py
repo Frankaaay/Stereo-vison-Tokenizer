@@ -953,43 +953,33 @@ class OmniTokenizer_Encoder(nn.Module):
 
         self.stereo_num_views = stereo_num_views
         self.stereo_num_frames = stereo_num_frames
-        self.stereo_disparity_epsilon = stereo_disparity_epsilon
+        self.stereo_embedding_dim = dim
         if stereo_num_views != 3:
-            raise ValueError("Stereo Decoder requires exactly 3 views")
+            raise ValueError("Stereo Encoder requires exactly 3 views")
         if stereo_num_frames != 4:
-            raise ValueError("Stereo Decoder requires exactly 4 frames")
+            raise ValueError("Stereo Encoder requires exactly 4 frames")
         if image_channel != 3:
-            raise ValueError("Stereo Decoder requires RGB output")
+            raise ValueError("Stereo Encoder requires RGB input")
         if any(layer not in "tw" for layer in block):
-            raise ValueError("Stereo Decoder supports only t/w spatial blocks")
-        if stereo_disparity_scale is None:
-            raise ValueError("stereo_disparity_scale must be explicitly configured")
-        if len(stereo_disparity_scale) != stereo_num_views:
-            raise ValueError("stereo_disparity_scale must contain one value per view")
-        if any(scale <= 0 for scale in stereo_disparity_scale):
-            raise ValueError("every stereo disparity scale must be positive")
-        if stereo_disparity_bias is None or not math.isfinite(
-            stereo_disparity_bias
-        ):
-            raise ValueError("stereo_disparity_bias must be finite")
-        if stereo_disparity_epsilon <= 0:
-            raise ValueError("stereo_disparity_epsilon must be positive")
+            raise ValueError("Stereo Encoder supports only t/w spatial blocks")
+        if stereo_search_radii is None:
+            raise ValueError("stereo_search_radii must be explicitly configured")
+        if len(stereo_search_radii) != stereo_num_views:
+            raise ValueError("stereo_search_radii must contain one value per view")
 
-        patch_area = patch_height * patch_width
-        self.stereo_rgb_head = nn.Linear(
-            dim,
-            image_channel * stereo_num_frames * patch_area,
+        self.stereo_fusion = StereoFusion(
+            dim=dim,
+            heads=heads,
+            head_dim=dim_head,
+            search_radii=stereo_search_radii,
+            search_direction=stereo_search_direction,
+            attention_dropout=attn_dropout,
         )
-        self.stereo_disparity_head = nn.Linear(
-            dim,
-            stereo_num_frames * patch_area,
-        )
-        self.register_buffer(
-            "stereo_disparity_scale",
-            torch.as_tensor(
-                stereo_disparity_scale, dtype=torch.float32
-            ).reshape(1, stereo_num_views, 1, 1, 1, 1),
-            persistent=True,
+        temporal_projection_width = stereo_num_frames * dim
+        self.stereo_temporal_projection = nn.Sequential(
+            nn.LayerNorm(temporal_projection_width),
+            nn.Linear(temporal_projection_width, dim),
+            nn.LayerNorm(dim),
         )
 
         if initialize:
