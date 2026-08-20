@@ -44,39 +44,60 @@
 
 ## H200 仓库与 worktree
 
-- 服务器上还没有仓库这个部分待定。下面的同步流程里面的数据路径也都是不对的，不要参考之后会改。
+- 两台 H200 都使用 `frank` 自己的独立完整 clone，不是 worktree：
+  `/data/home/frank/projects/Stereo-vison-Tokenizer`
+- 当前正式开发分支为 `frank`，upstream 为 `origin/frank`，`origin` 必须保持为：
+  `https://github.com/Frankaaay/Stereo-vison-Tokenizer.git`
+- 2026-08-20 只读核对基线：两端 worktree 均 clean，HEAD 均为
+  `cbf99baf56316c6140009b64f48d737d73966746`。这是核对时点的事实，不是长期固定版本；每次同步或运行前仍须实时复核。
 
 ## H200 Git 同步流程
 
-- H200 节点不能直接访问 GitHub。GitHub fetch 必须在 `jump-h200-qinghua` 上通过两份 NFS 映射分别执行：
+- H200 节点不能直接访问 GitHub，不得在 `h200-1` 或 `h200-2` 上直接执行 `fetch` 或 `pull`。
+  GitHub fetch 必须在 `jump-h200-qinghua` 上通过两份 NFS 映射分别执行：
 
 ```bash
-git -C /data-214-30-239-40/home/maxliu/projects/NGADv1 fetch origin
-git -C /data-214-30-239-42/home/maxliu/projects/NGADv1 fetch origin
+git -C /data-214-30-239-40/home/frank/projects/Stereo-vison-Tokenizer \
+  fetch --prune origin refs/heads/frank:refs/remotes/origin/frank
+
+git -C /data-214-30-239-42/home/frank/projects/Stereo-vison-Tokenizer \
+  fetch --prune origin refs/heads/frank:refs/remotes/origin/frank
 ```
 
-- 跳板机只更新两份仓库的 common Git refs；不要从跳板机操作映射路径下的 `.worktrees/main`。
-- fetch 完成后，必须在两台 H200 上分别更新 working tree：
+- 跳板机只更新两份 clone 各自的 `refs/remotes/origin/frank`；不得从跳板机执行 merge、checkout
+  或修改 working tree。两份 NFS 映射对应两个 node-local clone，必须分别 fetch，不能只更新一份。
+- fetch 成功后，必须登录两台 H200，在各自 clone 中以 fast-forward-only 更新 `frank` working tree：
 
 ```bash
 # h200-1
-git -C /data/home/maxliu/projects/NGADv1/.worktrees/main \
-  pull --ff-only origin main
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
+  merge --ff-only origin/frank
 
 # h200-2
-git -C /data/home/maxliu/projects/NGADv1/.worktrees/main \
-  pull --ff-only origin main
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
+  merge --ff-only origin/frank
 ```
 
-- 执行 fetch/pull 前先在两台 H200 分别运行：
+- fetch 和 merge 前，先在两台 H200 分别核对：
 
 ```bash
-git -C /data/home/maxliu/projects/NGADv1/.worktrees/main \
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
   status --short --branch
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
+  branch --show-current
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
+  rev-parse HEAD
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
+  remote get-url origin
 ```
 
-- 任一节点有未提交修改、fetch 失败、无法 fast-forward、分支不是 `main`，或两端最终 SHA 不一致时，立即停止并报告；不执行 rebase、reset、force checkout 或删除重建。
-- 用户指定精确 SHA 的复现或 smoke 不执行 pull。使用独立 clean worktree，并在所有节点验证精确 SHA。
+- 任一节点有未提交修改、分支不是 `frank`、upstream 不是 `origin/frank`、origin URL 不符、fetch
+  失败、无法 fast-forward，或两端最终 SHA 不一致时，立即停止并报告；不执行 rebase、reset、force
+  checkout、删除重建，也不新建替代 branch/worktree。
+- 更新完成后必须在两端再次核对 `status --short --branch` 和 `rev-parse HEAD`，确认 worktree clean、
+  两端 HEAD 相同，且等于跳板机查询到的目标 `origin/frank` SHA。
+- 用户指定精确 SHA 的复现或 smoke 时不跟随分支更新；先按“分支与 worktree 授权边界”确认现有目标
+  branch/worktree 或取得新建授权，再在所有节点验证精确 SHA。
 
 ## H200 数据与存储拓扑
 
@@ -162,7 +183,7 @@ git -C /data/home/maxliu/projects/NGADv1/.worktrees/main \
 - 禁止批量删除文件或目录；需要删除时一次只处理一个明确文件。不得使用 `rm -rf`、`Remove-Item -Recurse`、`del /s`、`rd /s` 或 `rmdir /s`。
 - 只暂存具名文件，不使用 `git add .` 或 `git add -A`。
 - 未经用户明确要求，不 commit、不 push、不创建 PR；即使获得授权，也必须先完成可行的最小验证。
-- `docs/` 和 `README` 可随对应代码或实验记录纳入用户授权的提交；`AGENTS.md` 和 `CLAUDE.md` 保持本地，不提交、不推送。
+- `docs/` 和 `README` 可随对应代码或实验记录纳入用户授权的提交。
 - 禁止私自新建 branch/worktree；任何必要性都必须在创建前向用户说明并取得明确授权。
 
 ## 修改、测试与实验记录
