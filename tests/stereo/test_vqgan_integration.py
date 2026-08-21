@@ -122,6 +122,15 @@ class StereoVQGANIntegrationTest(unittest.TestCase):
         self.assertIsInstance(model.hparams["args"], Namespace)
         self.assertEqual(vars(model.hparams["args"]), vars(args))
 
+    def test_train_keeps_perceptual_model_in_eval_mode(self) -> None:
+        model = VQGAN(self._args())
+        model.perceptual_model = torch.nn.Dropout(p=0.5)
+
+        model.train()
+
+        self.assertTrue(model.training)
+        self.assertFalse(model.perceptual_model.training)
+
 
 if __name__ == "__main__":
     unittest.main()

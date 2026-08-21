@@ -251,6 +251,12 @@ class VQGAN(pl.LightningModule):
         self._micro_step = 0
         self.save_hyperparameters("args")
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.perceptual_model is not None:
+            self.perceptual_model.eval()
+        return self
+
     @staticmethod
     def _validate_configuration(args) -> None:
         if args.image_channels != 3:
