@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import argparse
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Optional
 import pytorch_lightning as pl
@@ -253,6 +254,9 @@ class VQGAN(pl.LightningModule):
         self.grad_clip_val = args.grad_clip_val
         self.grad_clip_val_disc = args.grad_clip_val_disc
         self._micro_step = 0
+        self.generator_updates = 0
+        self.discriminator_updates = 0
+        self.batch_updates = 0
         self.save_hyperparameters("args")
 
     def train(self, mode: bool = True):
@@ -301,10 +305,69 @@ class VQGAN(pl.LightningModule):
             raise ValueError("geometry_gradient_scale_px must be positive")
         if args.grad_accumulates <= 0:
             raise ValueError("grad_accumulates must be positive")
+        if args.discriminator_iter_start < 0:
+            raise ValueError("discriminator_iter_start must be non-negative")
         if args.gan_enabled and (
             args.image_gan_weight == 0 and args.video_gan_weight == 0
         ):
             raise ValueError("GAN is enabled but both GAN weights are zero")
+        if args.gan_enabled and args.discriminator_iter_start >= args.max_steps:
+            raise ValueError(
+                "GAN activation must precede the final generator update"
+            )
+
+    @staticmethod
+    def _read_checkpoint_counter(counters: Mapping, name: str) -> int:
+        value = counters.get(name)
+        if type(value) is not int or value < 0:
+            raise ValueError(
+                f"checkpoint update counter {name} must be a non-negative integer"
+            )
+        return value
+
+    def on_save_checkpoint(self, checkpoint) -> None:
+        checkpoint["stereo_update_counters"] = {
+            "generator_updates": self.generator_updates,
+            "discriminator_updates": self.discriminator_updates,
+            "batch_updates": self.batch_updates,
+        }
+
+    def on_load_checkpoint(self, checkpoint) -> None:
+        counters = checkpoint.get("stereo_update_counters")
+        if counters is None:
+            if self.gan_enabled:
+                raise ValueError(
+                    "legacy GAN checkpoint has no independent optimizer counters"
+                )
+            global_step = checkpoint.get("global_step", 0)
+            if type(global_step) is not int or global_step < 0:
+                raise ValueError("checkpoint global_step must be a non-negative integer")
+            self.generator_updates = global_step
+            self.discriminator_updates = 0
+            self.batch_updates = global_step * self.grad_accumulates
+            self._micro_step = 0
+            return
+        if not isinstance(counters, Mapping):
+            raise TypeError("stereo_update_counters must be a mapping")
+
+        generator_updates = self._read_checkpoint_counter(
+            counters, "generator_updates"
+        )
+        discriminator_updates = self._read_checkpoint_counter(
+            counters, "discriminator_updates"
+        )
+        batch_updates = self._read_checkpoint_counter(counters, "batch_updates")
+        if discriminator_updates > generator_updates:
+            raise ValueError("discriminator updates cannot exceed generator updates")
+        if not self.gan_enabled and discriminator_updates != 0:
+            raise ValueError("GAN-disabled checkpoint has discriminator updates")
+        if batch_updates < generator_updates * self.grad_accumulates:
+            raise ValueError("batch updates are inconsistent with generator updates")
+
+        self.generator_updates = generator_updates
+        self.discriminator_updates = discriminator_updates
+        self.batch_updates = batch_updates
+        self._micro_step = 0
 
     @property
     def latent_shape(self):
@@ -421,7 +484,10 @@ class VQGAN(pl.LightningModule):
     def _effective_kl_weight(self) -> float:
         if self.kl_warmup_steps == 0:
             return self.kl_weight
-        fraction = min(1.0, float(self.global_step) / self.kl_warmup_steps)
+        fraction = min(
+            1.0,
+            float(self.generator_updates) / self.kl_warmup_steps,
+        )
         return self.kl_weight * fraction
 
     def compute_core_loss(
@@ -491,7 +557,10 @@ class VQGAN(pl.LightningModule):
         return torch.stack(losses).mean()
 
     def _gan_is_active(self) -> bool:
-        return self.gan_enabled and self.global_step >= self.args.discriminator_iter_start
+        return (
+            self.gan_enabled
+            and self.generator_updates >= self.args.discriminator_iter_start
+        )
 
     def _generator_adversarial_loss(
         self,
@@ -628,6 +697,7 @@ class VQGAN(pl.LightningModule):
         result = self.compute_core_loss(batch, sample_posterior=True)
         rgb_target = batch["video"][:, :, 0]
         perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        gan_active = self._gan_is_active()
         adversarial, feature_matching, image_gan, video_gan = (
             self._generator_adversarial_loss(result.model.rgb, rgb_target)
         )
@@ -640,6 +710,7 @@ class VQGAN(pl.LightningModule):
         generator_optimizer = optimizers[0]
         self.manual_backward(generator_loss / self.grad_accumulates)
 
+        self.batch_updates += 1
         self._micro_step += 1
         should_step = self._micro_step % self.grad_accumulates == 0
         if should_step:
@@ -650,12 +721,14 @@ class VQGAN(pl.LightningModule):
                 )
             generator_optimizer.step()
             generator_optimizer.zero_grad()
-            schedulers[0].step_update(self.global_step)
+            self.generator_updates += 1
+            schedulers[0].step_update(self.generator_updates)
+            self._micro_step = 0
 
         discriminator_total = result.model.rgb.new_zeros(())
         discriminator_image = result.model.rgb.new_zeros(())
         discriminator_video = result.model.rgb.new_zeros(())
-        if self._gan_is_active():
+        if gan_active:
             (
                 discriminator_total,
                 discriminator_image,
@@ -671,7 +744,11 @@ class VQGAN(pl.LightningModule):
                     )
                 discriminator_optimizer.step()
                 discriminator_optimizer.zero_grad()
-                schedulers[1].step_update(self.global_step)
+                self.discriminator_updates += 1
+                schedulers[1].step_update(self.discriminator_updates)
+
+        if should_step and self.generator_updates >= self.args.max_steps:
+            self.trainer.should_stop = True
 
         self._log_loss_breakdown("train", result)
         self.log_dict(
@@ -685,6 +762,15 @@ class VQGAN(pl.LightningModule):
                 "train/discriminator_loss": discriminator_total,
                 "train/d_image_loss": discriminator_image,
                 "train/d_video_loss": discriminator_video,
+                "train/generator_updates": result.model.rgb.new_tensor(
+                    float(self.generator_updates)
+                ),
+                "train/discriminator_updates": result.model.rgb.new_tensor(
+                    float(self.discriminator_updates)
+                ),
+                "train/batch_updates": result.model.rgb.new_tensor(
+                    float(self.batch_updates)
+                ),
             },
             logger=True,
             on_step=True,
@@ -743,6 +829,9 @@ class VQGAN(pl.LightningModule):
         ]
 
         if self.gan_enabled:
+            discriminator_steps = (
+                self.args.max_steps - self.args.discriminator_iter_start
+            )
             discriminator_parameters = []
             if self.image_discriminator is not None:
                 discriminator_parameters.extend(
@@ -764,7 +853,7 @@ class VQGAN(pl.LightningModule):
                     if self.args.dis_minlr_multiplier
                     else self.args.lr_min
                 ),
-                t_initial=self.args.max_steps,
+                t_initial=discriminator_steps,
                 warmup_lr_init=self.args.warmup_lr_init,
                 warmup_t=(
                     self.args.dis_warmup_steps

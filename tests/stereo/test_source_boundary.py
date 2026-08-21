@@ -116,8 +116,11 @@ class SourceBoundaryTest(unittest.TestCase):
 
     def test_update_based_timm_schedulers_use_step_update(self) -> None:
         source = TOKENIZER_SOURCES[0].read_text(encoding="utf-8")
-        self.assertIn("schedulers[0].step_update(self.global_step)", source)
-        self.assertIn("schedulers[1].step_update(self.global_step)", source)
+        self.assertIn("schedulers[0].step_update(self.generator_updates)", source)
+        self.assertIn(
+            "schedulers[1].step_update(self.discriminator_updates)", source
+        )
+        self.assertNotIn("step_update(self.global_step)", source)
         self.assertNotIn("schedulers[0].step(self.global_step)", source)
         self.assertNotIn("schedulers[1].step(self.global_step)", source)
 

@@ -152,6 +152,62 @@ class StereoVQGANIntegrationTest(unittest.TestCase):
         self.assertEqual(len(final_block), 1)
         self.assertIsInstance(final_block[0], torch.nn.Conv3d)
 
+    def test_generator_updates_control_kl_warmup_and_gan_activation(self) -> None:
+        args = self._args()
+        args.gan_enabled = True
+        args.image_gan_weight = 1.0
+        args.discriminator_iter_start = 5
+        args.kl_weight = 1e-4
+        args.kl_warmup_steps = 10
+        model = VQGAN(args)
+
+        model.generator_updates = 4
+        self.assertAlmostEqual(model._effective_kl_weight(), 4e-5)
+        self.assertFalse(model._gan_is_active())
+
+        model.generator_updates = 5
+        self.assertAlmostEqual(model._effective_kl_weight(), 5e-5)
+        self.assertTrue(model._gan_is_active())
+
+        optimizers, schedulers = model.configure_optimizers()
+        self.assertEqual(len(optimizers), 2)
+        self.assertEqual(len(schedulers), 2)
+        self.assertEqual(schedulers[0]["scheduler"].t_initial, 100)
+        self.assertEqual(schedulers[1]["scheduler"].t_initial, 95)
+
+    def test_update_counters_round_trip_through_checkpoint_hook(self) -> None:
+        model = VQGAN(self._args())
+        model.generator_updates = 7
+        model.discriminator_updates = 0
+        model.batch_updates = 11
+        checkpoint = {}
+        model.on_save_checkpoint(checkpoint)
+
+        restored = VQGAN(self._args())
+        restored.on_load_checkpoint(checkpoint)
+
+        self.assertEqual(restored.generator_updates, 7)
+        self.assertEqual(restored.discriminator_updates, 0)
+        self.assertEqual(restored.batch_updates, 11)
+
+    def test_legacy_non_gan_checkpoint_recovers_generator_updates(self) -> None:
+        model = VQGAN(self._args())
+
+        model.on_load_checkpoint({"global_step": 9})
+
+        self.assertEqual(model.generator_updates, 9)
+        self.assertEqual(model.discriminator_updates, 0)
+        self.assertEqual(model.batch_updates, 9)
+
+    def test_legacy_gan_checkpoint_without_counters_is_rejected(self) -> None:
+        args = self._args()
+        args.gan_enabled = True
+        args.image_gan_weight = 1.0
+        model = VQGAN(args)
+
+        with self.assertRaisesRegex(ValueError, "independent optimizer counters"):
+            model.on_load_checkpoint({"global_step": 9})
+
 
 if __name__ == "__main__":
     unittest.main()

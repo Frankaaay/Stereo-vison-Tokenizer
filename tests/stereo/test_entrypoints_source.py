@@ -13,6 +13,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("os.listdir", source)
         self.assertIn("limit_val_batches=1.0 if has_validation else 0", source)
         self.assertIn("check_val_every_n_epoch=1", source)
+        self.assertIn("max_steps=-1 if args.gan_enabled else args.max_steps", source)
+        self.assertIn("max_epochs=-1", source)
 
     def test_evaluation_is_deterministic_and_strict(self):
         source = (ROOT / "vqgan_eval.py").read_text(encoding="utf-8")
