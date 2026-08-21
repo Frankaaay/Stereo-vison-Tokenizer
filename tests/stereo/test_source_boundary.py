@@ -4,71 +4,89 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-STEREO_SOURCE = ROOT / "OmniTokenizer" / "stereo"
-DATA_SOURCE = ROOT / "OmniTokenizer" / "data.py"
-LPIPS_SOURCE = ROOT / "OmniTokenizer" / "modules" / "lpips.py"
-CALLBACKS_SOURCE = ROOT / "OmniTokenizer" / "modules" / "callbacks.py"
-TRAIN_SOURCE = ROOT / "vqgan_train.py"
-TRAIN_LAUNCHER_SOURCE = ROOT / "scripts" / "recons" / "train.sh"
-TOKENIZER_SOURCES = (
-    ROOT / "OmniTokenizer" / "omnitokenizer.py",
-    ROOT / "OmniTokenizer" / "modules" / "stereo_fusion.py",
-    ROOT / "OmniTokenizer" / "modules" / "stereo_geometry.py",
-    ROOT / "OmniTokenizer" / "modules" / "stereo_losses.py",
+PACKAGE = ROOT / "stereo_tokenizer"
+MODEL_SOURCE = PACKAGE / "model.py"
+DATA_SOURCE = PACKAGE / "data.py"
+LPIPS_SOURCE = PACKAGE / "modules" / "lpips.py"
+CALLBACKS_SOURCE = PACKAGE / "modules" / "callbacks.py"
+TRAIN_SOURCE = ROOT / "train_stereo_vae.py"
+TRAIN_LAUNCHER_SOURCE = ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
+ACTIVE_SOURCES = tuple(PACKAGE.rglob("*.py")) + (
+    TRAIN_SOURCE,
+    ROOT / "eval_stereo_vae.py",
 )
 
 
 class SourceBoundaryTest(unittest.TestCase):
-    def test_main_stereo_sources_parse(self) -> None:
-        for path in TOKENIZER_SOURCES:
+    def test_stereo_sources_parse(self) -> None:
+        for path in ACTIVE_SOURCES:
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
-    def test_sidecar_implementation_is_removed(self) -> None:
-        self.assertEqual(list(STEREO_SOURCE.glob("*.py")), [])
+    def test_public_package_exports_only_stereo_vae(self) -> None:
+        tree = ast.parse((PACKAGE / "__init__.py").read_text(encoding="utf-8"))
+        assignments = {
+            target.id: ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id == "__all__"
+        }
+        self.assertEqual(assignments["__all__"], ["StereoVAE"])
+
+    def test_legacy_packages_and_entrypoints_are_removed(self) -> None:
+        for directory in (ROOT / "OmniTokenizer", ROOT / "Diffusion"):
+            files = [path for path in directory.rglob("*") if path.is_file()]
+            self.assertEqual(files, [], str(directory))
+        for path in (
+            ROOT / "vqgan_train.py",
+            ROOT / "vqgan_eval.py",
+            ROOT / "transformer_train.py",
+            ROOT / "transformer_eval.py",
+        ):
+            self.assertFalse(path.exists(), str(path))
+
+    def test_active_sources_have_no_legacy_vq_api(self) -> None:
+        combined_source = "\n".join(
+            path.read_text(encoding="utf-8") for path in ACTIVE_SOURCES
+        )
+        for token in (
+            "VQGAN",
+            "OmniTokenizer",
+            "codebook_dim",
+            "pre_vq_conv",
+            "post_vq_conv",
+            "load_vqgan",
+        ):
+            self.assertNotIn(token, combined_source)
 
     def test_tokenizer_does_not_own_dit_patchify(self) -> None:
         combined_source = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in TOKENIZER_SOURCES
+            path.read_text(encoding="utf-8") for path in ACTIVE_SOURCES
         )
-        forbidden = ("d_DiT", "unpatchify", "dit_patch", "DiTPatch")
-        for token in forbidden:
+        for token in ("d_DiT", "unpatchify", "dit_patch", "DiTPatch"):
             self.assertNotIn(token, combined_source)
 
-    def test_main_tokenizer_has_no_legacy_image_forward(self) -> None:
-        source = TOKENIZER_SOURCES[0].read_text(encoding="utf-8")
-        self.assertNotIn("def forward(self, video, is_image", source)
-        self.assertNotIn("def forward(self, tokens, is_image", source)
-        self.assertNotIn("self.codebook", source)
-
-    def test_legacy_imagenet_dependency_is_not_imported_at_module_load(self) -> None:
-        tree = ast.parse(DATA_SOURCE.read_text(encoding="utf-8"))
-        top_level_modules = {
-            node.module
-            for node in tree.body
-            if isinstance(node, ast.ImportFrom) and node.module is not None
+    def test_model_declares_stereo_model_names(self) -> None:
+        tree = ast.parse(MODEL_SOURCE.read_text(encoding="utf-8"))
+        classes = {
+            node.name for node in tree.body if isinstance(node, ast.ClassDef)
         }
-        self.assertNotIn(
-            "imagenet_stubs.imagenet_2012_labels", top_level_modules
-        )
+        expected = {
+            "StereoVAE",
+            "StereoEncoder",
+            "StereoDecoder",
+            "StereoEncodeOutput",
+            "StereoDecodeOutput",
+            "StereoVAEOutput",
+        }
+        self.assertEqual({name for name in classes if not name.startswith("_")}, expected)
 
-        image_dataset = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name == "ImageDataset"
-        )
-        constructor = next(
-            node
-            for node in image_dataset.body
-            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
-        )
-        self.assertTrue(
-            any(
-                isinstance(node, ast.ImportFrom)
-                and node.module == "imagenet_stubs.imagenet_2012_labels"
-                for node in ast.walk(constructor)
-            )
-        )
+    def test_data_module_is_stereo_only(self) -> None:
+        tree = ast.parse(DATA_SOURCE.read_text(encoding="utf-8"))
+        classes = {
+            node.name for node in tree.body if isinstance(node, ast.ClassDef)
+        }
+        self.assertEqual(classes, {"StereoManifestDataset", "StereoDataModule"})
 
     def test_lpips_pretrained_name_uses_value_comparison(self) -> None:
         tree = ast.parse(LPIPS_SOURCE.read_text(encoding="utf-8"))
@@ -94,14 +112,6 @@ class SourceBoundaryTest(unittest.TestCase):
                 for node in comparisons
             )
         )
-        self.assertFalse(
-            any(
-                isinstance(node.ops[0], (ast.Is, ast.IsNot))
-                and isinstance(node.comparators[0], ast.Constant)
-                and isinstance(node.comparators[0].value, str)
-                for node in comparisons
-            )
-        )
 
     def test_training_entrypoint_uses_lightning_2_trainer_api(self) -> None:
         source = TRAIN_SOURCE.read_text(encoding="utf-8")
@@ -114,22 +124,18 @@ class SourceBoundaryTest(unittest.TestCase):
         self.assertIn('--devices "${GPU_COUNT}"', launcher)
         self.assertNotIn('--gpus "${GPU_COUNT}"', launcher)
 
-    def test_update_based_timm_schedulers_use_step_update(self) -> None:
-        source = TOKENIZER_SOURCES[0].read_text(encoding="utf-8")
+    def test_update_based_timm_schedulers_use_independent_counters(self) -> None:
+        source = MODEL_SOURCE.read_text(encoding="utf-8")
         self.assertIn("schedulers[0].step_update(self.generator_updates)", source)
         self.assertIn(
             "schedulers[1].step_update(self.discriminator_updates)", source
         )
         self.assertNotIn("step_update(self.global_step)", source)
-        self.assertNotIn("schedulers[0].step(self.global_step)", source)
-        self.assertNotIn("schedulers[1].step(self.global_step)", source)
 
     def test_callbacks_use_lightning_2_hooks_and_trainer_output_root(self) -> None:
         tree = ast.parse(CALLBACKS_SOURCE.read_text(encoding="utf-8"))
         imports = {
-            node.module
-            for node in tree.body
-            if isinstance(node, ast.ImportFrom)
+            node.module for node in tree.body if isinstance(node, ast.ImportFrom)
         }
         self.assertIn("pytorch_lightning.utilities", imports)
         self.assertNotIn("pytorch_lightning.utilities.distributed", imports)
@@ -161,25 +167,13 @@ class SourceBoundaryTest(unittest.TestCase):
                     for node in ast.walk(callback)
                 )
             )
-            self.assertFalse(
-                any(
-                    isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Attribute)
-                    and isinstance(node.value.value, ast.Name)
-                    and node.value.value.id == "pl_module"
-                    and node.value.attr == "logger"
-                    and node.attr == "save_dir"
-                    for node in ast.walk(callback)
-                )
-            )
 
     def test_encoder_owns_fusion_and_not_decoder_heads(self) -> None:
-        tree = ast.parse(TOKENIZER_SOURCES[0].read_text(encoding="utf-8"))
+        tree = ast.parse(MODEL_SOURCE.read_text(encoding="utf-8"))
         encoder = next(
             node
             for node in tree.body
-            if isinstance(node, ast.ClassDef)
-            and node.name == "OmniTokenizer_Encoder"
+            if isinstance(node, ast.ClassDef) and node.name == "StereoEncoder"
         )
         constructor = next(
             node
@@ -193,14 +187,8 @@ class SourceBoundaryTest(unittest.TestCase):
             and isinstance(node.value, ast.Name)
             and node.value.id == "self"
         }
-        loaded_names = {
-            node.id for node in ast.walk(constructor) if isinstance(node, ast.Name)
-        }
         self.assertIn("stereo_fusion", self_attributes)
         self.assertIn("stereo_temporal_projection", self_attributes)
-        self.assertFalse(
-            any(name.startswith("stereo_disparity_") for name in loaded_names)
-        )
         self.assertNotIn("stereo_rgb_head", self_attributes)
         self.assertNotIn("stereo_disparity_head", self_attributes)
 

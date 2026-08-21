@@ -7,21 +7,24 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class StereoEntrypointSourceTest(unittest.TestCase):
     def test_training_entry_has_no_legacy_inflation_or_auto_resume(self):
-        source = (ROOT / "vqgan_train.py").read_text(encoding="utf-8")
+        source = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
         self.assertNotIn("inflate_gen", source)
         self.assertNotIn("inflate_dis", source)
         self.assertNotIn("os.listdir", source)
+        self.assertIn("StereoVAE(args)", source)
+        self.assertIn("StereoDataModule(args)", source)
         self.assertIn("limit_val_batches=1.0 if has_validation else 0", source)
         self.assertIn("check_val_every_n_epoch=1", source)
         self.assertIn("max_steps=-1 if args.gan_enabled else args.max_steps", source)
         self.assertIn("max_epochs=-1", source)
 
     def test_evaluation_is_deterministic_and_strict(self):
-        source = (ROOT / "vqgan_eval.py").read_text(encoding="utf-8")
+        source = (ROOT / "eval_stereo_vae.py").read_text(encoding="utf-8")
         self.assertIn("sample_posterior=False", source)
         self.assertIn("strict=True", source)
         self.assertIn("_checkpoint_model_args(checkpoint", source)
-        self.assertIn("OmniTokenizer_VQGAN(checkpoint_args)", source)
+        self.assertIn("StereoVAE(checkpoint_args)", source)
+        self.assertIn("--stereo_vae_ckpt", source)
         self.assertIn("_validate_checkpoint_semantics", source)
         self.assertNotIn(".codebook", source)
         self.assertIn("depth_abs_rel", source)
@@ -29,9 +32,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("calibration / disparity_target", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):
-        source = (ROOT / "scripts" / "recons" / "train.sh").read_text(
-            encoding="utf-8"
-        )
+        source = (
+            ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
+        ).read_text(encoding="utf-8")
         for name in (
             "PER_DEVICE_BATCH_SIZE",
             "GRAD_ACCUMULATES",
@@ -42,6 +45,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "KL_WARMUP_STEPS",
         ):
             self.assertIn(f"${{{name}:?", source)
+        self.assertIn("python3 train_stereo_vae.py", source)
+        self.assertIn("--latent_channels 48", source)
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--use_vae", source)
 

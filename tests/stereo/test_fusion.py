@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from OmniTokenizer.modules.stereo_fusion import StereoFusion
+from stereo_tokenizer.modules.stereo_fusion import StereoFusion
 
 
 class StereoFusionTest(unittest.TestCase):

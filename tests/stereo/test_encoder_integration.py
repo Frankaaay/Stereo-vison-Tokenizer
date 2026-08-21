@@ -2,12 +2,12 @@ import unittest
 
 import torch
 
-from OmniTokenizer.omnitokenizer import OmniTokenizer_Encoder
+from stereo_tokenizer.model import StereoEncoder
 
 
 class StructuredStereoEncoderTest(unittest.TestCase):
-    def _encoder(self) -> OmniTokenizer_Encoder:
-        return OmniTokenizer_Encoder(
+    def _encoder(self) -> StereoEncoder:
+        return StereoEncoder(
             image_size=32,
             image_channel=3,
             norm_type="group",
