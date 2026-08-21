@@ -1,5 +1,7 @@
 import argparse
 import json
+from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -9,6 +11,43 @@ from OmniTokenizer import OmniTokenizer_VQGAN, VQGAN, VideoData
 
 
 VIEW_NAMES = ("head", "lefthand", "righthand")
+CHECKPOINT_SEMANTIC_FIELDS = (
+    "resolution",
+    "image_channels",
+    "norm_type",
+    "embedding_dim",
+    "codebook_dim",
+    "patch_size",
+    "patch_embed",
+    "enc_block",
+    "dec_block",
+    "twod_window_size",
+    "temporal_patch_size",
+    "defer_temporal_pool",
+    "defer_spatial_pool",
+    "spatial_pos",
+    "spatial_depth",
+    "temporal_depth",
+    "causal_in_temporal_transformer",
+    "causal_in_peg",
+    "dim_head",
+    "heads",
+    "attn_dropout",
+    "ff_dropout",
+    "ff_mult",
+    "stereo_num_views",
+    "stereo_num_frames",
+    "stereo_search_radii",
+    "stereo_search_direction",
+    "stereo_disparity_scale",
+    "stereo_disparity_bias",
+    "stereo_disparity_epsilon",
+    "stereo_mode",
+    "stereo_disparity_min_px",
+    "stereo_disparity_max_px",
+    "stereo_lr_error_abs_threshold_px",
+    "stereo_lr_error_relative_threshold",
+)
 
 
 def build_parser():
@@ -40,11 +79,54 @@ def validate_args(args):
         raise RuntimeError(f"requested {args.device}, but CUDA is unavailable")
 
 
+def _checkpoint_model_args(checkpoint, checkpoint_path):
+    hyperparameters = checkpoint.get("hyper_parameters")
+    if not isinstance(hyperparameters, Mapping):
+        raise ValueError(f"{checkpoint_path}: missing checkpoint hyper_parameters")
+
+    saved_args = hyperparameters.get("args", hyperparameters)
+    if isinstance(saved_args, Namespace):
+        return saved_args
+    if isinstance(saved_args, Mapping):
+        return Namespace(**saved_args)
+    raise TypeError(
+        f"{checkpoint_path}: checkpoint args must be a Namespace or mapping"
+    )
+
+
+def _comparable_config_value(value):
+    return tuple(value) if isinstance(value, (list, tuple)) else value
+
+
+def _validate_checkpoint_semantics(cli_args, checkpoint_args, checkpoint_path):
+    mismatches = []
+    for name in CHECKPOINT_SEMANTIC_FIELDS:
+        if not hasattr(checkpoint_args, name):
+            raise ValueError(f"{checkpoint_path}: checkpoint args missing {name}")
+        if not hasattr(cli_args, name):
+            raise ValueError(f"evaluation args missing {name}")
+        cli_value = _comparable_config_value(getattr(cli_args, name))
+        checkpoint_value = _comparable_config_value(getattr(checkpoint_args, name))
+        if cli_value != checkpoint_value:
+            mismatches.append(
+                f"{name}: cli={cli_value!r}, checkpoint={checkpoint_value!r}"
+            )
+    if mismatches:
+        raise ValueError(
+            "evaluation configuration does not match checkpoint semantics: "
+            + "; ".join(mismatches)
+        )
+
+
 def load_model(args, device):
-    model = OmniTokenizer_VQGAN(args)
-    checkpoint = torch.load(args.vqgan_ckpt, map_location="cpu")
+    checkpoint = torch.load(
+        args.vqgan_ckpt, map_location="cpu", weights_only=False
+    )
     if "state_dict" not in checkpoint:
         raise ValueError(f"{args.vqgan_ckpt}: missing state_dict")
+    checkpoint_args = _checkpoint_model_args(checkpoint, args.vqgan_ckpt)
+    _validate_checkpoint_semantics(args, checkpoint_args, args.vqgan_ckpt)
+    model = OmniTokenizer_VQGAN(checkpoint_args)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.to(device).eval()
     return model

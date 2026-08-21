@@ -18,7 +18,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         source = (ROOT / "vqgan_eval.py").read_text(encoding="utf-8")
         self.assertIn("sample_posterior=False", source)
         self.assertIn("strict=True", source)
-        self.assertNotIn("codebook", source)
+        self.assertIn("_checkpoint_model_args(checkpoint", source)
+        self.assertIn("OmniTokenizer_VQGAN(checkpoint_args)", source)
+        self.assertIn("_validate_checkpoint_semantics", source)
+        self.assertNotIn(".codebook", source)
         self.assertIn("depth_abs_rel", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):

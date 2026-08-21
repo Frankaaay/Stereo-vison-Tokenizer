@@ -114,6 +114,14 @@ class StereoVQGANIntegrationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             model(torch.randn(1, 3, 32, 32))
 
+    def test_checkpoint_hyperparameters_preserve_constructor_args(self) -> None:
+        args = self._args()
+        model = VQGAN(args)
+
+        self.assertEqual(set(model.hparams), {"args"})
+        self.assertIsInstance(model.hparams["args"], Namespace)
+        self.assertEqual(vars(model.hparams["args"]), vars(args))
+
 
 if __name__ == "__main__":
     unittest.main()

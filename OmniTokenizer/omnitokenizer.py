@@ -249,7 +249,7 @@ class VQGAN(pl.LightningModule):
         self.grad_clip_val = args.grad_clip_val
         self.grad_clip_val_disc = args.grad_clip_val_disc
         self._micro_step = 0
-        self.save_hyperparameters(vars(args))
+        self.save_hyperparameters("args")
 
     @staticmethod
     def _validate_configuration(args) -> None:
