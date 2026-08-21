@@ -23,6 +23,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("_validate_checkpoint_semantics", source)
         self.assertNotIn(".codebook", source)
         self.assertIn("depth_abs_rel", source)
+        self.assertIn("disparity_to_depth(", source)
+        self.assertNotIn("calibration / disparity_target", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):
         source = (ROOT / "scripts" / "recons" / "train.sh").read_text(

@@ -8,6 +8,7 @@ import torch
 from tqdm import tqdm
 
 from OmniTokenizer import OmniTokenizer_VQGAN, VQGAN, VideoData
+from OmniTokenizer.modules.stereo_geometry import disparity_to_depth
 
 
 VIEW_NAMES = ("head", "lefthand", "righthand")
@@ -172,14 +173,31 @@ def update_metrics(accumulator, batch, output):
     )
     accumulator["valid_count"] += valid.sum(dim=reduction_dims)
 
-    calibration = (batch["fx"] * batch["baseline_m"]).reshape(
-        batch["fx"].shape[0], 3, 1, 1, 1, 1
+    target_depth = disparity_to_depth(
+        disparity_target,
+        batch["fx"],
+        batch["baseline_m"],
+        valid_mask=valid,
     )
-    target_depth = calibration / disparity_target
-    predicted_depth = calibration / output.disparity
-    depth_error = predicted_depth - target_depth
+    predicted_depth = disparity_to_depth(
+        output.disparity,
+        batch["fx"],
+        batch["baseline_m"],
+        valid_mask=valid,
+    )
+    if not torch.equal(target_depth.valid_mask, valid):
+        raise ValueError("valid target disparity failed metric-depth conversion")
+    if not torch.equal(predicted_depth.valid_mask, valid):
+        raise ValueError("predicted disparity is invalid on supervised pixels")
+
+    depth_error = predicted_depth.depth - target_depth.depth
+    safe_target_depth = torch.where(
+        valid,
+        target_depth.depth,
+        torch.ones_like(target_depth.depth),
+    )
     accumulator["depth_abs_rel_sum"] += (
-        (depth_error.abs() / target_depth)
+        (depth_error.abs() / safe_target_depth)
         .double()
         .masked_fill(~valid, 0)
         .sum(dim=reduction_dims)
