@@ -131,6 +131,27 @@ class StereoVQGANIntegrationTest(unittest.TestCase):
         self.assertTrue(model.training)
         self.assertFalse(model.perceptual_model.training)
 
+    def test_gan_builds_only_weighted_discriminators(self) -> None:
+        image_args = self._args()
+        image_args.gan_enabled = True
+        image_args.image_gan_weight = 1.0
+        image_model = VQGAN(image_args)
+        self.assertIsNotNone(image_model.image_discriminator)
+        self.assertIsNone(image_model.video_discriminator)
+
+        video_args = self._args()
+        video_args.gan_enabled = True
+        video_args.video_gan_weight = 1.0
+        video_model = VQGAN(video_args)
+        self.assertIsNone(video_model.image_discriminator)
+        self.assertIsNotNone(video_model.video_discriminator)
+        final_block = getattr(
+            video_model.video_discriminator,
+            f"model{video_model.video_discriminator.n_layers + 1}",
+        )
+        self.assertEqual(len(final_block), 1)
+        self.assertIsInstance(final_block[0], torch.nn.Conv3d)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -219,6 +219,8 @@ class VQGAN(pl.LightningModule):
         else:
             self.perceptual_model = None
 
+        self.image_discriminator = None
+        self.video_discriminator = None
         if self.gan_enabled:
             discriminator_kwargs = dict(
                 input_nc=args.image_channels,
@@ -230,18 +232,20 @@ class VQGAN(pl.LightningModule):
                 apply_blur=args.apply_blur,
                 apply_noise=args.apply_noise,
             )
-            self.image_discriminator = NLayerDiscriminator(**discriminator_kwargs)
-            self.video_discriminator = NLayerDiscriminator3D(
-                **discriminator_kwargs
-            )
+            if self.image_gan_weight > 0:
+                self.image_discriminator = NLayerDiscriminator(
+                    **discriminator_kwargs
+                )
+            if self.video_gan_weight > 0:
+                self.video_discriminator = NLayerDiscriminator3D(
+                    **discriminator_kwargs
+                )
             self.disc_loss = (
                 vanilla_d_loss
                 if args.disc_loss_type == "vanilla"
                 else hinge_d_loss
             )
         else:
-            self.image_discriminator = None
-            self.video_discriminator = None
             self.disc_loss = None
 
         self.automatic_optimization = False
@@ -331,7 +335,9 @@ class VQGAN(pl.LightningModule):
         return batch
 
     @staticmethod
-    def _set_requires_grad(module: nn.Module, enabled: bool) -> None:
+    def _set_requires_grad(module: nn.Module | None, enabled: bool) -> None:
+        if module is None:
+            return
         for parameter in module.parameters():
             parameter.requires_grad_(enabled)
 
@@ -737,9 +743,17 @@ class VQGAN(pl.LightningModule):
         ]
 
         if self.gan_enabled:
+            discriminator_parameters = []
+            if self.image_discriminator is not None:
+                discriminator_parameters.extend(
+                    self.image_discriminator.parameters()
+                )
+            if self.video_discriminator is not None:
+                discriminator_parameters.extend(
+                    self.video_discriminator.parameters()
+                )
             discriminator_optimizer = torch.optim.Adam(
-                list(self.image_discriminator.parameters())
-                + list(self.video_discriminator.parameters()),
+                discriminator_parameters,
                 lr=self.args.lr * self.args.dis_lr_multiplier,
                 betas=(0.5, 0.9),
             )

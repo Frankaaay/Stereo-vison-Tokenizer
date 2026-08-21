@@ -535,11 +535,7 @@ class NLayerDiscriminator3D(nn.Module):
             activation_func
         ]]
 
-        sequence += [[
-            nn.Conv3d(nf, 1, kernel_size=kw, stride=1, padding=padw),
-            Normalize(1, norm_type),
-            activation_func
-        ]]
+        sequence += [[nn.Conv3d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
 
         if use_sigmoid:
             sequence += [[nn.Sigmoid()]]
