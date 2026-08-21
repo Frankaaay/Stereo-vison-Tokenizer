@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 import argparse
 import random
 import numpy as np
@@ -1116,3 +1117,433 @@ class OmniTokenizer_Decoder(nn.Module):
             recon_video, 'b c 1 h w -> b c h w') if is_image else recon_video.clone()
 
         return returned_recon
+
+class TemporalOmniTokenizerEncoder(OmniTokenizer_Encoder):
+    """共享空间编码，并在 Fusion 后执行四帧时序压缩。"""
+
+    video_frames = 4
+
+    def __init__(
+        self,
+        *args,
+        temporal_patch_size=4,
+        defer_temporal_pool=False,
+        temporal_depth=4,
+        causal_in_temporal_transformer=False,
+        dim=512,
+        dim_head=64,
+        heads=8,
+        attn_dropout=0.0,
+        ff_dropout=0.0,
+        ff_mult=4.0,
+        initialize=False,
+        **kwargs,
+    ):
+        if temporal_patch_size != self.video_frames or defer_temporal_pool:
+            raise ValueError("Temporal Encoder 固定使用四帧后采样")
+        if causal_in_temporal_transformer:
+            raise ValueError("四帧 Temporal Attention 必须为双向")
+
+        super().__init__(
+            *args,
+            temporal_patch_size=1,
+            defer_temporal_pool=False,
+            temporal_depth=temporal_depth,
+            causal_in_temporal_transformer=False,
+            dim=dim,
+            dim_head=dim_head,
+            heads=heads,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            ff_mult=ff_mult,
+            initialize=False,
+            **kwargs,
+        )
+        del self.to_patch_emb
+        # 直接复用原版 Transformer；关闭 PEG，避免折叠空间位置后产生错误重排。
+        self.temporal_position_embedding = nn.Parameter(
+            torch.zeros(1, self.video_frames, dim)
+        )
+        self.enc_temporal_transformer = Transformer(
+            dim=dim,
+            depth=temporal_depth,
+            block="t" * temporal_depth,
+            causal=False,
+            dim_head=dim_head,
+            heads=heads,
+            ff_mult=ff_mult,
+            peg=False,
+            attn_num_null_kv=0,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            spatial_pos="none",
+        )
+        self.temporal_sampler = nn.Linear(self.video_frames * dim, dim)
+        if initialize:
+            self.apply(self._init_weights)
+        nn.init.normal_(self.temporal_position_embedding, std=0.02)
+
+    def encode_spatial_frames(self, video, *, is_image):
+        """逐帧执行共享 Spatial Encoder，返回 ``[N,T,D,H,W]``。"""
+        if video.ndim == 4 and is_image:
+            video = video.unsqueeze(2)
+        expected_time = 1 if is_image else self.video_frames
+        if video.ndim != 5 or video.shape[2] != expected_time:
+            raise ValueError(f"期望输入 [N,C,{expected_time},H,W]，实际为 {tuple(video.shape)}")
+
+        batch, _, time, _, _ = video.shape
+        # 视频模式输入为 [N,C,4,H,W]；折叠时间到 batch 后逐帧做 Spatial patchify。
+        tokens = self.to_patch_emb_first_frame(
+            rearrange(video, "n c t h w -> (n t) c 1 h w")
+        )
+        tokens = rearrange(tokens, "(n t) 1 h w d -> n t h w d", n=batch, t=time)
+        _, _, height, width, _ = tokens.shape
+        # 复用原版 Spatial Transformer，并保持每帧独立的空间特征。
+        tokens = self.enc_spatial_transformer(
+            rearrange(tokens, "n t h w d -> (n t) (h w) d"),
+            video_shape=(batch, time, height, width),
+            is_spatial=True,
+        )
+        output_size = int(math.sqrt(tokens.shape[1]))
+        features = rearrange(
+            tokens,
+            "(n t) (h w) d -> n d t h w",
+            n=batch,
+            t=time,
+            h=output_size,
+        )
+        return rearrange(self.spatial_pool(features), "n d t h w -> n t d h w")
+
+    def encode_temporal_fused(self, fused_features, *, is_image):
+        """对 Fusion 后的三个 View 分别执行 Temporal Attention 与 4→1 采样。"""
+        expected_time = 1 if is_image else self.video_frames
+        if fused_features.ndim != 6 or fused_features.shape[2] != expected_time:
+            raise ValueError(
+                f"期望 Fusion 特征 [B,V,{expected_time},D,H,W]，实际为 {tuple(fused_features.shape)}"
+            )
+        if is_image:
+            return rearrange(fused_features, "b v 1 d h w -> b v d 1 h w")
+
+        batch, views, time, _, height, width = fused_features.shape
+        # 将 View 和空间位置折叠到 batch；Temporal Attention 只沿 T 计算，不混合视角。
+        tokens = rearrange(fused_features, "b v t d h w -> (b v h w) t d")
+        tokens = tokens + self.temporal_position_embedding.to(tokens)
+        tokens = self.enc_temporal_transformer(tokens, is_spatial=False)
+        # 【关键路径】Temporal Attention 保持 T=4，随后拼接 4×D 并压缩为 1 个 latent slot。
+        tokens = self.temporal_sampler(
+            rearrange(
+                tokens,
+                "(b v h w) t d -> b v h w (t d)",
+                b=batch,
+                v=views,
+                h=height,
+                w=width,
+            )
+        )
+        return rearrange(tokens, "b v h w d -> b v d 1 h w")
+
+    def forward(self, video, is_image, mask=None):
+        if mask is not None:
+            raise ValueError("固定四帧路径不支持 mask")
+        spatial = self.encode_spatial_frames(video, is_image=is_image)
+        return self.encode_temporal_fused(spatial.unsqueeze(1), is_image=is_image)[:, 0]
+
+
+class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
+    """保持一个时间槽，由 RGB/Disparity Head 一次恢复一帧或四帧。"""
+
+    video_frames = 4
+
+    def __init__(
+        self,
+        *args,
+        temporal_patch_size=4,
+        defer_temporal_pool=False,
+        causal_in_temporal_transformer=False,
+        dim=512,
+        initialize=False,
+        initial_disparity_px=None,
+        disparity_scale=None,
+        disparity_epsilon=1e-6,
+        **kwargs,
+    ):
+        if temporal_patch_size != self.video_frames or defer_temporal_pool:
+            raise ValueError("Shared Decoder 固定保持一个时间槽")
+        if causal_in_temporal_transformer:
+            raise ValueError("Shared Decoder 不使用 Temporal Attention")
+        if initial_disparity_px is None or disparity_scale is None:
+            raise ValueError("必须显式提供 initial_disparity_px 和 disparity_scale")
+        if not all(
+            math.isfinite(value) and value > 0
+            for value in (initial_disparity_px, disparity_scale, disparity_epsilon)
+        ):
+            raise ValueError("视差初始化参数必须为正有限值")
+
+        normalized_initial = initial_disparity_px / disparity_scale
+        if normalized_initial <= disparity_epsilon:
+            raise ValueError("归一化初始视差必须大于 disparity_epsilon")
+
+        super().__init__(
+            *args,
+            temporal_patch_size=self.video_frames,
+            defer_temporal_pool=False,
+            causal_in_temporal_transformer=False,
+            dim=dim,
+            initialize=False,
+            **kwargs,
+        )
+        self.disparity_scale = float(disparity_scale)
+        self.disparity_epsilon = float(disparity_epsilon)
+        del self.dec_temporal_transformer
+        del self.temporal_up
+
+        patch_height, patch_width = self.patch_size
+        self.to_disparity_first_frame = nn.Sequential(
+            nn.Linear(dim, patch_height * patch_width),
+            Rearrange(
+                "b 1 h w (p1 p2) -> b 1 1 (h p1) (w p2)",
+                p1=patch_height,
+                p2=patch_width,
+            ),
+        )
+        self.to_disparity = nn.Sequential(
+            nn.Linear(dim, self.video_frames * patch_height * patch_width),
+            Rearrange(
+                "b 1 h w (t p1 p2) -> b 1 t (h p1) (w p2)",
+                t=self.video_frames,
+                p1=patch_height,
+                p2=patch_width,
+            ),
+        )
+        if initialize:
+            self.apply(self._init_weights)
+
+        # bias 对齐 train split 的典型 pixel disparity。
+        bias = normalized_initial - disparity_epsilon
+        raw_bias = bias + math.log(-math.expm1(-bias))
+        nn.init.constant_(self.to_disparity_first_frame[0].bias, raw_bias)
+        nn.init.constant_(self.to_disparity[0].bias, raw_bias)
+
+    def decode_tokens(self, tokens):
+        """仅执行单时间槽的 Spatial Decoder。"""
+        if tokens.ndim != 5 or tokens.shape[2] != 1:
+            raise ValueError(f"期望 Decoder 输入 [N,D,1,H,W]，实际为 {tuple(tokens.shape)}")
+
+        # Shared Decoder 主干始终保持 T=1，只执行 Spatial Transformer。
+        tokens = self.spatial_up(tokens)
+        batch, _, time, height, width = tokens.shape
+        tokens = self.dec_spatial_transformer(
+            rearrange(tokens, "n d t h w -> (n t) (h w) d"),
+            video_shape=(batch, time, height, width),
+            is_spatial=True,
+        )
+        output_size = int(math.sqrt(tokens.shape[1]))
+        return rearrange(
+            tokens,
+            "(n t) (h w) d -> n t h w d",
+            n=batch,
+            t=time,
+            h=output_size,
+        )
+
+    def decode_rgb_disparity(self, tokens, *, is_image):
+        tokens = self.decode_tokens(tokens)
+        # Video Head 在最终 Linear 中一次展开四帧；image-mode 使用独立的单帧 Head。
+        rgb_head = self.to_pixels_first_frame if is_image else self.to_pixels
+        disparity_head = (
+            self.to_disparity_first_frame if is_image else self.to_disparity
+        )
+        rgb = torch.tanh(rgb_head(tokens))
+        normalized_disparity = F.softplus(disparity_head(tokens)) + self.disparity_epsilon
+        disparity = normalized_disparity * self.disparity_scale
+        return rgb, normalized_disparity, disparity
+
+    def decode(self, tokens, is_image):
+        rgb = self.decode_rgb_disparity(tokens, is_image=is_image)[0]
+        return rearrange(rgb, "b c 1 h w -> b c h w") if is_image else rgb
+
+    def forward(self, tokens, is_image, mask=None):
+        if mask is not None:
+            raise ValueError("固定四帧路径不支持 mask")
+        return self.decode(tokens, is_image=is_image)
+
+
+class MonocularPosterior:
+    """复用原版对角高斯分布，并恢复独立的 View 维。"""
+
+    def __init__(self, mean, logvar):
+        self.shape = mean.shape
+        batch, views, channels, time, height, width = self.shape
+        parameters = torch.cat((mean, logvar), dim=2).reshape(
+            batch * views, channels * 2, 1, time * height * width
+        )
+        self.distribution = DiagonalGaussianDistribution(parameters)
+        self.mean = self._restore(self.distribution.mean)
+        self.logvar = self._restore(self.distribution.logvar)
+        self.std = self._restore(self.distribution.std)
+        self.var = self._restore(self.distribution.var)
+
+    def _restore(self, value):
+        return value.reshape(self.shape)
+
+    def sample(self):
+        return self._restore(self.distribution.sample()).to(self.mean.dtype)
+
+    def mode(self):
+        return self._restore(self.distribution.mode())
+
+    def kl(self):
+        return self.distribution.kl().reshape(self.shape[:2]).sum(dim=1)
+
+
+def disparity_to_depth(disparity, *, fx, baseline):
+    """评估时按 ``depth = fx × baseline / disparity`` 派生深度。"""
+    def calibration(value, name):
+        value = torch.as_tensor(value, dtype=disparity.dtype, device=disparity.device)
+        if not torch.isfinite(value).all() or (value <= 0).any():
+            raise ValueError(f"{name} 必须为正有限值")
+        if value.ndim == 1 and value.shape[0] == disparity.shape[1]:
+            value = value.unsqueeze(0)
+        return value.reshape(value.shape + (1,) * (disparity.ndim - value.ndim))
+
+    return calibration(fx, "fx") * calibration(baseline, "baseline") / disparity
+
+
+@dataclass(frozen=True)
+class OmniTokenizerOutput:
+    posterior: MonocularPosterior
+    latent: torch.Tensor
+    rgb: torch.Tensor
+    normalized_disparity: torch.Tensor
+    disparity: torch.Tensor
+
+
+class MonocularOmniTokenizer(nn.Module):
+    """保留单目兼容入口，并提供正式的 Fusion 后入口。"""
+
+    views = 3
+    image_size = 256
+    grid_size = 16
+    dim = 512
+    latent_dim = 48
+    video_frames = 4
+
+    def __init__(self, *, initial_disparity_px, disparity_scale):
+        super().__init__()
+        common = dict(
+            image_size=self.image_size,
+            patch_embed="linear",
+            norm_type="group",
+            window_size=8,
+            spatial_pos="rel",
+            image_channel=3,
+            patch_size=16,
+            temporal_patch_size=self.video_frames,
+            spatial_depth=4,
+            temporal_depth=4,
+            causal_in_temporal_transformer=False,
+            dim=self.dim,
+            causal_in_peg=False,
+            dim_head=64,
+            heads=8,
+            sequence_length=self.video_frames,
+        )
+        self.encoder = TemporalOmniTokenizerEncoder(block="ttww", **common)
+        self.posterior_head = nn.Conv3d(self.dim, self.latent_dim * 2, 1)
+        self.latent_to_decoder = nn.Conv3d(self.latent_dim, self.dim, 1)
+        self.decoder = TemporalOmniTokenizerDecoder(
+            block="tttt",
+            initial_disparity_px=initial_disparity_px,
+            disparity_scale=disparity_scale,
+            **common,
+        )
+
+    @staticmethod
+    def _is_image(mode):
+        if mode not in ("video", "image"):
+            raise ValueError(f"mode 必须是 'video' 或 'image'，实际为 {mode!r}")
+        return mode == "image"
+
+    def encode_fused(self, fused_features, *, mode):
+        is_image = self._is_image(mode)
+        expected_time = 1 if is_image else self.video_frames
+        expected = (self.views, expected_time, self.dim, self.grid_size, self.grid_size)
+        if fused_features.ndim != 6 or tuple(fused_features.shape[1:]) != expected:
+            raise ValueError(
+                f"期望 Fusion 特征 [B,3,{expected_time},512,16,16]，实际为 {tuple(fused_features.shape)}"
+            )
+
+        batch = fused_features.shape[0]
+        features = self.encoder.encode_temporal_fused(fused_features, is_image=is_image)
+        parameters = self.posterior_head(
+            rearrange(features, "b v d t h w -> (b v) d t h w")
+        )
+        parameters = rearrange(
+            parameters,
+            "(b v) c t h w -> b v c t h w",
+            b=batch,
+            v=self.views,
+        )
+        return MonocularPosterior(*torch.chunk(parameters, 2, dim=2))
+
+    def encode(self, video, *, mode):
+        """兼容三个独立左目输入；StereoFusion 路径应调用 ``encode_fused``。"""
+        is_image = self._is_image(mode)
+        expected_time = 1 if is_image else self.video_frames
+        expected = (self.views, 3, expected_time, self.image_size, self.image_size)
+        if video.ndim != 6 or tuple(video.shape[1:]) != expected:
+            raise ValueError(
+                f"期望输入 [B,3,3,{expected_time},256,256]，实际为 {tuple(video.shape)}"
+            )
+
+        batch = video.shape[0]
+        features = self.encoder.encode_spatial_frames(
+            rearrange(video, "b v c t h w -> (b v) c t h w"),
+            is_image=is_image,
+        )
+        return self.encode_fused(
+            rearrange(features, "(b v) t d h w -> b v t d h w", b=batch, v=self.views),
+            mode=mode,
+        )
+
+    def decode(self, latent, *, mode):
+        is_image = self._is_image(mode)
+        expected = (self.views, self.latent_dim, 1, self.grid_size, self.grid_size)
+        if latent.ndim != 6 or tuple(latent.shape[1:]) != expected:
+            raise ValueError(f"期望 latent [B,3,48,1,16,16]，实际为 {tuple(latent.shape)}")
+
+        batch = latent.shape[0]
+        tokens = self.latent_to_decoder(
+            rearrange(latent, "b v c t h w -> (b v) c t h w")
+        )
+        return tuple(
+            rearrange(value, "(b v) c t h w -> b v c t h w", b=batch, v=self.views)
+            for value in self.decoder.decode_rgb_disparity(tokens, is_image=is_image)
+        )
+
+    def _output(self, posterior, *, mode, sample_posterior):
+        latent = posterior.sample() if sample_posterior else posterior.mode()
+        rgb, normalized_disparity, disparity = self.decode(latent, mode=mode)
+        return OmniTokenizerOutput(
+            posterior, latent, rgb, normalized_disparity, disparity
+        )
+
+    def forward_fused(self, fused_features, *, mode, sample_posterior):
+        posterior = self.encode_fused(fused_features, mode=mode)
+        return self._output(posterior, mode=mode, sample_posterior=sample_posterior)
+
+    def forward(self, video, *, mode, sample_posterior):
+        posterior = self.encode(video, mode=mode)
+        return self._output(posterior, mode=mode, sample_posterior=sample_posterior)
+
+
+class StereoOmniTokenizer(MonocularOmniTokenizer):
+    """Fusion 后入口，输入形状为 ``[B,3,T,512,16,16]``。"""
+
+    def forward(self, fused_features, *, mode, sample_posterior):
+        return self.forward_fused(
+            fused_features, mode=mode, sample_posterior=sample_posterior
+        )
+
+
+PostFusionOmniTokenizer = StereoOmniTokenizer
