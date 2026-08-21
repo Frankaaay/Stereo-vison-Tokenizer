@@ -65,6 +65,16 @@ def _reduce_per_view(
     )
 
 
+def _safe_masked_target(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Keep invalid target values out of loss kernels and their backward pass."""
+
+    return torch.where(valid_mask, target, prediction.detach())
+
+
 def masked_smooth_l1_disparity_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
@@ -86,8 +96,9 @@ def masked_smooth_l1_disparity_loss(
     if not torch.isfinite(target.masked_select(valid_mask)).all():
         raise ValueError("valid target disparity contains NaN/Inf")
 
+    safe_target = _safe_masked_target(prediction, target, valid_mask)
     elementwise = F.smooth_l1_loss(
-        prediction, target, reduction="none", beta=beta
+        prediction, safe_target, reduction="none", beta=beta
     )
     return _reduce_per_view(elementwise, valid_mask)
 
@@ -115,12 +126,13 @@ def masked_disparity_gradient_loss(
     if not torch.isfinite(target.masked_select(valid_mask)).all():
         raise ValueError("valid target disparity contains NaN/Inf")
 
+    safe_target = _safe_masked_target(prediction, target, valid_mask)
     prediction_dx = (prediction[..., 1:] - prediction[..., :-1]) / scale_px
-    target_dx = (target[..., 1:] - target[..., :-1]) / scale_px
+    target_dx = (safe_target[..., 1:] - safe_target[..., :-1]) / scale_px
     mask_dx = valid_mask[..., 1:] & valid_mask[..., :-1]
 
     prediction_dy = (prediction[..., 1:, :] - prediction[..., :-1, :]) / scale_px
-    target_dy = (target[..., 1:, :] - target[..., :-1, :]) / scale_px
+    target_dy = (safe_target[..., 1:, :] - safe_target[..., :-1, :]) / scale_px
     mask_dy = valid_mask[..., 1:, :] & valid_mask[..., :-1, :]
 
     reduction_dims = (0, 2, 3, 4, 5)

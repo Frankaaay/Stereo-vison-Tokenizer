@@ -52,6 +52,23 @@ class StereoLossTest(unittest.TestCase):
                 prediction, target, valid, beta=1.0
             )
 
+    def test_invalid_nonfinite_disparity_cannot_poison_smooth_l1_gradient(
+        self,
+    ) -> None:
+        prediction = torch.ones(1, 3, 1, 1, 2, 2, requires_grad=True)
+        target = torch.zeros_like(prediction)
+        valid = torch.ones_like(prediction, dtype=torch.bool)
+        target[..., 0, 0] = torch.nan
+        valid[..., 0, 0] = False
+
+        result = masked_smooth_l1_disparity_loss(
+            prediction, target, valid, beta=1.0
+        )
+        result.loss.backward()
+
+        self.assertTrue(torch.isfinite(result.loss))
+        self.assertTrue(torch.isfinite(prediction.grad).all())
+
     def test_gradient_loss_uses_only_valid_neighbor_pairs(self) -> None:
         prediction = torch.zeros(1, 3, 1, 1, 2, 3)
         target = torch.zeros_like(prediction)
@@ -73,6 +90,23 @@ class StereoLossTest(unittest.TestCase):
             prediction, target, valid, scale_px=16.0
         )
         torch.testing.assert_close(result.loss, torch.tensor(0.5))
+
+    def test_invalid_nonfinite_disparity_is_sanitized_before_differences(
+        self,
+    ) -> None:
+        prediction = torch.ones(1, 3, 1, 1, 2, 2, requires_grad=True)
+        target = torch.zeros_like(prediction)
+        valid = torch.ones_like(prediction, dtype=torch.bool)
+        target[..., 0, 0] = torch.nan
+        valid[..., 0, 0] = False
+
+        result = masked_disparity_gradient_loss(
+            prediction, target, valid, scale_px=16.0
+        )
+        result.loss.backward()
+
+        self.assertTrue(torch.isfinite(result.loss))
+        self.assertTrue(torch.isfinite(prediction.grad).all())
 
     def test_kl_sums_are_averaged_across_batch_and_view(self) -> None:
         values = torch.tensor(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)))
