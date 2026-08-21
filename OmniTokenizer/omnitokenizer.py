@@ -1198,10 +1198,11 @@ class TemporalOmniTokenizerEncoder(OmniTokenizer_Encoder):
         )
         tokens = rearrange(tokens, "(n t) 1 h w d -> n t h w d", n=batch, t=time)
         _, _, height, width, _ = tokens.shape
-        # 复用原版 Spatial Transformer，并保持每帧独立的空间特征。
+        # 复用原版 Spatial Transformer；将每帧视为独立样本，
+        # 让 Spatial PEG 的时间维固定为 1，禁止在这里提前混合帧。
         tokens = self.enc_spatial_transformer(
             rearrange(tokens, "n t h w d -> (n t) (h w) d"),
-            video_shape=(batch, time, height, width),
+            video_shape=(batch * time, 1, height, width),
             is_spatial=True,
         )
         output_size = int(math.sqrt(tokens.shape[1]))
@@ -1250,7 +1251,7 @@ class TemporalOmniTokenizerEncoder(OmniTokenizer_Encoder):
 
 
 class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
-    """保持一个时间槽，由 RGB/Disparity Head 一次恢复一帧或四帧。"""
+    """将单个 latent slot 展开为四帧，再进行时间和空间解码。"""
 
     video_frames = 4
 
@@ -1260,7 +1261,13 @@ class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
         temporal_patch_size=4,
         defer_temporal_pool=False,
         causal_in_temporal_transformer=False,
+        temporal_depth=4,
         dim=512,
+        dim_head=64,
+        heads=8,
+        attn_dropout=0.0,
+        ff_dropout=0.0,
+        ff_mult=4.0,
         initialize=False,
         initial_disparity_px=None,
         disparity_scale=None,
@@ -1270,7 +1277,7 @@ class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
         if temporal_patch_size != self.video_frames or defer_temporal_pool:
             raise ValueError("Shared Decoder 固定保持一个时间槽")
         if causal_in_temporal_transformer:
-            raise ValueError("Shared Decoder 不使用 Temporal Attention")
+            raise ValueError("Decoder Temporal Attention 固定使用双向注意力")
         if initial_disparity_px is None or disparity_scale is None:
             raise ValueError("必须显式提供 initial_disparity_px 和 disparity_scale")
         if not all(
@@ -1287,15 +1294,42 @@ class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
             *args,
             temporal_patch_size=self.video_frames,
             defer_temporal_pool=False,
+            temporal_depth=temporal_depth,
             causal_in_temporal_transformer=False,
             dim=dim,
+            dim_head=dim_head,
+            heads=heads,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            ff_mult=ff_mult,
             initialize=False,
             **kwargs,
         )
+        # 原版 temporal PEG 假设输入按 [B,T,H,W] 展平；当前输入按空间位置折叠，
+        # 因此与 Encoder 一样关闭 PEG，避免错误重排并严格只沿四帧做 attention。
+        self.dec_temporal_transformer = Transformer(
+            dim=dim,
+            depth=temporal_depth,
+            block="t" * temporal_depth,
+            causal=False,
+            dim_head=dim_head,
+            heads=heads,
+            ff_mult=ff_mult,
+            peg=False,
+            attn_num_null_kv=0,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            spatial_pos="none",
+        )
         self.disparity_scale = float(disparity_scale)
         self.disparity_epsilon = float(disparity_epsilon)
-        del self.dec_temporal_transformer
-        del self.temporal_up
+
+        # 单个 temporal latent slot 先恢复为四个 frame-level feature；
+        # 这里的时间注意力只在同一 View、同一空间位置的四帧之间交换信息。
+        self.temporal_unpatchify = nn.Linear(dim, self.video_frames * dim)
+        self.temporal_position_embedding = nn.Parameter(
+            torch.zeros(1, self.video_frames, dim)
+        )
 
         patch_height, patch_width = self.patch_size
         self.to_disparity_first_frame = nn.Sequential(
@@ -1307,16 +1341,27 @@ class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
             ),
         )
         self.to_disparity = nn.Sequential(
-            nn.Linear(dim, self.video_frames * patch_height * patch_width),
+            # Decoder 已经显式拥有 T=4 个 token，因此每个 token 只生成一帧。
+            nn.Linear(dim, patch_height * patch_width),
             Rearrange(
-                "b 1 h w (t p1 p2) -> b 1 t (h p1) (w p2)",
-                t=self.video_frames,
+                "b t h w (p1 p2) -> b 1 t (h p1) (w p2)",
+                p1=patch_height,
+                p2=patch_width,
+            ),
+        )
+        self.to_pixels = nn.Sequential(
+            # 与 disparity head 对齐：时间维由四个 decoder token 提供，而不是由输出通道再次展开。
+            nn.Linear(dim, 3 * patch_height * patch_width),
+            Rearrange(
+                "b t h w (c p1 p2) -> b c t (h p1) (w p2)",
+                c=3,
                 p1=patch_height,
                 p2=patch_width,
             ),
         )
         if initialize:
             self.apply(self._init_weights)
+        nn.init.normal_(self.temporal_position_embedding, std=0.02)
 
         # bias 对齐 train split 的典型 pixel disparity。
         bias = normalized_initial - disparity_epsilon
@@ -1324,31 +1369,59 @@ class TemporalOmniTokenizerDecoder(OmniTokenizer_Decoder):
         nn.init.constant_(self.to_disparity_first_frame[0].bias, raw_bias)
         nn.init.constant_(self.to_disparity[0].bias, raw_bias)
 
-    def decode_tokens(self, tokens):
-        """仅执行单时间槽的 Spatial Decoder。"""
+    def decode_tokens(self, tokens, *, is_image):
+        """执行 ``1→4 → Temporal Attention → Spatial Decoder``。"""
         if tokens.ndim != 5 or tokens.shape[2] != 1:
             raise ValueError(f"期望 Decoder 输入 [N,D,1,H,W]，实际为 {tuple(tokens.shape)}")
 
-        # Shared Decoder 主干始终保持 T=1，只执行 Spatial Transformer。
         tokens = self.spatial_up(tokens)
-        batch, _, time, height, width = tokens.shape
+        batch, _, _, height, width = tokens.shape
+
+        if is_image:
+            # 图像模式保持 T=1，不引入视频的时间展开和时间注意力。
+            time_tokens = rearrange(tokens, "n d 1 h w -> n 1 h w d")
+        else:
+            # 先把单个 latent 映射成四个时间 token，再做双向帧间 attention。
+            time_tokens = rearrange(tokens, "n d 1 h w -> n h w d")
+            time_tokens = self.temporal_unpatchify(time_tokens)
+            time_tokens = rearrange(
+                time_tokens,
+                "n h w (t d) -> (n h w) t d",
+                t=self.video_frames,
+            )
+            time_tokens = time_tokens + self.temporal_position_embedding.to(time_tokens)
+            time_tokens = self.dec_temporal_transformer(
+                time_tokens,
+                is_spatial=False,
+            )
+            time_tokens = rearrange(
+                time_tokens,
+                "(n h w) t d -> n t h w d",
+                n=batch,
+                h=height,
+                w=width,
+            )
+
+        # 时间信息处理完后，四帧分别进入原版 Spatial Transformer；
+        # Spatial PEG 的时间维固定为 1，不能替代上面的 Decoder Temporal Attention。
+        spatial_time = time_tokens.shape[1]
         tokens = self.dec_spatial_transformer(
-            rearrange(tokens, "n d t h w -> (n t) (h w) d"),
-            video_shape=(batch, time, height, width),
+            rearrange(time_tokens, "n t h w d -> (n t) (h w) d"),
+            video_shape=(batch * spatial_time, 1, height, width),
             is_spatial=True,
         )
-        output_size = int(math.sqrt(tokens.shape[1]))
         return rearrange(
             tokens,
             "(n t) (h w) d -> n t h w d",
             n=batch,
-            t=time,
-            h=output_size,
+            t=time_tokens.shape[1],
+            h=height,
+            w=width,
         )
 
     def decode_rgb_disparity(self, tokens, *, is_image):
-        tokens = self.decode_tokens(tokens)
-        # Video Head 在最终 Linear 中一次展开四帧；image-mode 使用独立的单帧 Head。
+        tokens = self.decode_tokens(tokens, is_image=is_image)
+        # Image/Video 使用独立 head；视频 head 对每个已经解码的时间 token 生成一帧。
         rgb_head = self.to_pixels_first_frame if is_image else self.to_pixels
         disparity_head = (
             self.to_disparity_first_frame if is_image else self.to_disparity
