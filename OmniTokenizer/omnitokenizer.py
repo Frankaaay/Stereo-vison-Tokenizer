@@ -638,7 +638,7 @@ class VQGAN(pl.LightningModule):
                 )
             generator_optimizer.step()
             generator_optimizer.zero_grad()
-            schedulers[0].step(self.global_step)
+            schedulers[0].step_update(self.global_step)
 
         discriminator_total = result.model.rgb.new_zeros(())
         discriminator_image = result.model.rgb.new_zeros(())
@@ -659,7 +659,7 @@ class VQGAN(pl.LightningModule):
                     )
                 discriminator_optimizer.step()
                 discriminator_optimizer.zero_grad()
-                schedulers[1].step(self.global_step)
+                schedulers[1].step_update(self.global_step)
 
         self._log_loss_breakdown("train", result)
         self.log_dict(

@@ -181,3 +181,10 @@
 - `OmniTokenizer/modules/callbacks.py` 更新 `rank_zero_only` 导入和 batch-end hook 签名；本地图像与视频写到 `trainer.default_root_dir`，不再依赖 WandB logger。禁用 WandB 时不构造要求 logger 存在的 `LearningRateMonitor`。
 - `tests/stereo/test_source_boundary.py` 新增无 Torch 静态回归，约束不得重新引入 Lightning 1.x Trainer API、旧 `--gpus` 参数、旧 hook 签名或 `pl_module.logger.save_dir`。
 - H200 首轮完整测试发现 `tests/stereo/test_entrypoints_source.py` 仍匹配旧 `trainer_overrides` 字典文本；测试合同已改为检查 Lightning 2.5 `Trainer(...)` 的等价显式关键字，不为满足旧字符串格式回改生产代码。
+
+### 模块 14：Update-based timm 学习率调度修复
+
+- 状态：已实现，待 H200 3-step 动态 gate。
+- 单 sample 过拟合的 CSV 证据显示 step 0 到约 step 294 的 `lr-Adam` 始终为 `0.0`，确定性 probe 的 RGB、disparity 与 depth 输出不变；这不是模型容量或数据问题，而是 optimizer 没有获得非零学习率。
+- `CosineLRScheduler` 配置为 `t_in_epochs=False` 时，timm 只在 `step_update(num_updates)` 中更新参数组；原训练代码错误调用 epoch 型 `step(global_step)`，因此生成器和可选判别器 scheduler 都不生效。
+- 生成器与判别器路径均改为 `step_update(self.global_step)`；源码边界测试同时禁止两个旧调用重新出现。修复不改变 optimizer、warmup/cosine 参数或 loss 配置。

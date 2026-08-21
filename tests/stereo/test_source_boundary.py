@@ -114,6 +114,13 @@ class SourceBoundaryTest(unittest.TestCase):
         self.assertIn('--devices "${GPU_COUNT}"', launcher)
         self.assertNotIn('--gpus "${GPU_COUNT}"', launcher)
 
+    def test_update_based_timm_schedulers_use_step_update(self) -> None:
+        source = TOKENIZER_SOURCES[0].read_text(encoding="utf-8")
+        self.assertIn("schedulers[0].step_update(self.global_step)", source)
+        self.assertIn("schedulers[1].step_update(self.global_step)", source)
+        self.assertNotIn("schedulers[0].step(self.global_step)", source)
+        self.assertNotIn("schedulers[1].step(self.global_step)", source)
+
     def test_callbacks_use_lightning_2_hooks_and_trainer_output_root(self) -> None:
         tree = ast.parse(CALLBACKS_SOURCE.read_text(encoding="utf-8"))
         imports = {
