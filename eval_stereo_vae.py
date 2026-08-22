@@ -31,6 +31,7 @@ CHECKPOINT_SEMANTIC_FIELDS = (
     "spatial_depth",
     "temporal_depth",
     "causal_in_peg",
+    "causal_in_temporal_transformer",
     "dim_head",
     "heads",
     "attn_dropout",

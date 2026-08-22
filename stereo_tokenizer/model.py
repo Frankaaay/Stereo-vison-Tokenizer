@@ -113,6 +113,8 @@ class StereoVAE(pl.LightningModule):
             stereo_num_frames=args.stereo_num_frames,
             stereo_search_radii=tuple(args.stereo_search_radii),
             stereo_search_direction=args.stereo_search_direction,
+            # 保留原版配置接口；默认值为 False，四帧离线重建仍使用双向时间注意力。
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
         self.decoder = StereoDecoder(
             image_size=args.resolution,
@@ -142,6 +144,8 @@ class StereoVAE(pl.LightningModule):
             stereo_disparity_scale=tuple(args.stereo_disparity_scale),
             stereo_disparity_bias=args.stereo_disparity_bias,
             stereo_disparity_epsilon=args.stereo_disparity_epsilon,
+            # 与 Encoder 保持同一配置语义；默认 False 不启用 causal mask。
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
         self.posterior_projection = nn.Sequential(
             Rearrange("b c t h w -> b t h w c"),
@@ -917,6 +921,8 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--spatial_depth", type=int, default=4)
         parser.add_argument("--temporal_depth", type=int, default=4)
         parser.add_argument("--causal_in_peg", action="store_true")
+        # 保留原版配置接口；默认不启用 causal，视频四帧均已观测时使用双向注意力。
+        parser.add_argument("--causal_in_temporal_transformer", action="store_true")
         parser.add_argument("--dim_head", type=int, default=64)
         parser.add_argument("--heads", type=int, default=8)
         parser.add_argument("--attn_dropout", type=float, default=0.0)
@@ -985,7 +991,8 @@ class StereoEncoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
-                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False,
+                    causal_in_peg=True, causal_in_temporal_transformer=False,
+                    dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False,
                     stereo_num_views=None, stereo_num_frames=None, stereo_search_radii=None, stereo_search_direction="left"):
         super().__init__()
         self.image_size = pair(image_size)
@@ -1032,7 +1039,7 @@ class StereoEncoder(nn.Module):
             **spatial_transformer_kwargs,
         )
 
-        # 四帧均已观测，时间注意力固定为双向；显式位置编码负责区分帧顺序。
+        # 四帧位置编码区分帧顺序；默认双向，保留原版参数以兼容旧配置。
         self.enc_temporal_position = nn.Parameter(torch.empty(1, stereo_num_frames, dim))
         self.enc_temporal_transformer = Transformer(
             dim=dim,
@@ -1040,7 +1047,7 @@ class StereoEncoder(nn.Module):
             heads=heads,
             depth=temporal_depth,
             block='t' * temporal_depth,
-            causal=False,
+            causal=causal_in_temporal_transformer,
             peg=False,
             attn_dropout=attn_dropout,
             ff_dropout=ff_dropout,
@@ -1233,7 +1240,8 @@ class StereoDecoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
-                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
+                    causal_in_peg=True, causal_in_temporal_transformer=False,
+                    dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
                     stereo_num_views=None, stereo_num_frames=None,
                     stereo_disparity_scale=None, stereo_disparity_bias=None,
                     stereo_disparity_epsilon=1e-6):
@@ -1282,7 +1290,7 @@ class StereoDecoder(nn.Module):
             heads=heads,
             depth=temporal_depth,
             block='t' * temporal_depth,
-            causal=False,
+            causal=causal_in_temporal_transformer,
             peg=False,
             attn_dropout=attn_dropout,
             ff_dropout=ff_dropout,

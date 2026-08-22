@@ -26,6 +26,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             spatial_depth=2,
             temporal_depth=1,
             causal_in_peg=True,
+            causal_in_temporal_transformer=False,
             dim_head=8,
             heads=4,
             attn_dropout=0.0,
