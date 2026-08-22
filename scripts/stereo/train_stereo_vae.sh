@@ -55,7 +55,6 @@ python3 train_stereo_vae.py \
   --dec_block tttt \
   --twod_window_size 8 \
   --spatial_pos rope \
-  --causal_in_temporal_transformer \
   --causal_in_peg \
   --dim_head 64 \
   --heads 8 \
