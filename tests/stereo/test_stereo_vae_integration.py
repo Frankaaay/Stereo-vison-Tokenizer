@@ -25,7 +25,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             spatial_pos="rope",
             spatial_depth=2,
             temporal_depth=1,
-            causal_in_temporal_transformer=True,
             causal_in_peg=True,
             dim_head=8,
             heads=4,
@@ -91,6 +90,15 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertEqual(output.rgb.shape, (1, 3, 3, 4, 32, 32))
         self.assertEqual(output.disparity.shape, (1, 3, 1, 4, 32, 32))
 
+    def test_mono_entrypoint_uses_same_four_frame_temporal_path(self) -> None:
+        model = StereoVAE(self._args()).eval()
+        output = model(
+            self._batch()["video"], mode="mono", sample_posterior=False
+        )
+        self.assertIsNone(output.fusion)
+        self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
+        self.assertEqual(output.rgb.shape, (1, 3, 3, 4, 32, 32))
+
     def test_eval_default_uses_posterior_mean(self) -> None:
         model = StereoVAE(self._args()).eval()
         video = self._batch()["video"]
@@ -103,9 +111,20 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model = StereoVAE(self._args()).train()
         result = model.compute_core_loss(self._batch(), sample_posterior=True)
         result.loss.total.backward()
-        self.assertIsNotNone(model.posterior_projection[1].weight.grad)
-        self.assertIsNotNone(model.decoder.stereo_rgb_head.weight.grad)
-        self.assertIsNotNone(model.decoder.stereo_disparity_head.weight.grad)
+        parameters = (
+            model.encoder.enc_temporal_transformer.layers[0][1].to_q.weight,
+            model.encoder.stereo_temporal_projection[1].weight,
+            model.posterior_projection[1].weight,
+            model.decoder.stereo_temporal_expansion[1].weight,
+            model.decoder.dec_temporal_transformer.layers[0][1].to_q.weight,
+            model.decoder.dec_spatial_transformer.layers[0][1].to_q.weight,
+            model.decoder.stereo_rgb_head.weight,
+            model.decoder.stereo_disparity_head.weight,
+        )
+        for parameter in parameters:
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+            self.assertGreater(torch.count_nonzero(parameter.grad).item(), 0)
 
     def test_main_model_has_no_codebook_or_legacy_image_mode(self) -> None:
         model = StereoVAE(self._args())
