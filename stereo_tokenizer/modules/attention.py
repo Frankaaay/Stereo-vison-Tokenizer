@@ -415,7 +415,11 @@ class Attention(nn.Module):
 
 
         if self.spatial_pos == "rope" and is_spatial:
-            if self.freqs_cis is None or self.freqs_cis.shape[0] != N:
+            if (
+                self.freqs_cis is None
+                or self.freqs_cis.shape[0] != N
+                or self.freqs_cis.device != x.device
+            ):
                 self.freqs_cis = precompute_freqs_cis_2d(self.dim // self.heads, N).to(x.device)
 
             q, k = apply_rotary_emb(q, k, freqs_cis=self.freqs_cis)

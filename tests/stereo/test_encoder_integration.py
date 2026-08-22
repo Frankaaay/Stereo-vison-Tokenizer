@@ -3,9 +3,26 @@ import unittest
 import torch
 
 from stereo_tokenizer.model import StereoEncoder
+from stereo_tokenizer.modules.attention import Attention
 
 
 class StructuredStereoEncoderTest(unittest.TestCase):
+    def test_rope_cache_rebuilds_after_device_migration(self) -> None:
+        attention = Attention(
+            dim=8,
+            dim_head=8,
+            heads=1,
+            spatial_pos="rope",
+        ).eval()
+        attention.freqs_cis = torch.empty(
+            (4, 4), dtype=torch.complex64, device="meta"
+        )
+
+        output = attention(torch.randn(1, 4, 8))
+
+        self.assertEqual(output.device.type, "cpu")
+        self.assertEqual(attention.freqs_cis.device.type, "cpu")
+
     def _encoder(self) -> StereoEncoder:
         return StereoEncoder(
             image_size=32,
