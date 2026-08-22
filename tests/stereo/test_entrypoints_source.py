@@ -81,6 +81,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "--perceptual_weight 1.0",
         ):
             self.assertIn(argument, source)
+        self.assertIn("TORCH_HOME:-/home/frank/.cache/torch", source)
+        self.assertIn("vgg16-397923af.pth", source)
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--fp16", source)
 

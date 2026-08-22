@@ -11,11 +11,13 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 REPO_ROOT="${REPO_ROOT:-/data/home/frank/projects/Stereo-vison-Tokenizer}"
+TORCH_HOME="${TORCH_HOME:-/home/frank/.cache/torch}"
 
 test "$(git -C "${REPO_ROOT}" branch --show-current)" = frank-profiling
 test "$(git -C "${REPO_ROOT}" rev-parse HEAD)" = "${EXPECTED_GIT_SHA}"
 test -z "$(git -C "${REPO_ROOT}" status --porcelain)"
 test -x "${PYTHON_BIN}"
+test -f "${TORCH_HOME}/hub/checkpoints/vgg16-397923af.pth"
 
 if nvidia-smi -i "${PHYSICAL_GPU}" --query-compute-apps=pid \
   --format=csv,noheader,nounits | grep -Eq '[0-9]'; then
@@ -27,6 +29,7 @@ cd "${REPO_ROOT}"
 export CUDA_VISIBLE_DEVICES="${PHYSICAL_GPU}"
 export PYTHONPATH="${REPO_ROOT}"
 export PYTHONUNBUFFERED=1
+export TORCH_HOME
 
 exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --seed 1234 \
