@@ -50,6 +50,81 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--use_vae", source)
 
+    def test_step_profiler_preserves_the_accepted_training_contract(self):
+        source = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
+        self.assertIn("set_profiling_enabled(True)", source)
+        self.assertIn("max_steps=args.profile_updates", source)
+        self.assertIn("if args.max_steps != 5000", source)
+        self.assertIn("if args.batch_size != 8 or args.num_workers != 0", source)
+        self.assertIn("ProfilerActivity.CPU", source)
+        self.assertIn("ProfilerActivity.CUDA", source)
+        self.assertIn("record_shapes=True", source)
+        self.assertIn("profile_memory=True", source)
+        self.assertIn("with_stack=False", source)
+        self.assertNotIn("torch.compile", source)
+        self.assertNotIn("fused=True", source)
+
+    def test_step_profiler_recipe_keeps_one_gpu_batch_eight_and_bf16(self):
+        source = (
+            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
+        ).read_text(encoding="utf-8")
+        for argument in (
+            "--devices 1",
+            "--batch_size 8",
+            "--num_workers 0",
+            "--bf16",
+            "--max_steps 5000",
+            "--profile_updates 40",
+            "--profile_wait 15",
+            "--profile_warmup 5",
+            "--profile_active 10",
+            "--perceptual_weight 1.0",
+        ):
+            self.assertIn(argument, source)
+        self.assertNotIn("--gan_enabled", source)
+        self.assertNotIn("--fp16", source)
+
+    def test_profile_regions_are_opt_in_and_cover_requested_components(self):
+        helper = (ROOT / "stereo_tokenizer" / "profiling.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_ENABLED = False", helper)
+        model = (ROOT / "stereo_tokenizer" / "model.py").read_text(
+            encoding="utf-8"
+        )
+        data = (ROOT / "stereo_tokenizer" / "data.py").read_text(
+            encoding="utf-8"
+        )
+        losses = (
+            ROOT / "stereo_tokenizer" / "modules" / "stereo_losses.py"
+        ).read_text(encoding="utf-8")
+        for region in (
+            "stereo/encoder/spatial_transformer",
+            "stereo/encoder/stereo_fusion",
+            "stereo/decoder/spatial_transformer",
+            "stereo/loss/lpips_vgg",
+            "stereo/update/backward",
+            "stereo/update/gradient_clipping",
+            "stereo/update/adam_step",
+            "stereo/logging/train_metrics",
+            "stereo/transfer/cpu_to_gpu",
+        ):
+            self.assertIn(region, model)
+        for region in (
+            "stereo/data/rgb_npz_read_decompress",
+            "stereo/data/gt_npz_read_decompress",
+            "stereo/data/numpy_processing_and_tensor_conversion",
+            "stereo/data/collate",
+        ):
+            self.assertIn(region, data)
+        for region in (
+            "stereo/loss/rgb",
+            "stereo/loss/disparity",
+            "stereo/loss/disparity_gradient",
+            "stereo/loss/kl",
+        ):
+            self.assertIn(region, losses)
+
 
 if __name__ == "__main__":
     unittest.main()

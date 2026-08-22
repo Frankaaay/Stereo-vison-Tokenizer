@@ -11,6 +11,14 @@ import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
 from torch.utils import data
+from torch.utils.data import default_collate
+
+from .profiling import profile_region
+
+
+def _profiled_collate(batch):
+    with profile_region("stereo/data/collate"):
+        return default_collate(batch)
 
 
 class StereoManifestDataset(data.Dataset):
@@ -152,6 +160,10 @@ class StereoManifestDataset(data.Dataset):
         return len(self.records)
 
     def __getitem__(self, index):
+        with profile_region("stereo/data/getitem"):
+            return self._getitem_impl(index)
+
+    def _getitem_impl(self, index):
         record = self.records[index]
         rgb_path = self._resolve_cache_path(
             self.rgb_root, record["rgb_relative_path"]
@@ -159,67 +171,70 @@ class StereoManifestDataset(data.Dataset):
         gt_path = self._resolve_cache_path(
             self.gt_root, record["gt_relative_path"]
         )
-        rgb_cache = self._load_npz(rgb_path)
-        gt_cache = self._load_npz(gt_path)
+        with profile_region("stereo/data/rgb_npz_read_decompress"):
+            rgb_cache = self._load_npz(rgb_path)
+        with profile_region("stereo/data/gt_npz_read_decompress"):
+            gt_cache = self._load_npz(gt_path)
 
-        if set(rgb_cache) != {"rgb"}:
-            raise ValueError(f"{rgb_path}: expected only the rgb array")
-        rgb = rgb_cache["rgb"]
-        if rgb.shape != self.RGB_SHAPE or rgb.dtype != np.uint8:
-            raise ValueError(
-                f"{rgb_path}: expected uint8 {self.RGB_SHAPE}, "
-                f"got {rgb.dtype} {rgb.shape}"
+        with profile_region("stereo/data/numpy_processing_and_tensor_conversion"):
+            if set(rgb_cache) != {"rgb"}:
+                raise ValueError(f"{rgb_path}: expected only the rgb array")
+            rgb = rgb_cache["rgb"]
+            if rgb.shape != self.RGB_SHAPE or rgb.dtype != np.uint8:
+                raise ValueError(
+                    f"{rgb_path}: expected uint8 {self.RGB_SHAPE}, "
+                    f"got {rgb.dtype} {rgb.shape}"
+                )
+
+            missing = self.REQUIRED_GT_KEYS - set(gt_cache)
+            if missing:
+                raise ValueError(f"{gt_path}: missing GT arrays {sorted(missing)}")
+            disparity = gt_cache["disparity_left"].astype(np.float32)
+            lr_error = gt_cache["lr_error_px"].astype(np.float32)
+            base_valid = gt_cache["base_valid_mask"].astype(np.bool_)
+            if (
+                disparity.shape != self.GT_SHAPE
+                or lr_error.shape != self.GT_SHAPE
+                or base_valid.shape != self.GT_SHAPE
+            ):
+                raise ValueError(f"{gt_path}: unexpected dense GT shape")
+
+            fx = gt_cache["fx"].astype(np.float32)
+            baseline_m = gt_cache["baseline_m"].astype(np.float32)
+            if fx.shape != (3,) or baseline_m.shape != (3,):
+                raise ValueError(f"{gt_path}: expected fx/baseline_m shape [3]")
+            if not np.isfinite(fx).all() or not np.isfinite(baseline_m).all():
+                raise ValueError(f"{gt_path}: non-finite calibration")
+            if (fx <= 0).any() or (baseline_m <= 0).any():
+                raise ValueError(f"{gt_path}: non-positive calibration")
+
+            content = self._content_mask(record)[None, None]
+            lr_threshold = np.maximum(
+                self.lr_error_abs_threshold_px,
+                self.lr_error_relative_threshold * disparity,
+            )
+            valid = (
+                content
+                & base_valid
+                & np.isfinite(disparity)
+                & np.isfinite(lr_error)
+                & (disparity >= self.disparity_min_px)
+                & (disparity <= self.disparity_max_px)
+                & (lr_error <= lr_threshold)
             )
 
-        missing = self.REQUIRED_GT_KEYS - set(gt_cache)
-        if missing:
-            raise ValueError(f"{gt_path}: missing GT arrays {sorted(missing)}")
-        disparity = gt_cache["disparity_left"].astype(np.float32)
-        lr_error = gt_cache["lr_error_px"].astype(np.float32)
-        base_valid = gt_cache["base_valid_mask"].astype(np.bool_)
-        if (
-            disparity.shape != self.GT_SHAPE
-            or lr_error.shape != self.GT_SHAPE
-            or base_valid.shape != self.GT_SHAPE
-        ):
-            raise ValueError(f"{gt_path}: unexpected dense GT shape")
-
-        fx = gt_cache["fx"].astype(np.float32)
-        baseline_m = gt_cache["baseline_m"].astype(np.float32)
-        if fx.shape != (3,) or baseline_m.shape != (3,):
-            raise ValueError(f"{gt_path}: expected fx/baseline_m shape [3]")
-        if not np.isfinite(fx).all() or not np.isfinite(baseline_m).all():
-            raise ValueError(f"{gt_path}: non-finite calibration")
-        if (fx <= 0).any() or (baseline_m <= 0).any():
-            raise ValueError(f"{gt_path}: non-positive calibration")
-
-        content = self._content_mask(record)[None, None]
-        lr_threshold = np.maximum(
-            self.lr_error_abs_threshold_px,
-            self.lr_error_relative_threshold * disparity,
-        )
-        valid = (
-            content
-            & base_valid
-            & np.isfinite(disparity)
-            & np.isfinite(lr_error)
-            & (disparity >= self.disparity_min_px)
-            & (disparity <= self.disparity_max_px)
-            & (lr_error <= lr_threshold)
-        )
-
-        disparity = np.transpose(disparity, (1, 0, 2, 3))[:, None]
-        valid = np.transpose(valid, (1, 0, 2, 3))[:, None]
-        video = torch.from_numpy(rgb.copy()).float().div_(255.0).sub_(0.5)
-        return {
-            "video": video,
-            "disparity": torch.from_numpy(disparity.copy()),
-            "valid_mask": torch.from_numpy(valid.copy()),
-            "fx": torch.from_numpy(fx.copy()),
-            "baseline_m": torch.from_numpy(baseline_m.copy()),
-            "sample_id": record["sample_id"],
-            "episode_id": record.get("episode_id", ""),
-        }
+            disparity = np.transpose(disparity, (1, 0, 2, 3))[:, None]
+            valid = np.transpose(valid, (1, 0, 2, 3))[:, None]
+            video = torch.from_numpy(rgb.copy()).float().div_(255.0).sub_(0.5)
+            return {
+                "video": video,
+                "disparity": torch.from_numpy(disparity.copy()),
+                "valid_mask": torch.from_numpy(valid.copy()),
+                "fx": torch.from_numpy(fx.copy()),
+                "baseline_m": torch.from_numpy(baseline_m.copy()),
+                "sample_id": record["sample_id"],
+                "episode_id": record.get("episode_id", ""),
+            }
 
 
 class StereoDataModule(pl.LightningDataModule):
@@ -270,6 +285,7 @@ class StereoDataModule(pl.LightningDataModule):
             batch_size=self.args.batch_size,
             num_workers=self.args.num_workers,
             pin_memory=False,
+            collate_fn=_profiled_collate,
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,
             drop_last=train,

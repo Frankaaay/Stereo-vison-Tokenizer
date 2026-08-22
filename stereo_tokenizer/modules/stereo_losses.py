@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..profiling import profile_region
+
 
 class PosteriorWithKL(Protocol):
     def kl(self) -> torch.Tensor: ...
@@ -232,22 +234,26 @@ class StereoReconstructionKLLoss(nn.Module):
         gradient_scale_px: float,
         kl_weight_override: float | None = None,
     ) -> StereoLossBreakdown:
-        rgb = rgb_reconstruction_loss(
-            rgb_prediction, rgb_target, loss_type=self.rgb_loss_type
-        )
-        disparity = masked_smooth_l1_disparity_loss(
-            normalized_disparity_prediction,
-            normalized_disparity_target,
-            valid_mask,
-            beta=self.smooth_l1_beta,
-        )
-        gradient = masked_disparity_gradient_loss(
-            pixel_disparity_prediction,
-            pixel_disparity_target,
-            valid_mask,
-            scale_px=gradient_scale_px,
-        )
-        kl = posterior_kl_loss(posterior)
+        with profile_region("stereo/loss/rgb"):
+            rgb = rgb_reconstruction_loss(
+                rgb_prediction, rgb_target, loss_type=self.rgb_loss_type
+            )
+        with profile_region("stereo/loss/disparity"):
+            disparity = masked_smooth_l1_disparity_loss(
+                normalized_disparity_prediction,
+                normalized_disparity_target,
+                valid_mask,
+                beta=self.smooth_l1_beta,
+            )
+        with profile_region("stereo/loss/disparity_gradient"):
+            gradient = masked_disparity_gradient_loss(
+                pixel_disparity_prediction,
+                pixel_disparity_target,
+                valid_mask,
+                scale_px=gradient_scale_px,
+            )
+        with profile_region("stereo/loss/kl"):
+            kl = posterior_kl_loss(posterior)
         kl_weight = (
             self.kl_weight
             if kl_weight_override is None
