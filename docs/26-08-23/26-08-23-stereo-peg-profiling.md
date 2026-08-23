@@ -330,3 +330,7 @@ node remains on clean branch `frank` at
 `45c423162727e50b52060b4fd8bb88f5849b8394`, not the authorized profiling
 branch. No process was killed, no alternate node was synchronized, and neither
 the paired benchmark nor the 128-sample overfit was started.
+
+The benchmark later continued on H200-1 after explicit authorization. Final
+results and the static-graph, logging, and loader-epoch follow-up are recorded
+in `docs/26-08-24/26-08-24-stereo-128-ddp-benchmark.md`.
