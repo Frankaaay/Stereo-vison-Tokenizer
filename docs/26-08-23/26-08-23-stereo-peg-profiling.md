@@ -176,3 +176,42 @@ smaller but real improvement with a 2.859 GiB persistent cache cost. Pinned
 memory improves H2D substantially but yields only a small end-to-end gain once
 CPU pinning cost is included. All three remain explicit profiling switches
 pending a decision about production or acceptance-run defaults.
+
+## Full-dataset applicability audit
+
+The approximately 500 ms control in this document intentionally used the
+frozen eight-sample manifest and `num_workers=0`. It is not a measurement of
+the full 3407-sample steady state. The formal launcher already defaults to
+eight DataLoader workers, and a full epoch contains about 425 complete batches
+instead of restarting the epoch after every update.
+
+On H200-2, the full manifest contains 3407 samples. The RGB cache occupies
+16.08 GB and is effectively uncompressed inside NPZ. The GT cache occupies
+5.47 GB but expands to about 13.43 GB, with a sampled raw-to-disk ratio of
+2.45x. The node has 192 CPU cores and approximately 1.9 TiB available RAM at
+the audit point.
+
+A read-only CPU DataLoader check consumed 35 batches per setting and measured
+the last 30 batches without running a model or using a GPU:
+
+| Workers | Mean batch wait | Median batch wait | Mean samples/s |
+| ---: | ---: | ---: | ---: |
+| 0 | 343.8 ms | 335.9 ms | 23.3 |
+| 4 | 83.5 ms | 47.2 ms | 95.8 |
+| 8 | 80.6 ms | 16.3 ms | 99.2 |
+| 16 | 115.4 ms | 18.3 ms | 69.3 |
+
+With four or eight workers, mean data production is substantially faster than
+the approximately 288.9 ms compute-only step measured with PEG Conv2d and no
+LPIPS cache. Data loading should therefore be mostly hidden by GPU work during
+a long epoch. Sixteen workers produced worse mean throughput and larger tails,
+so increasing worker count without measurement is not recommended.
+
+The next strict measurement should use the full manifest, fixed sample order,
+batch 8/BF16, PEG Conv2d, no preload, no LPIPS cache, and eight workers. A
+second run should change only pinned memory. Further independent candidates are
+batched prediction/target VGG execution for LPIPS, followed by `torch.compile`
+only after the full-manifest input pipeline is measured. Re-encoding GT as
+uncompressed or memory-mappable data should be considered only if DataLoader
+wait remains on the end-to-end critical path; its decompression cost may
+already be hidden by worker prefetch.
