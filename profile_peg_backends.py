@@ -20,6 +20,18 @@ def _max_abs(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.float() - right.float()).abs().max().cpu())
 
 
+def _comparison(left: torch.Tensor, right: torch.Tensor) -> dict[str, float]:
+    max_abs = _max_abs(left, right)
+    reference_max_abs = float(right.float().abs().max().cpu())
+    return {
+        "max_abs": max_abs,
+        "reference_max_abs": reference_max_abs,
+        "max_abs_over_reference_max_abs": (
+            max_abs / reference_max_abs if reference_max_abs else 0.0
+        ),
+    }
+
+
 def _run_once(
     module: PEG,
     source: torch.Tensor,
@@ -89,10 +101,10 @@ def main() -> None:
     torch.manual_seed(1234)
     torch.cuda.manual_seed_all(1234)
     device = torch.device("cuda")
-    dtype = torch.bfloat16
     results = []
 
-    for batch in (192, 24):
+    for dtype in (torch.bfloat16, torch.float32):
+      for batch in (192, 24):
         shape = (batch, 1, 16, 16)
         source = torch.randn(batch, 256, 512, device=device, dtype=dtype)
         output_grad = torch.randn_like(source)
@@ -129,6 +141,7 @@ def main() -> None:
             results.append(
                 {
                     "batch": batch,
+                    "dtype": str(dtype),
                     "backend": backend,
                     "forward_backward": _benchmark(
                         modules[backend],
@@ -138,12 +151,12 @@ def main() -> None:
                         args.warmup,
                         args.iterations,
                     ),
-                    "max_abs_vs_contiguous": {
-                        key: _max_abs(observation[key], reference[key])
+                    "comparison_vs_contiguous": {
+                        key: _comparison(observation[key], reference[key])
                         for key in observation
                     },
-                    "adam_max_abs_vs_contiguous": {
-                        key: _max_abs(adam_states[backend][key], reference_adam[key])
+                    "adam_comparison_vs_contiguous": {
+                        key: _comparison(adam_states[backend][key], reference_adam[key])
                         for key in reference_adam
                     },
                     "inactive_temporal_weight_grad_max_abs": float(
