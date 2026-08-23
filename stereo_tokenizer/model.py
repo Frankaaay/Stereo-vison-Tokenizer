@@ -154,8 +154,8 @@ class StereoVAE(pl.LightningModule):
             if isinstance(module, PEG):
                 module.set_backend(self.peg_backend)
                 peg_count += 1
-        if peg_count != 14:
-            raise RuntimeError(f"expected 14 PEG modules, got {peg_count}")
+        if peg_count == 0:
+            raise RuntimeError("StereoVAE contains no PEG modules")
         self.posterior_projection = nn.Sequential(
             Rearrange("b c t h w -> b t h w c"),
             nn.Linear(args.embedding_dim, 2 * args.latent_channels),

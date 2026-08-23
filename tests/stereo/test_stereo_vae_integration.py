@@ -4,6 +4,7 @@ from argparse import Namespace
 import torch
 
 from stereo_tokenizer import StereoVAE
+from stereo_tokenizer.modules.attention import PEG
 
 
 class StereoVAEIntegrationTest(unittest.TestCase):
@@ -90,6 +91,18 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
         self.assertEqual(output.rgb.shape, (1, 3, 3, 4, 32, 32))
         self.assertEqual(output.disparity.shape, (1, 3, 1, 4, 32, 32))
+
+    def test_constructor_applies_selected_peg_backend_to_reduced_model(self) -> None:
+        args = self._args()
+        args.peg_backend = "conv2d_t1_slice"
+
+        model = StereoVAE(args)
+        peg_modules = [module for module in model.modules() if isinstance(module, PEG)]
+
+        self.assertTrue(peg_modules)
+        self.assertTrue(
+            all(module._backend == "conv2d_t1_slice" for module in peg_modules)
+        )
 
     def test_eval_default_uses_posterior_mean(self) -> None:
         model = StereoVAE(self._args()).eval()
