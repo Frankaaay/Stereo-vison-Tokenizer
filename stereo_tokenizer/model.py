@@ -101,7 +101,6 @@ class StereoVAE(pl.LightningModule):
             defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
             temporal_depth=args.temporal_depth,
-            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
             causal_in_peg=args.causal_in_peg,
             dim=args.embedding_dim,
             dim_head=args.dim_head,
@@ -110,11 +109,12 @@ class StereoVAE(pl.LightningModule):
             ff_dropout=args.ff_dropout,
             ff_mult=args.ff_mult,
             initialize=args.initialize_vit,
-            sequence_length=args.stereo_num_frames,
             stereo_num_views=args.stereo_num_views,
             stereo_num_frames=args.stereo_num_frames,
             stereo_search_radii=tuple(args.stereo_search_radii),
             stereo_search_direction=args.stereo_search_direction,
+            # 保留原版配置接口；默认值为 False，四帧离线重建仍使用双向时间注意力。
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
         self.decoder = StereoDecoder(
             image_size=args.resolution,
@@ -130,7 +130,6 @@ class StereoVAE(pl.LightningModule):
             defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
             temporal_depth=args.temporal_depth,
-            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
             causal_in_peg=args.causal_in_peg,
             dim=args.embedding_dim,
             dim_head=args.dim_head,
@@ -140,12 +139,13 @@ class StereoVAE(pl.LightningModule):
             ff_mult=args.ff_mult,
             gen_upscale=None,
             initialize=args.initialize_vit,
-            sequence_length=1,
             stereo_num_views=args.stereo_num_views,
             stereo_num_frames=args.stereo_num_frames,
             stereo_disparity_scale=tuple(args.stereo_disparity_scale),
             stereo_disparity_bias=args.stereo_disparity_bias,
             stereo_disparity_epsilon=args.stereo_disparity_epsilon,
+            # 与 Encoder 保持同一配置语义；默认 False 不启用 causal mask。
+            causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
         self.posterior_projection = nn.Sequential(
             Rearrange("b c t h w -> b t h w c"),
@@ -920,10 +920,9 @@ class StereoVAE(pl.LightningModule):
         )
         parser.add_argument("--spatial_depth", type=int, default=4)
         parser.add_argument("--temporal_depth", type=int, default=4)
-        parser.add_argument(
-            "--causal_in_temporal_transformer", action="store_true"
-        )
         parser.add_argument("--causal_in_peg", action="store_true")
+        # 保留原版配置接口；默认不启用 causal，视频四帧均已观测时使用双向注意力。
+        parser.add_argument("--causal_in_temporal_transformer", action="store_true")
         parser.add_argument("--dim_head", type=int, default=64)
         parser.add_argument("--heads", type=int, default=8)
         parser.add_argument("--attn_dropout", type=float, default=0.0)
@@ -991,8 +990,9 @@ class _StereoEncoderOutput:
 class StereoEncoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
-                    spatial_depth=4, temporal_depth=4, causal_in_temporal_transformer=False, dim=512, 
-                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False, sequence_length=17,
+                    spatial_depth=4, temporal_depth=4, dim=512,
+                    causal_in_peg=True, causal_in_temporal_transformer=False,
+                    dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False,
                     stereo_num_views=None, stereo_num_frames=None, stereo_search_radii=None, stereo_search_direction="left"):
         super().__init__()
         self.image_size = pair(image_size)
@@ -1007,6 +1007,8 @@ class StereoEncoder(nn.Module):
             raise ValueError("Stereo Encoder requires linear patch embedding")
         if defer_temporal_pool or defer_spatial_pool:
             raise ValueError("Stereo Encoder does not use deferred pooling")
+        if stereo_num_frames != 4:
+            raise ValueError("Stereo Encoder requires exactly 4 frames")
 
         self.to_patch_emb_first_frame = nn.Sequential(
             Rearrange(
@@ -1019,7 +1021,7 @@ class StereoEncoder(nn.Module):
             nn.LayerNorm(dim),
         )
 
-        transformer_kwargs = dict(
+        spatial_transformer_kwargs = dict(
             dim=dim,
             dim_head=dim_head,
             heads=heads,
@@ -1027,25 +1029,36 @@ class StereoEncoder(nn.Module):
             ff_dropout=ff_dropout,
             peg=True,
             peg_causal=causal_in_peg,
-            ff_mult=ff_mult
+            ff_mult=ff_mult,
+        )
+        self.enc_spatial_transformer = Transformer(
+            depth=spatial_depth,
+            block=block,
+            window_size=window_size,
+            spatial_pos=spatial_pos,
+            **spatial_transformer_kwargs,
         )
 
-        self.enc_spatial_transformer = Transformer(depth=spatial_depth, block=block, window_size=window_size, spatial_pos=spatial_pos, **transformer_kwargs)
-
-        
-        if causal_in_temporal_transformer:
-            transformer_kwargs["causal"] = True
-
+        # 四帧位置编码区分帧顺序；默认双向，保留原版参数以兼容旧配置。
+        self.enc_temporal_position = nn.Parameter(torch.empty(1, stereo_num_frames, dim))
         self.enc_temporal_transformer = Transformer(
-            depth=temporal_depth, block='t' * temporal_depth, **transformer_kwargs)
+            dim=dim,
+            dim_head=dim_head,
+            heads=heads,
+            depth=temporal_depth,
+            block='t' * temporal_depth,
+            causal=causal_in_temporal_transformer,
+            peg=False,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            ff_mult=ff_mult,
+        )
 
         self.stereo_num_views = stereo_num_views
         self.stereo_num_frames = stereo_num_frames
         self.stereo_embedding_dim = dim
         if stereo_num_views != 3:
             raise ValueError("Stereo Encoder requires exactly 3 views")
-        if stereo_num_frames != 4:
-            raise ValueError("Stereo Encoder requires exactly 4 frames")
         if image_channel != 3:
             raise ValueError("Stereo Encoder requires RGB input")
         if any(layer not in "tw" for layer in block):
@@ -1072,6 +1085,7 @@ class StereoEncoder(nn.Module):
 
         if initialize:
             self.apply(self._init_weights)
+        trunc_normal_(self.enc_temporal_position, std=.02)
 
 
     def _init_weights(self, m):
@@ -1125,13 +1139,11 @@ class StereoEncoder(nn.Module):
         *,
         mode: Literal["mono", "stereo"],
     ) -> _StereoEncoderOutput:
-        """Encode structured clips as 4 raw frames to one temporal slot.
+        """Encode four synchronized frames into one temporal latent slot.
 
         ``video`` uses ``[B,V,E,C,T,H,W]``. Spatial encoding is applied to
-        every frame independently. StereoFusion runs next, followed by a joint
-        linear 4-to-1 temporal projection. The original temporal Transformer
-        therefore receives exactly one latent slot and never attends between
-        the four raw frames.
+        every frame independently. StereoFusion runs next, then the four fused
+        frame features exchange information before the final 4-to-1 sampler.
         """
 
         if mode not in ("mono", "stereo"):
@@ -1182,31 +1194,29 @@ class StereoEncoder(nn.Module):
             fusion_output = None
             fused = left
 
-        projected = rearrange(
-            fused,
-            "b v t h w d -> b v h w (t d)",
-        )
-        projected = self.stereo_temporal_projection(projected)[:, :, None]
-
+        # 每个 View、每个空间位置各自形成长度为 4 的序列，不跨 View/空间混合。
         temporal_tokens = rearrange(
-            projected,
+            fused,
             "b v t h w d -> (b v h w) t d",
         )
-        if temporal_tokens.shape[1] != 1:
-            raise RuntimeError("temporal Transformer must receive one latent slot")
+        temporal_tokens = temporal_tokens + self.enc_temporal_position
         temporal_tokens = self.enc_temporal_transformer(
             temporal_tokens,
-            video_shape=(batch * views, 1, grid_height, grid_width),
+            video_shape=(batch * views * grid_height * grid_width, time, 1, 1),
             is_spatial=False,
         )
-        features = rearrange(
+        temporal_features = rearrange(
             temporal_tokens,
-            "(b v h w) t d -> (b v) d t h w",
+            "(b v h w) t d -> b v h w (t d)",
             b=batch,
             v=views,
             h=grid_height,
             w=grid_width,
         )
+
+        # Temporal Sampler 只负责在帧间注意力之后执行 4D -> D 压缩。
+        projected = self.stereo_temporal_projection(temporal_features)
+        features = rearrange(projected, "b v h w d -> (b v) d 1 h w")
         return _StereoEncoderOutput(
             features=features,
             fusion=fusion_output,
@@ -1229,9 +1239,10 @@ class StereoDecodeOutput:
 class StereoDecoder(nn.Module):
     def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
-                    spatial_depth=4, temporal_depth=4, causal_in_temporal_transformer=False, dim=512, 
-                    causal_in_peg=True, dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
-                    sequence_length=17, stereo_num_views=None, stereo_num_frames=None,
+                    spatial_depth=4, temporal_depth=4, dim=512,
+                    causal_in_peg=True, causal_in_temporal_transformer=False,
+                    dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
+                    stereo_num_views=None, stereo_num_frames=None,
                     stereo_disparity_scale=None, stereo_disparity_bias=None,
                     stereo_disparity_epsilon=1e-6):
         super().__init__()
@@ -1241,13 +1252,15 @@ class StereoDecoder(nn.Module):
             raise ValueError("Stereo Decoder requires linear pixel projection")
         if defer_temporal_pool or defer_spatial_pool:
             raise ValueError("Stereo Decoder does not use deferred pooling")
+        if stereo_num_frames != 4:
+            raise ValueError("Stereo Decoder requires exactly 4 frames")
 
         self.image_size = pair(image_size)
         self.patch_size = pair(patch_size)
         patch_height, patch_width = self.patch_size
         self.block = block
 
-        transformer_kwargs = dict(
+        spatial_transformer_kwargs = dict(
             dim=dim,
             dim_head=dim_head,
             heads=heads,
@@ -1255,20 +1268,34 @@ class StereoDecoder(nn.Module):
             ff_dropout=ff_dropout,
             peg=True,
             peg_causal=causal_in_peg,
-            ff_mult=ff_mult
+            ff_mult=ff_mult,
+        )
+        self.dec_spatial_transformer = Transformer(
+            depth=spatial_depth,
+            block=block,
+            window_size=window_size,
+            spatial_pos=spatial_pos,
+            **spatial_transformer_kwargs,
         )
 
-        #self.spatial_rel_pos_bias = ContinuousPositionBias(
-        #    dim=dim, heads=heads) # HACK this: whether shared pos encoding is better or on the contrary
-
-        self.dec_spatial_transformer = Transformer(
-            depth=spatial_depth, block=block, window_size=window_size, spatial_pos=spatial_pos, **transformer_kwargs)
-        
-        if causal_in_temporal_transformer:
-            transformer_kwargs["causal"] = True
-
+        # 先将单 temporal slot 展开为四个帧级特征，再做双向时间建模。
+        self.stereo_temporal_expansion = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, stereo_num_frames * dim),
+        )
+        self.dec_temporal_position = nn.Parameter(torch.empty(1, stereo_num_frames, dim))
         self.dec_temporal_transformer = Transformer(
-            depth=temporal_depth, block='t' * temporal_depth, **transformer_kwargs)
+            dim=dim,
+            dim_head=dim_head,
+            heads=heads,
+            depth=temporal_depth,
+            block='t' * temporal_depth,
+            causal=causal_in_temporal_transformer,
+            peg=False,
+            attn_dropout=attn_dropout,
+            ff_dropout=ff_dropout,
+            ff_mult=ff_mult,
+        )
 
 
         self.stereo_num_views = stereo_num_views
@@ -1276,8 +1303,6 @@ class StereoDecoder(nn.Module):
         self.stereo_disparity_epsilon = stereo_disparity_epsilon
         if stereo_num_views != 3:
             raise ValueError("Stereo Decoder requires exactly 3 views")
-        if stereo_num_frames != 4:
-            raise ValueError("Stereo Decoder requires exactly 4 frames")
         if image_channel != 3:
             raise ValueError("Stereo Decoder requires RGB output")
         if any(layer not in "tw" for layer in block):
@@ -1296,14 +1321,9 @@ class StereoDecoder(nn.Module):
             raise ValueError("stereo_disparity_epsilon must be positive")
 
         patch_area = patch_height * patch_width
-        self.stereo_rgb_head = nn.Linear(
-            dim,
-            image_channel * stereo_num_frames * patch_area,
-        )
-        self.stereo_disparity_head = nn.Linear(
-            dim,
-            stereo_num_frames * patch_area,
-        )
+        # 四个帧级特征分别投影为一帧 patch，Head 不再一次生成四帧。
+        self.stereo_rgb_head = nn.Linear(dim, image_channel * patch_area)
+        self.stereo_disparity_head = nn.Linear(dim, patch_area)
         self.register_buffer(
             "stereo_disparity_scale",
             torch.as_tensor(
@@ -1314,6 +1334,7 @@ class StereoDecoder(nn.Module):
 
         if initialize:
             self.apply(self._init_weights)
+        trunc_normal_(self.dec_temporal_position, std=.02)
         nn.init.constant_(self.stereo_disparity_head.bias, stereo_disparity_bias)
 
     def _init_weights(self, m):
@@ -1332,35 +1353,45 @@ class StereoDecoder(nn.Module):
             self.image_size[1] // self.patch_size[1],
         )
 
-    def _decode_transformer_features(
-        self,
-        tokens,
-    ):
-        b = tokens.shape[0]
-        # h, w = self.patch_height_width
-        video_shape = tuple(tokens.shape[:-1]) # b t h' w' d
-        h = tokens.shape[2]
-        w = tokens.shape[3]
+    def _decode_transformer_features(self, tokens: torch.Tensor) -> torch.Tensor:
+        batch_views, time, height, width, dim = tokens.shape
+        if time != 1:
+            raise ValueError("temporal expansion expects exactly one latent slot")
 
+        # D -> 4D 后恢复四个帧级 feature，时间 Attention 在空间解码之前执行。
+        expanded = self.stereo_temporal_expansion(tokens[:, 0])
+        expanded = expanded.reshape(
+            batch_views, height, width, self.stereo_num_frames, dim
+        )
+        expanded = rearrange(expanded, "n h w t d -> (n h w) t d")
+        expanded = expanded + self.dec_temporal_position
+        expanded = self.dec_temporal_transformer(
+            expanded,
+            video_shape=(batch_views * height * width, self.stereo_num_frames, 1, 1),
+            is_spatial=False,
+        )
 
-        # decode - temporal
-        tokens = rearrange(tokens, 'b t h w d -> (b h w) t d')
-        tokens = self.dec_temporal_transformer(tokens, video_shape=video_shape, is_spatial=False)
-        # tokens = self.dec_temporal_transformer(tokens)
-
-        # might spatial downsampling here
-        down_op = self.block.count('n') + self.block.count('r')
-        down_ratio = int(2 ** down_op)
-
-        # decode - spatial
-        tokens = rearrange(tokens, '(b h w) t d -> (b t) (h w) d', b=b, h=h//down_ratio, w=w//down_ratio)
-        #tokens = self.dec_spatial_transformer(
-        #    tokens, attn_bias_func=self.spatial_rel_pos_bias, video_shape=video_shape)
-        tokens = self.dec_spatial_transformer(tokens, video_shape=video_shape, is_spatial=True)
-
-        tokens = rearrange(tokens, '(b t) (h w) d -> b t h w d', b=b, h=h, w=w)
-
-        return tokens
+        # Spatial Decoder 把每帧视为独立样本，PEG 只能看到 T=1。
+        frame_tokens = rearrange(
+            expanded,
+            "(n h w) t d -> (n t) (h w) d",
+            n=batch_views,
+            h=height,
+            w=width,
+        )
+        frame_tokens = self.dec_spatial_transformer(
+            frame_tokens,
+            video_shape=(batch_views * self.stereo_num_frames, 1, height, width),
+            is_spatial=True,
+        )
+        return rearrange(
+            frame_tokens,
+            "(n t) (h w) d -> n t h w d",
+            n=batch_views,
+            t=self.stereo_num_frames,
+            h=height,
+            w=width,
+        )
 
 
     def _unpatch_stereo(
@@ -1369,16 +1400,15 @@ class StereoDecoder(nn.Module):
         *,
         output_channels: int,
     ) -> torch.Tensor:
-        if patches.ndim != 5 or patches.shape[1] != 1:
+        if patches.ndim != 5 or patches.shape[1] != self.stereo_num_frames:
             raise ValueError(
-                "structured decoder patches must use [B*V,1,H,W,D]"
+                "structured decoder patches must use [B*V,4,H,W,D]"
             )
         patch_height, patch_width = self.patch_size
         return rearrange(
             patches,
-            "n 1 h w (c t p1 p2) -> n c t (h p1) (w p2)",
+            "n t h w (c p1 p2) -> n c t (h p1) (w p2)",
             c=output_channels,
-            t=self.stereo_num_frames,
             p1=patch_height,
             p2=patch_width,
         )
@@ -1397,8 +1427,8 @@ class StereoDecoder(nn.Module):
 
         features = rearrange(tokens, "n d t h w -> n t h w d")
         features = self._decode_transformer_features(features)
-        if features.shape[1] != 1:
-            raise RuntimeError("decoder temporal Transformer must preserve one slot")
+        if features.shape[1] != self.stereo_num_frames:
+            raise RuntimeError("decoder must produce four frame-level features")
 
         rgb = self._unpatch_stereo(
             self.stereo_rgb_head(features), output_channels=3
