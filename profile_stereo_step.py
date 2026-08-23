@@ -216,6 +216,15 @@ def build_profile_parser():
         ),
         default="conv3d_contiguous",
     )
+    parser.add_argument(
+        "--profile_preload_data", type=int, choices=(0, 1), default=0
+    )
+    parser.add_argument(
+        "--profile_pin_memory", type=int, choices=(0, 1), default=0
+    )
+    parser.add_argument(
+        "--profile_lpips_gt_cache", type=int, choices=(0, 1), default=0
+    )
     parser.add_argument("--expected_git_sha", type=str, required=True)
     parser.add_argument("--expected_manifest_sha256", type=str, required=True)
     return parser
@@ -260,10 +269,14 @@ def main() -> None:
     torch.set_float32_matmul_precision("high")
     set_profiling_enabled(True)
     data = StereoDataModule(args, shuffle=False)
+    preloaded_sample_count = 0
+    if args.profile_preload_data:
+        preloaded_sample_count = data.profile_preload_train_dataset()
     dataset = data._dataset(True)
     if len(dataset) != 8:
         raise RuntimeError(f"expected exactly eight samples, got {len(dataset)}")
     model = StereoVAE(args)
+    model.set_profile_lpips_gt_cache(bool(args.profile_lpips_gt_cache))
     peg_count = 0
     for module in model.modules():
         if isinstance(module, PEG):
@@ -318,6 +331,7 @@ def main() -> None:
             "shuffle": False,
             "trainer_max_steps": args.profile_updates,
             "peg_count": peg_count,
+            "preloaded_sample_count": preloaded_sample_count,
         }
     )
     _write_json(output_dir / "resolved_config.json", resolved)

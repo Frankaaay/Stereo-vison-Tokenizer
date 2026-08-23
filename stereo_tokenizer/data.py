@@ -242,8 +242,20 @@ class StereoDataModule(pl.LightningDataModule):
         super().__init__()
         self.args = args
         self.shuffle = shuffle
+        self._profile_preloaded_train_dataset = None
+
+    def profile_preload_train_dataset(self) -> int:
+        if self._profile_preloaded_train_dataset is not None:
+            raise RuntimeError("training dataset is already preloaded")
+        dataset = self._dataset(True)
+        self._profile_preloaded_train_dataset = [
+            dataset[index] for index in range(len(dataset))
+        ]
+        return len(self._profile_preloaded_train_dataset)
 
     def _dataset(self, train: bool):
+        if train and self._profile_preloaded_train_dataset is not None:
+            return self._profile_preloaded_train_dataset
         manifest = (
             self.args.stereo_train_manifest
             if train
@@ -284,7 +296,7 @@ class StereoDataModule(pl.LightningDataModule):
             dataset,
             batch_size=self.args.batch_size,
             num_workers=self.args.num_workers,
-            pin_memory=False,
+            pin_memory=bool(getattr(self.args, "profile_pin_memory", 0)),
             collate_fn=_profiled_collate,
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,

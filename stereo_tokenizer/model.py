@@ -182,6 +182,9 @@ class StereoVAE(pl.LightningModule):
             self.perceptual_model.requires_grad_(False)
         else:
             self.perceptual_model = None
+        self._profile_lpips_gt_cache_enabled = False
+        self._profile_lpips_gt_cache_key = None
+        self._profile_lpips_gt_features = None
 
         self.image_discriminator = None
         self.video_discriminator = None
@@ -503,14 +506,51 @@ class StereoVAE(pl.LightningModule):
             effective_kl_weight=effective_kl_weight,
         )
 
+    def set_profile_lpips_gt_cache(self, enabled: bool) -> None:
+        self._profile_lpips_gt_cache_enabled = enabled
+        self._profile_lpips_gt_cache_key = None
+        self._profile_lpips_gt_features = None
+
     def _perceptual_loss(
-        self, prediction: torch.Tensor, target: torch.Tensor
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        sample_ids=None,
     ) -> torch.Tensor:
         if self.perceptual_model is None:
             return prediction.new_zeros(())
         prediction_frames = self._flatten_view_frames(prediction)
         target_frames = self._flatten_view_frames(target)
         with profile_region("stereo/loss/lpips_vgg"):
+            if self._profile_lpips_gt_cache_enabled:
+                cache_key = tuple(sample_ids or ())
+                if not cache_key:
+                    raise RuntimeError("LPIPS GT cache requires sample IDs")
+                with profile_region("stereo/loss/lpips_prediction_features"):
+                    prediction_features = self.perceptual_model.normalized_features(
+                        prediction_frames * 2.0
+                    )
+                if self._profile_lpips_gt_features is None:
+                    with profile_region("stereo/loss/lpips_target_features"):
+                        target_features = (
+                            self.perceptual_model.normalized_features(
+                                target_frames * 2.0
+                            )
+                        )
+                    self._profile_lpips_gt_cache_key = cache_key
+                    self._profile_lpips_gt_features = tuple(
+                        feature.detach() for feature in target_features
+                    )
+                elif cache_key != self._profile_lpips_gt_cache_key:
+                    raise RuntimeError("LPIPS GT cache sample order changed")
+                with profile_region("stereo/loss/lpips_distance"):
+                    return (
+                        self.perceptual_model.distance_from_normalized_features(
+                            prediction_features,
+                            self._profile_lpips_gt_features,
+                        ).mean()
+                        * self.perceptual_weight
+                    )
             return (
                 self.perceptual_model(
                     prediction_frames * 2.0,
@@ -675,7 +715,11 @@ class StereoVAE(pl.LightningModule):
         batch = self._unwrap_batch(batch)
         result = self.compute_core_loss(batch, sample_posterior=True)
         rgb_target = batch["video"][:, :, 0]
-        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        perceptual = self._perceptual_loss(
+            result.model.rgb,
+            rgb_target,
+            sample_ids=batch.get("sample_id"),
+        )
         gan_active = self._gan_is_active()
         adversarial, feature_matching, image_gan, video_gan = (
             self._generator_adversarial_loss(result.model.rgb, rgb_target)

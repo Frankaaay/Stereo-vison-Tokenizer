@@ -83,17 +83,32 @@ class LPIPS(nn.Module):
     def forward(self, input, target):
         in0_input, in1_input = (self.scaling_layer(input), self.scaling_layer(target))
         outs0, outs1 = self.net(in0_input), self.net(in1_input)
-        feats0, feats1, diffs = {}, {}, {}
-        lins = [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4]
-        for kk in range(len(self.chns)):
-            feats0[kk], feats1[kk] = normalize_tensor(outs0[kk]), normalize_tensor(outs1[kk])
-            diffs[kk] = (feats0[kk] - feats1[kk]) ** 2
+        feats0 = tuple(normalize_tensor(output) for output in outs0)
+        feats1 = tuple(normalize_tensor(output) for output in outs1)
+        return self.distance_from_normalized_features(feats0, feats1)
 
-        res = [spatial_average(lins[kk].model(diffs[kk]), keepdim=True) for kk in range(len(self.chns))]
+    def normalized_features(self, input):
+        outputs = self.net(self.scaling_layer(input))
+        return tuple(normalize_tensor(output) for output in outputs)
+
+    def distance_from_normalized_features(self, input_features, target_features):
+        if len(input_features) != len(self.chns) or len(
+            target_features
+        ) != len(self.chns):
+            raise ValueError("LPIPS normalized feature structure does not match VGG16")
+        lins = [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4]
+        res = [
+            spatial_average(
+                lins[index].model(
+                    (input_features[index] - target_features[index]) ** 2
+                ),
+                keepdim=True,
+            )
+            for index in range(len(self.chns))
+        ]
         val = res[0]
-        for l in range(1, len(self.chns)):
-            # print(res[l].shape)
-            val += res[l]
+        for index in range(1, len(self.chns)):
+            val += res[index]
 
         return val
 

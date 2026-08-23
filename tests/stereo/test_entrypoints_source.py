@@ -140,6 +140,32 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn('"conv2d_t1_slice"', attention)
         self.assertIn("expected 14 PEG modules", profile)
 
+    def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
+        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
+        launcher = (
+            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
+        ).read_text(encoding="utf-8")
+        data = (ROOT / "stereo_tokenizer" / "data.py").read_text(
+            encoding="utf-8"
+        )
+        model = (ROOT / "stereo_tokenizer" / "model.py").read_text(
+            encoding="utf-8"
+        )
+        for argument in (
+            "--profile_preload_data",
+            "--profile_pin_memory",
+            "--profile_lpips_gt_cache",
+        ):
+            self.assertIn(argument, profile)
+        for value in (
+            "PROFILE_PRELOAD_DATA:-0",
+            "PROFILE_PIN_MEMORY:-0",
+            "PROFILE_LPIPS_GT_CACHE:-0",
+        ):
+            self.assertIn(value, launcher)
+        self.assertIn("profile_preload_train_dataset", data)
+        self.assertIn("LPIPS GT cache sample order changed", model)
+
 
 if __name__ == "__main__":
     unittest.main()
