@@ -342,6 +342,12 @@ def main() -> None:
 
     _write_json(output_dir / "step_timings.json", callback.step_timings)
     schedule_end = args.profile_wait + args.profile_warmup + args.profile_active
+    lpips_cache = model._profile_lpips_gt_features
+    lpips_cache_bytes = (
+        sum(feature.numel() * feature.element_size() for feature in lpips_cache)
+        if lpips_cache is not None
+        else 0
+    )
     result = {
         "event": "STEREO_STEP_PROFILE_COMPLETE",
         "git_sha": args.expected_git_sha,
@@ -370,6 +376,7 @@ def main() -> None:
         },
         "peak_allocated_gib": torch.cuda.max_memory_allocated() / (1024**3),
         "peak_reserved_gib": torch.cuda.max_memory_reserved() / (1024**3),
+        "lpips_gt_cache_bytes": lpips_cache_bytes,
         "trace_files": trace_writer.trace_files,
         "region_files": trace_writer.region_files,
         "operator_files": trace_writer.operator_files,

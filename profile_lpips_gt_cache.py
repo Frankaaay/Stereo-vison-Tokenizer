@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import statistics
+import sys
 
 import torch
 
@@ -64,7 +66,8 @@ def main() -> None:
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed_all(1234)
-    model = LPIPS().eval().requires_grad_(False).cuda()
+    with contextlib.redirect_stdout(sys.stderr):
+        model = LPIPS().eval().requires_grad_(False).cuda()
     prediction = torch.randn(
         args.frames, 3, 256, 256, device="cuda", dtype=torch.bfloat16
     )
