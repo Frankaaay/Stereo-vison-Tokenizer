@@ -10,6 +10,7 @@ import torch
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.strategies import DDPStrategy
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
@@ -171,11 +172,18 @@ def main():
     elif args.fp16:
         precision = "16-mixed"
 
+    strategy = "auto"
+    if args.devices * args.num_nodes > 1:
+        strategy = DDPStrategy(
+            static_graph=not args.gan_enabled,
+            find_unused_parameters=args.gan_enabled,
+        )
+
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=args.devices,
         num_nodes=args.num_nodes,
-        strategy="ddp" if args.devices * args.num_nodes > 1 else "auto",
+        strategy=strategy,
         precision=precision,
         max_steps=-1 if args.gan_enabled else args.max_steps,
         max_epochs=-1,

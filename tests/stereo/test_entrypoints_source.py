@@ -150,6 +150,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}"',
             launcher,
         )
+        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        self.assertIn("DDPStrategy(", train)
+        self.assertIn("static_graph=not args.gan_enabled", train)
+        self.assertIn("find_unused_parameters=args.gan_enabled", train)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
