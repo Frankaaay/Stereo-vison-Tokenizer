@@ -97,6 +97,7 @@ Every logged metric at every one of the 40 steps was exactly equal to control.
 | Preload eight samples | 288.93 ms | -43.3% | 29.69 GiB | 30.98 GiB |
 | Pinned CPU memory | 501.77 ms | -1.49% | 29.69 GiB | 30.98 GiB |
 | LPIPS GT cache, repeat | 482.82 ms | -5.21% | 29.50 GiB | 33.49 GiB |
+| PEG Conv2d + preload + LPIPS cache | 263.14 ms | -48.3% | 29.50 GiB | 33.49 GiB |
 
 Preloading reduced the DataLoader region from 223.86 ms to 7.06 ms and removed
 the NPZ and NumPy work from the measured step. This is directly useful for the
@@ -126,6 +127,32 @@ Follow-up outputs:
 - Pinned: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-pinned-v1`
 - LPIPS cache repeat: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-lpips-cache-v2`
 - LPIPS equivalence microbenchmark: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-lpips-micro-v2/result.json`
+
+## Combined accepted candidates
+
+The approved combination enabled the T=1 PEG Conv2d path, eight-sample
+preloading, and the LPIPS GT feature cache. Pinned memory remained disabled so
+that its CPU cost was not mixed into the result.
+
+The combined run completed 40 updates with every logged metric at every step
+exactly equal to the common control. Its active median was 263.14 ms per step,
+compared with 509.37 ms for control: a 48.3% latency reduction and approximately
+1.94x throughput. Compared with preload alone at 288.93 ms, LPIPS caching saved
+another 25.79 ms, so the two follow-up improvements remained close to additive.
+
+The combined DataLoader region was 7.14 ms and LPIPS was 34.34 CUDA ms. The
+3,070,230,528-byte LPIPS cache remained the only persistent GPU-memory cost;
+peak allocated and reserved memory were 29.50 GiB and 33.49 GiB. No NaN, Inf,
+OOM, traceback, or remaining GPU process was observed.
+
+Relative to the nearby original PEG Conv3d baseline of 660.26 ms, the combined
+step is 60.1% shorter and provides approximately 2.51x throughput. This is a
+cross-commit historical comparison; the 509.37 ms new-SHA control is the strict
+comparison for the combined experiment.
+
+Combined output:
+
+- `/data/home/frank/runtime/stereo-followup-profile-v1/ed30c39-h2002-gpu0-b8-40u-combined-v1`
 
 The apparent 60.6 ms `loss_breakdown` CPU region is not treated as logger cost:
 the measured CSV logger and save work totals only about 0.48 ms per step. It is
