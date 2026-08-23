@@ -1,5 +1,5 @@
 """Public StereoVAE API."""
 
-from .model import StereoVAE
+from .model import EyeMode, StereoEncodeOutput, StereoVAE, TemporalMode
 
-__all__ = ["StereoVAE"]
+__all__ = ["StereoVAE", "StereoEncodeOutput", "EyeMode", "TemporalMode"]

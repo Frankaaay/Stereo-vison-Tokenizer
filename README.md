@@ -2,7 +2,7 @@
 
 > **Stereo-only development branch.** The public tokenizer in this branch is
 > no longer the upstream image/video VQGAN. It accepts structured
-> `[B,3,2,3,4,256,256]` stereo samples, produces a raw
+> `[B,3,2,3,T,256,256]` stereo samples with `T=1|4`, produces a raw
 > `[B,3,48,1,16,16]` VAE latent, and decodes left-view RGB plus disparity.
 > Legacy image-mode and VQ codebook paths are not supported. The upstream
 > model-zoo checkpoints and LM/DiT/Latte entrypoints below are retained as
@@ -13,16 +13,17 @@
 
 The implementation lives in the original repository path:
 
-- `OmniTokenizer/omnitokenizer.py`: shared per-frame Spatial Encoder,
-  StereoFusion, `4→1` temporal projection, VAE posterior, original
-  one-slot temporal/spatial Decoder, RGB/disparity heads, and training losses.
-- `OmniTokenizer/modules/stereo_*.py`: fusion, geometry, and masked loss
+- `stereo_tokenizer/model.py`: shared per-frame Spatial Encoder,
+  StereoFusion, explicit single/four temporal branches, shared VAE posterior,
+  symmetric Decoder branches, RGB/disparity heads, and alternating training.
+- `stereo_tokenizer/modules/stereo_*.py`: fusion, geometry, and masked loss
   primitives.
-- `OmniTokenizer/data.py`: Manifest v3 loader for independent RGB and
+- `stereo_tokenizer/data.py`: Manifest v3 loader for independent RGB and
   FoundationStereo GT caches.
 - `scripts/data/build_stereo_rgb_cache.py`: independent RGB-cache builder and
   Manifest v3 finalizer.
-- `vqgan_train.py`, `vqgan_eval.py`, and `scripts/recons/train.sh`: Stereo-only
+- `train_stereo_vae.py`, `eval_stereo_vae.py`, and
+  `scripts/stereo/train_stereo_vae.sh`: Stereo-only
   training/evaluation entrypoints.
 
 The tokenizer intentionally does not implement downstream DiT
@@ -30,6 +31,23 @@ patchify/unpatchify. See `doc/Stereo Tokenizer Plan.md` for the frozen tensor,
 data, supervision, and validation contracts. H200 smoke/overfit execution is a
 separate gated step; the repository does not contain datasets, caches,
 checkpoints, or run outputs.
+
+The codec API requires both intrinsic encoding modes explicitly:
+
+```python
+encoded = model.encode(
+    video,
+    eye_mode="stereo",
+    temporal_mode="single_frame",  # or "four_frame"
+    sample_posterior=False,
+)
+```
+
+`single_frame` requires `T=1` and skips every four-frame temporal module.
+`four_frame` requires `T=4` and uses the bidirectional temporal attention from
+PR #3 before its `4D→D` sampler. The raw latent is accompanied by `eye_mode`,
+`temporal_mode`, and `source_num_frames`; current/history/prediction roles are
+owned by the downstream Memory system rather than this tokenizer.
 
 Official pytorch implementation of the following paper:
 <p align="left"> 
@@ -96,12 +114,20 @@ from scratch and evaluation uses strict checkpoint loading through
 
 ## Stereo Tokenizer Training
 
-`scripts/recons/train.sh` is the canonical recipe template. It requires the
+`scripts/stereo/train_stereo_vae.sh` is the canonical recipe template. It requires the
 Manifest v3/cache paths and all not-yet-calibrated loss, batch, warmup, and
 step-budget values as environment variables. GAN is explicitly disabled in
 the first smoke/overfit recipe. A validation Manifest is optional for the
 engineering pilot; when supplied for formal data, the complete validation
 split runs once at each epoch end.
+
+Training uses deterministic 1:1 alternation by completed generator optimizer
+updates: even `generator_updates` run `four_frame`, odd updates run
+`single_frame`. A gradient-accumulation window therefore never mixes modes.
+The Manifest/cache contract remains `T=4`; single batches slice the explicit
+`SINGLE_FRAME_SOURCE_INDEX` (currently configured as `0`). Keeping a 100k
+total-step budget yields about 50k updates per branch; the launcher does not
+automatically change batch size, learning rate, scheduler horizon, or steps.
 
 
 ## LM-based Visual Synthesis

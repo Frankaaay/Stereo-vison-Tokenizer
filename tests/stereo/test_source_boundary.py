@@ -31,7 +31,10 @@ class SourceBoundaryTest(unittest.TestCase):
             for target in node.targets
             if isinstance(target, ast.Name) and target.id == "__all__"
         }
-        self.assertEqual(assignments["__all__"], ["StereoVAE"])
+        self.assertEqual(
+            assignments["__all__"],
+            ["StereoVAE", "StereoEncodeOutput", "EyeMode", "TemporalMode"],
+        )
 
     def test_legacy_packages_and_entrypoints_are_removed(self) -> None:
         for directory in (ROOT / "OmniTokenizer", ROOT / "Diffusion"):
@@ -189,8 +192,16 @@ class SourceBoundaryTest(unittest.TestCase):
         }
         self.assertIn("stereo_fusion", self_attributes)
         self.assertIn("stereo_temporal_projection", self_attributes)
+        self.assertIn("single_frame_projection", self_attributes)
         self.assertNotIn("stereo_rgb_head", self_attributes)
         self.assertNotIn("stereo_disparity_head", self_attributes)
+
+    def test_tokenizer_does_not_own_memory_roles_or_combined_mode_loss(self) -> None:
+        source = MODEL_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn("LatentRole", source)
+        self.assertNotIn("latent_role", source)
+        self.assertNotIn("single_frame_loss_weight", source)
+        self.assertNotIn("combined_loss", source)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ CHECKPOINT_SEMANTIC_FIELDS = (
     "ff_mult",
     "stereo_num_views",
     "stereo_num_frames",
+    "single_frame_source_index",
     "stereo_search_radii",
     "stereo_search_direction",
     "stereo_disparity_scale",
@@ -61,6 +62,16 @@ def build_parser():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max_batches", type=int, default=None)
     parser.add_argument("--output_json", type=Path, required=True)
+    parser.add_argument(
+        "--eval_eye_mode",
+        choices=["mono", "stereo"],
+        default="stereo",
+    )
+    parser.add_argument(
+        "--eval_temporal_mode",
+        choices=["single_frame", "four_frame"],
+        required=True,
+    )
     return parser
 
 
@@ -76,6 +87,8 @@ def validate_args(args):
         raise ValueError("--max_batches must be positive")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"requested {args.device}, but CUDA is unavailable")
+    if not 0 <= args.single_frame_source_index < args.stereo_num_frames:
+        raise ValueError("--single_frame_source_index must be in [0, 3]")
 
 
 def _checkpoint_model_args(checkpoint, checkpoint_path):
@@ -260,8 +273,21 @@ def main():
                 else value
                 for key, value in batch.items()
             }
+            if args.eval_temporal_mode == "single_frame":
+                index = args.single_frame_source_index
+                tensor_batch["video"] = tensor_batch["video"][
+                    ..., index : index + 1, :, :
+                ]
+                tensor_batch["disparity"] = tensor_batch["disparity"][
+                    ..., index : index + 1, :, :
+                ]
+                tensor_batch["valid_mask"] = tensor_batch["valid_mask"][
+                    ..., index : index + 1, :, :
+                ]
             output = model(
                 tensor_batch["video"],
+                eye_mode=args.eval_eye_mode,
+                temporal_mode=args.eval_temporal_mode,
                 sample_posterior=False,
             )
             update_metrics(accumulator, tensor_batch, output)
@@ -270,6 +296,13 @@ def main():
         "checkpoint": str(args.stereo_vae_ckpt.expanduser().resolve()),
         "split": args.eval_split,
         "posterior": "mean",
+        "eye_mode": args.eval_eye_mode,
+        "temporal_mode": args.eval_temporal_mode,
+        "source_frame_index": (
+            args.single_frame_source_index
+            if args.eval_temporal_mode == "single_frame"
+            else None
+        ),
         "metrics": finalize_metrics(accumulator),
     }
     if args.output_json.exists():

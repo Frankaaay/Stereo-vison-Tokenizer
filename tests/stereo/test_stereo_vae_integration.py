@@ -35,6 +35,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             initialize_vit=True,
             stereo_num_views=3,
             stereo_num_frames=4,
+            single_frame_source_index=0,
             stereo_search_radii=(1, 1, 1),
             stereo_search_direction="left",
             stereo_disparity_scale=(128.0, 128.0, 128.0),
@@ -86,7 +87,12 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
     def test_forward_uses_structured_48_channel_one_slot_latent(self) -> None:
         model = StereoVAE(self._args()).eval()
-        output = model(self._batch()["video"], sample_posterior=False)
+        output = model(
+            self._batch()["video"],
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+            sample_posterior=False,
+        )
         self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
         self.assertEqual(output.rgb.shape, (1, 3, 3, 4, 32, 32))
         self.assertEqual(output.disparity.shape, (1, 3, 1, 4, 32, 32))
@@ -94,7 +100,10 @@ class StereoVAEIntegrationTest(unittest.TestCase):
     def test_mono_entrypoint_uses_same_four_frame_temporal_path(self) -> None:
         model = StereoVAE(self._args()).eval()
         output = model(
-            self._batch()["video"], mode="mono", sample_posterior=False
+            self._batch()["video"],
+            eye_mode="mono",
+            temporal_mode="four_frame",
+            sample_posterior=False,
         )
         self.assertIsNone(output.fusion)
         self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
@@ -103,14 +112,27 @@ class StereoVAEIntegrationTest(unittest.TestCase):
     def test_eval_default_uses_posterior_mean(self) -> None:
         model = StereoVAE(self._args()).eval()
         video = self._batch()["video"]
-        first = model.encode(video)
-        second = model.encode(video)
+        first = model.encode(
+            video,
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+        )
+        second = model.encode(
+            video,
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+        )
         torch.testing.assert_close(first.latent, first.posterior.mean)
         torch.testing.assert_close(first.latent, second.latent)
 
     def test_core_loss_backpropagates_through_main_model(self) -> None:
         model = StereoVAE(self._args()).train()
-        result = model.compute_core_loss(self._batch(), sample_posterior=True)
+        result = model.compute_core_loss(
+            self._batch(),
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+            sample_posterior=True,
+        )
         result.loss.total.backward()
         parameters = (
             model.encoder.enc_temporal_transformer.layers[0][1].to_q.weight,
@@ -131,7 +153,11 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model = StereoVAE(self._args())
         self.assertFalse(hasattr(model, "codebook"))
         with self.assertRaises(ValueError):
-            model(torch.randn(1, 3, 32, 32))
+            model(
+                torch.randn(1, 3, 32, 32),
+                eye_mode="stereo",
+                temporal_mode="four_frame",
+            )
 
     def test_checkpoint_hyperparameters_preserve_constructor_args(self) -> None:
         args = self._args()
@@ -198,6 +224,8 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model = StereoVAE(self._args())
         model.generator_updates = 7
         model.discriminator_updates = 0
+        model.four_frame_updates = 4
+        model.single_frame_updates = 3
         model.batch_updates = 11
         checkpoint = {}
         model.on_save_checkpoint(checkpoint)
@@ -207,25 +235,104 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
         self.assertEqual(restored.generator_updates, 7)
         self.assertEqual(restored.discriminator_updates, 0)
+        self.assertEqual(restored.four_frame_updates, 4)
+        self.assertEqual(restored.single_frame_updates, 3)
         self.assertEqual(restored.batch_updates, 11)
 
-    def test_legacy_non_gan_checkpoint_recovers_generator_updates(self) -> None:
+    def test_checkpoint_without_temporal_counters_is_rejected(self) -> None:
         model = StereoVAE(self._args())
 
-        model.on_load_checkpoint({"global_step": 9})
-
-        self.assertEqual(model.generator_updates, 9)
-        self.assertEqual(model.discriminator_updates, 0)
-        self.assertEqual(model.batch_updates, 9)
-
-    def test_legacy_gan_checkpoint_without_counters_is_rejected(self) -> None:
-        args = self._args()
-        args.gan_enabled = True
-        args.image_gan_weight = 1.0
-        model = StereoVAE(args)
-
-        with self.assertRaisesRegex(ValueError, "independent optimizer counters"):
+        with self.assertRaisesRegex(ValueError, "temporal-mode update counters"):
             model.on_load_checkpoint({"global_step": 9})
+
+    def test_single_frame_forward_and_metadata(self) -> None:
+        model = StereoVAE(self._args()).eval()
+        single_batch = model._prepare_temporal_batch(
+            self._batch(), temporal_mode="single_frame"
+        )
+        output = model(
+            single_batch["video"],
+            eye_mode="stereo",
+            temporal_mode="single_frame",
+            sample_posterior=False,
+        )
+
+        self.assertEqual(single_batch["video"].shape[4], 1)
+        self.assertEqual(single_batch["disparity"].shape[3], 1)
+        self.assertEqual(single_batch["valid_mask"].shape[3], 1)
+        self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
+        self.assertEqual(output.rgb.shape, (1, 3, 3, 1, 32, 32))
+        self.assertEqual(output.disparity.shape, (1, 3, 1, 1, 32, 32))
+        self.assertEqual(output.eye_mode, "stereo")
+        self.assertEqual(output.temporal_mode, "single_frame")
+        self.assertEqual(output.source_num_frames, 1)
+
+    def test_single_core_loss_backpropagates_only_single_temporal_path(self) -> None:
+        model = StereoVAE(self._args()).train()
+        single_batch = model._prepare_temporal_batch(
+            self._batch(), temporal_mode="single_frame"
+        )
+        result = model.compute_core_loss(
+            single_batch,
+            eye_mode="stereo",
+            temporal_mode="single_frame",
+            sample_posterior=True,
+        )
+        result.loss.total.backward()
+
+        for parameter in (
+            model.encoder.single_frame_projection[1].weight,
+            model.posterior_projection[1].weight,
+            model.decoder.single_frame_expansion[1].weight,
+            model.decoder.dec_spatial_transformer.layers[0][1].to_q.weight,
+        ):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+            self.assertGreater(torch.count_nonzero(parameter.grad).item(), 0)
+        self.assertIsNone(
+            model.encoder.enc_temporal_transformer.layers[0][1].to_q.weight.grad
+        )
+
+    def test_temporal_mode_is_determined_only_by_generator_updates(self) -> None:
+        expected = [
+            "four_frame",
+            "single_frame",
+            "four_frame",
+            "single_frame",
+            "four_frame",
+            "single_frame",
+        ]
+        self.assertEqual(
+            [StereoVAE._temporal_mode_for_update(index) for index in range(6)],
+            expected,
+        )
+
+        first_rank = StereoVAE(self._args())
+        second_rank = StereoVAE(self._args())
+        first_rank.generator_updates = second_rank.generator_updates = 5
+        first_rank._micro_step = 0
+        second_rank._micro_step = 1
+        self.assertEqual(
+            first_rank._temporal_mode_for_update(first_rank.generator_updates),
+            second_rank._temporal_mode_for_update(second_rank.generator_updates),
+        )
+
+    def test_checkpoint_resume_selects_the_next_temporal_mode(self) -> None:
+        model = StereoVAE(self._args())
+        model.generator_updates = 8
+        model.four_frame_updates = 4
+        model.single_frame_updates = 4
+        model.batch_updates = 8
+        checkpoint = {}
+        model.on_save_checkpoint(checkpoint)
+
+        restored = StereoVAE(self._args())
+        restored.on_load_checkpoint(checkpoint)
+
+        self.assertEqual(
+            restored._temporal_mode_for_update(restored.generator_updates),
+            "four_frame",
+        )
 
 
 if __name__ == "__main__":

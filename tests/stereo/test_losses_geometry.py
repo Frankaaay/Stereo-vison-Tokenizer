@@ -4,6 +4,7 @@ import torch
 
 from stereo_tokenizer.modules.stereo_geometry import disparity_to_depth
 from stereo_tokenizer.modules.stereo_losses import (
+    StereoReconstructionKLLoss,
     masked_disparity_gradient_loss,
     masked_smooth_l1_disparity_loss,
     posterior_kl_loss,
@@ -19,6 +20,44 @@ class _PosteriorStub:
 
 
 class StereoLossTest(unittest.TestCase):
+    def test_existing_core_objective_accepts_single_frame_tensors(self) -> None:
+        objective = StereoReconstructionKLLoss(
+            rgb_weight=1.0,
+            disparity_weight=1.0,
+            gradient_weight=1.0,
+            kl_weight=1e-6,
+            smooth_l1_beta=1.0,
+            rgb_loss_type="l1",
+        )
+        rgb_prediction = torch.randn(
+            1, 3, 3, 1, 4, 4, requires_grad=True
+        )
+        rgb_target = torch.zeros_like(rgb_prediction)
+        normalized_prediction = torch.ones(
+            1, 3, 1, 1, 4, 4, requires_grad=True
+        )
+        normalized_target = torch.full_like(normalized_prediction, 0.5)
+        pixel_prediction = normalized_prediction * 16.0
+        pixel_target = normalized_target * 16.0
+        valid = torch.ones_like(normalized_prediction, dtype=torch.bool)
+
+        result = objective(
+            rgb_prediction=rgb_prediction,
+            rgb_target=rgb_target,
+            normalized_disparity_prediction=normalized_prediction,
+            normalized_disparity_target=normalized_target,
+            pixel_disparity_prediction=pixel_prediction,
+            pixel_disparity_target=pixel_target,
+            valid_mask=valid,
+            posterior=_PosteriorStub(torch.zeros(1, 3)),
+            gradient_scale_px=16.0,
+        )
+        result.total.backward()
+
+        self.assertTrue(torch.isfinite(result.total))
+        self.assertTrue(torch.isfinite(rgb_prediction.grad).all())
+        self.assertTrue(torch.isfinite(normalized_prediction.grad).all())
+
     def test_disparity_is_normalized_per_view_before_average(self) -> None:
         prediction = torch.zeros(1, 3, 1, 1, 2, 3)
         target = torch.stack(

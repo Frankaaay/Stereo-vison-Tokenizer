@@ -54,7 +54,11 @@ class StructuredStereoEncoderTest(unittest.TestCase):
     def test_stereo_encoder_returns_one_slot_per_view(self) -> None:
         encoder = self._encoder().eval()
         video = torch.randn(1, 3, 2, 3, 4, 32, 32)
-        output = encoder.forward_stereo(video, mode="stereo")
+        output = encoder.forward_stereo(
+            video,
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+        )
         self.assertEqual(output.features.shape, (3, 32, 1, 4, 4))
         self.assertIsNotNone(output.fusion)
 
@@ -63,8 +67,12 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         video = torch.randn(1, 3, 2, 3, 4, 32, 32)
         changed_right = video.clone()
         changed_right[:, :, 1].normal_(mean=100.0, std=1.0)
-        left_only = encoder.forward_stereo(video, mode="mono")
-        changed = encoder.forward_stereo(changed_right, mode="mono")
+        left_only = encoder.forward_stereo(
+            video, eye_mode="mono", temporal_mode="four_frame"
+        )
+        changed = encoder.forward_stereo(
+            changed_right, eye_mode="mono", temporal_mode="four_frame"
+        )
         torch.testing.assert_close(left_only.features, changed.features)
         self.assertIsNone(left_only.fusion)
 
@@ -122,7 +130,11 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         ]
         try:
             with torch.no_grad():
-                encoder.forward_stereo(video, mode="stereo")
+                encoder.forward_stereo(
+                    video,
+                    eye_mode="stereo",
+                    temporal_mode="four_frame",
+                )
             self.assertEqual(order, ["spatial", "fusion", "temporal", "sampler"])
             self.assertEqual(temporal_lengths, [4])
             self.assertEqual(sampler_widths, [4 * encoder.stereo_embedding_dim])
@@ -130,9 +142,13 @@ class StructuredStereoEncoderTest(unittest.TestCase):
             order.clear()
             temporal_outputs.clear()
             with torch.no_grad():
-                encoder.forward_stereo(video, mode="mono")
+                encoder.forward_stereo(
+                    video, eye_mode="mono", temporal_mode="four_frame"
+                )
                 baseline_temporal = temporal_outputs[-1]
-                encoder.forward_stereo(changed, mode="mono")
+                encoder.forward_stereo(
+                    changed, eye_mode="mono", temporal_mode="four_frame"
+                )
                 changed_temporal = temporal_outputs[-1]
         finally:
             for handle in handles:
@@ -152,8 +168,12 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         changed[:, 0, 0] += torch.randn_like(changed[:, 0, 0])
 
         with torch.no_grad():
-            baseline = encoder.forward_stereo(video, mode="mono").features
-            perturbed = encoder.forward_stereo(changed, mode="mono").features
+            baseline = encoder.forward_stereo(
+                video, eye_mode="mono", temporal_mode="four_frame"
+            ).features
+            perturbed = encoder.forward_stereo(
+                changed, eye_mode="mono", temporal_mode="four_frame"
+            ).features
 
         torch.testing.assert_close(baseline[1:], perturbed[1:], rtol=0, atol=0)
         self.assertGreater((baseline[0] - perturbed[0]).abs().max().item(), 1e-6)
@@ -163,7 +183,11 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         with torch.no_grad():
             encoder.stereo_fusion.alpha.fill_(1.0)
         video = torch.randn(1, 3, 2, 3, 4, 32, 32)
-        output = encoder.forward_stereo(video, mode="stereo")
+        output = encoder.forward_stereo(
+            video,
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+        )
         output.features.square().mean().backward()
 
         self.assert_nonzero_finite_gradient(
@@ -173,6 +197,66 @@ class StructuredStereoEncoderTest(unittest.TestCase):
             encoder.stereo_temporal_projection[1].weight
         )
         self.assert_nonzero_finite_gradient(encoder.stereo_fusion.to_v.weight)
+
+    def test_single_frame_skips_four_frame_temporal_modules(self) -> None:
+        encoder = self._encoder().eval()
+        video = torch.randn(1, 3, 2, 3, 1, 32, 32)
+        calls = []
+        handles = [
+            encoder.stereo_fusion.register_forward_hook(
+                lambda *_: calls.append("fusion")
+            ),
+            encoder.enc_temporal_transformer.register_forward_hook(
+                lambda *_: calls.append("temporal")
+            ),
+            encoder.stereo_temporal_projection.register_forward_hook(
+                lambda *_: calls.append("four_sampler")
+            ),
+            encoder.single_frame_projection.register_forward_hook(
+                lambda *_: calls.append("single_projection")
+            ),
+        ]
+        try:
+            output = encoder.forward_stereo(
+                video,
+                eye_mode="stereo",
+                temporal_mode="single_frame",
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        self.assertEqual(output.features.shape, (3, 32, 1, 4, 4))
+        self.assertEqual(calls, ["fusion", "single_projection"])
+
+    def test_single_frame_shared_and_private_paths_receive_gradients(self) -> None:
+        encoder = self._encoder().train()
+        with torch.no_grad():
+            encoder.stereo_fusion.alpha.fill_(1.0)
+        video = torch.randn(1, 3, 2, 3, 1, 32, 32)
+        output = encoder.forward_stereo(
+            video,
+            eye_mode="stereo",
+            temporal_mode="single_frame",
+        )
+        output.features.square().mean().backward()
+
+        self.assert_nonzero_finite_gradient(
+            encoder.single_frame_projection[1].weight
+        )
+        self.assert_nonzero_finite_gradient(encoder.stereo_fusion.to_v.weight)
+        self.assertIsNone(
+            encoder.enc_temporal_transformer.layers[0][1].to_q.weight.grad
+        )
+
+    def test_temporal_mode_requires_matching_input_length(self) -> None:
+        encoder = self._encoder()
+        with self.assertRaisesRegex(ValueError, "requires T=1"):
+            encoder.forward_stereo(
+                torch.randn(1, 3, 2, 3, 4, 32, 32),
+                eye_mode="stereo",
+                temporal_mode="single_frame",
+            )
 
 
 if __name__ == "__main__":

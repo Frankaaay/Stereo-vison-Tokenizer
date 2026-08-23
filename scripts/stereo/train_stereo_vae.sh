@@ -19,6 +19,7 @@ set -euo pipefail
 : "${GRADIENT_WEIGHT:?set the calibrated gradient loss weight}"
 : "${KL_WEIGHT:?set the calibrated KL loss weight}"
 : "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
+: "${SINGLE_FRAME_SOURCE_INDEX:?set the current source frame index}"
 
 EXPECTED_GLOBAL_BATCH_SIZE=$((GPU_COUNT * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
 if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
@@ -61,6 +62,7 @@ python3 train_stereo_vae.py \
   --initialize_vit \
   --stereo_num_views 3 \
   --stereo_num_frames 4 \
+  --single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}" \
   --stereo_search_radii 7 7 7 \
   --stereo_search_direction left \
   --stereo_disparity_scale 128 128 128 \

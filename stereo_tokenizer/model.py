@@ -28,6 +28,18 @@ from .modules.vae import (
 )
 
 
+EyeMode = Literal["mono", "stereo"]
+TemporalMode = Literal["single_frame", "four_frame"]
+
+
+def temporal_mode_num_frames(temporal_mode: TemporalMode) -> int:
+    if temporal_mode == "single_frame":
+        return 1
+    if temporal_mode == "four_frame":
+        return 4
+    raise ValueError(f"unsupported temporal mode {temporal_mode!r}")
+
+
 def pair(val):
     ret = (val, val) if not isinstance(val, tuple) else val
     assert len(ret) == 2
@@ -51,6 +63,9 @@ class StereoEncodeOutput:
     latent: torch.Tensor
     posterior: StructuredDiagonalGaussianPosterior
     fusion: Optional[StereoFusionOutput]
+    eye_mode: EyeMode
+    temporal_mode: TemporalMode
+    source_num_frames: int
 
 
 @dataclass
@@ -61,6 +76,9 @@ class StereoVAEOutput:
     latent: torch.Tensor
     posterior: StructuredDiagonalGaussianPosterior
     fusion: Optional[StereoFusionOutput]
+    eye_mode: EyeMode
+    temporal_mode: TemporalMode
+    source_num_frames: int
 
 
 @dataclass
@@ -84,6 +102,7 @@ class StereoVAE(pl.LightningModule):
         self.stereo_num_views = args.stereo_num_views
         self.stereo_num_frames = args.stereo_num_frames
         self.stereo_mode = args.stereo_mode
+        self.single_frame_source_index = args.single_frame_source_index
         self.resolution = args.resolution
         self.patch_size = args.patch_size
 
@@ -217,6 +236,8 @@ class StereoVAE(pl.LightningModule):
         self._micro_step = 0
         self.generator_updates = 0
         self.discriminator_updates = 0
+        self.four_frame_updates = 0
+        self.single_frame_updates = 0
         self.batch_updates = 0
         self.save_hyperparameters("args")
 
@@ -234,6 +255,10 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("StereoVAE requires exactly three views")
         if args.stereo_num_frames != 4:
             raise ValueError("StereoVAE requires exactly four frames")
+        if not 0 <= args.single_frame_source_index < args.stereo_num_frames:
+            raise ValueError(
+                "single_frame_source_index must select one of the four source frames"
+            )
         if args.latent_channels != 48:
             raise ValueError("StereoVAE latent_channels must be 48")
         if args.patch_embed != "linear":
@@ -290,24 +315,17 @@ class StereoVAE(pl.LightningModule):
         checkpoint["stereo_update_counters"] = {
             "generator_updates": self.generator_updates,
             "discriminator_updates": self.discriminator_updates,
+            "four_frame_updates": self.four_frame_updates,
+            "single_frame_updates": self.single_frame_updates,
             "batch_updates": self.batch_updates,
         }
 
     def on_load_checkpoint(self, checkpoint) -> None:
         counters = checkpoint.get("stereo_update_counters")
         if counters is None:
-            if self.gan_enabled:
-                raise ValueError(
-                    "legacy GAN checkpoint has no independent optimizer counters"
-                )
-            global_step = checkpoint.get("global_step", 0)
-            if type(global_step) is not int or global_step < 0:
-                raise ValueError("checkpoint global_step must be a non-negative integer")
-            self.generator_updates = global_step
-            self.discriminator_updates = 0
-            self.batch_updates = global_step * self.grad_accumulates
-            self._micro_step = 0
-            return
+            raise ValueError(
+                "checkpoint has no deterministic temporal-mode update counters"
+            )
         if not isinstance(counters, Mapping):
             raise TypeError("stereo_update_counters must be a mapping")
 
@@ -317,6 +335,12 @@ class StereoVAE(pl.LightningModule):
         discriminator_updates = self._read_checkpoint_counter(
             counters, "discriminator_updates"
         )
+        four_frame_updates = self._read_checkpoint_counter(
+            counters, "four_frame_updates"
+        )
+        single_frame_updates = self._read_checkpoint_counter(
+            counters, "single_frame_updates"
+        )
         batch_updates = self._read_checkpoint_counter(counters, "batch_updates")
         if discriminator_updates > generator_updates:
             raise ValueError("discriminator updates cannot exceed generator updates")
@@ -324,9 +348,19 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("GAN-disabled checkpoint has discriminator updates")
         if batch_updates < generator_updates * self.grad_accumulates:
             raise ValueError("batch updates are inconsistent with generator updates")
+        if generator_updates != four_frame_updates + single_frame_updates:
+            raise ValueError(
+                "generator updates must equal four-frame plus single-frame updates"
+            )
+        if four_frame_updates != (generator_updates + 1) // 2:
+            raise ValueError("four-frame update counter violates strict alternation")
+        if single_frame_updates != generator_updates // 2:
+            raise ValueError("single-frame update counter violates strict alternation")
 
         self.generator_updates = generator_updates
         self.discriminator_updates = discriminator_updates
+        self.four_frame_updates = four_frame_updates
+        self.single_frame_updates = single_frame_updates
         self.batch_updates = batch_updates
         self._micro_step = 0
 
@@ -365,35 +399,98 @@ class StereoVAE(pl.LightningModule):
         for parameter in module.parameters():
             parameter.requires_grad_(enabled)
 
-    def _validate_video(self, video: torch.Tensor) -> None:
-        expected = (
-            self.stereo_num_views,
-            2,
-            3,
-            self.stereo_num_frames,
-            self.resolution,
-            self.resolution,
-        )
-        if video.ndim != 7 or tuple(video.shape[1:]) != expected:
+    @staticmethod
+    def _source_num_frames(temporal_mode: TemporalMode) -> int:
+        return temporal_mode_num_frames(temporal_mode)
+
+    @staticmethod
+    def _temporal_mode_for_update(generator_updates: int) -> TemporalMode:
+        if type(generator_updates) is not int or generator_updates < 0:
+            raise ValueError("generator_updates must be a non-negative integer")
+        return "four_frame" if generator_updates % 2 == 0 else "single_frame"
+
+    def _validate_video(
+        self,
+        video: torch.Tensor,
+        *,
+        eye_mode: EyeMode,
+        temporal_mode: TemporalMode,
+    ) -> None:
+        if eye_mode not in ("mono", "stereo"):
+            raise ValueError(f"unsupported eye mode {eye_mode!r}")
+        expected_time = self._source_num_frames(temporal_mode)
+        if video.ndim != 7:
             raise ValueError(
-                "video must use [B,3,2,3,4,H,W] with configured square H/W; "
-                f"expected (*,{expected}), got {tuple(video.shape)}"
+                "video must use [B,V,E,C,T,H,W], "
+                f"got {tuple(video.shape)}"
+            )
+        _, views, eyes, channels, time, height, width = video.shape
+        if views != self.stereo_num_views:
+            raise ValueError(f"expected {self.stereo_num_views} views, got {views}")
+        if eye_mode == "stereo" and eyes != 2:
+            raise ValueError("stereo eye mode requires exactly two eyes")
+        if eye_mode == "mono" and eyes not in (1, 2):
+            raise ValueError("mono eye mode accepts one eye or ignores the second eye")
+        if channels != 3:
+            raise ValueError(f"expected RGB input, got {channels} channels")
+        if time != expected_time:
+            raise ValueError(
+                f"{temporal_mode} requires T={expected_time}, got T={time}"
+            )
+        if (height, width) != (self.resolution, self.resolution):
+            raise ValueError(
+                f"expected square resolution {self.resolution}, got {(height, width)}"
             )
         if not torch.is_floating_point(video):
             raise TypeError("video must be floating point and normalized to [-0.5,0.5]")
         if not torch.isfinite(video).all():
             raise ValueError("video contains NaN/Inf")
 
+    def _prepare_temporal_batch(
+        self,
+        batch,
+        *,
+        temporal_mode: TemporalMode,
+    ):
+        batch = self._unwrap_batch(batch)
+        self._source_num_frames(temporal_mode)
+        video = batch["video"]
+        disparity = batch["disparity"]
+        valid_mask = batch["valid_mask"]
+        if video.shape[-3] != self.stereo_num_frames:
+            raise ValueError("training source video must retain the T=4 data contract")
+        if disparity.shape[-3] != self.stereo_num_frames:
+            raise ValueError("training source disparity must retain the T=4 data contract")
+        if valid_mask.shape != disparity.shape:
+            raise ValueError("training valid_mask must match disparity")
+        if temporal_mode == "four_frame":
+            return batch
+
+        index = self.single_frame_source_index
+        selected = dict(batch)
+        selected["video"] = video[..., index : index + 1, :, :]
+        selected["disparity"] = disparity[..., index : index + 1, :, :]
+        selected["valid_mask"] = valid_mask[..., index : index + 1, :, :]
+        return selected
+
     def encode(
         self,
         video: torch.Tensor,
         *,
-        mode: Optional[Literal["mono", "stereo"]] = None,
+        eye_mode: EyeMode,
+        temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
     ) -> StereoEncodeOutput:
-        self._validate_video(video)
-        resolved_mode = self.stereo_mode if mode is None else mode
-        encoded = self.encoder.forward_stereo(video, mode=resolved_mode)
+        self._validate_video(
+            video,
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
+        )
+        encoded = self.encoder.forward_stereo(
+            video,
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
+        )
         parameters = self.posterior_projection(encoded.features)
         posterior = StructuredDiagonalGaussianPosterior(
             distribution=DiagonalGaussianDistribution(parameters),
@@ -406,9 +503,17 @@ class StereoVAE(pl.LightningModule):
             latent=latent,
             posterior=posterior,
             fusion=encoded.fusion,
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
+            source_num_frames=self._source_num_frames(temporal_mode),
         )
 
-    def decode(self, latent: torch.Tensor) -> StereoDecodeOutput:
+    def decode(
+        self,
+        latent: torch.Tensor,
+        *,
+        temporal_mode: TemporalMode,
+    ) -> StereoDecodeOutput:
         if latent.ndim != 6:
             raise ValueError(
                 f"latent must use [B,V,C,1,H,W], got {tuple(latent.shape)}"
@@ -418,21 +523,26 @@ class StereoVAE(pl.LightningModule):
         if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
             raise ValueError("latent must contain 48 channels and one temporal slot")
         flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
-        return self.decoder.forward_stereo(self.latent_projection(flattened))
+        return self.decoder.forward_stereo(
+            self.latent_projection(flattened),
+            temporal_mode=temporal_mode,
+        )
 
     def forward(
         self,
         video: torch.Tensor,
         *,
-        mode: Optional[Literal["mono", "stereo"]] = None,
+        eye_mode: EyeMode,
+        temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
     ) -> StereoVAEOutput:
         encoded = self.encode(
             video,
-            mode=mode,
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
             sample_posterior=sample_posterior,
         )
-        decoded = self.decode(encoded.latent)
+        decoded = self.decode(encoded.latent, temporal_mode=temporal_mode)
         return StereoVAEOutput(
             rgb=decoded.rgb,
             disparity=decoded.disparity,
@@ -440,6 +550,9 @@ class StereoVAE(pl.LightningModule):
             latent=encoded.latent,
             posterior=encoded.posterior,
             fusion=encoded.fusion,
+            eye_mode=encoded.eye_mode,
+            temporal_mode=encoded.temporal_mode,
+            source_num_frames=encoded.source_num_frames,
         )
 
     def _effective_kl_weight(self) -> float:
@@ -455,11 +568,15 @@ class StereoVAE(pl.LightningModule):
         self,
         batch,
         *,
+        eye_mode: EyeMode,
+        temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
     ) -> _StereoCoreLossOutput:
         batch = self._unwrap_batch(batch)
         model_output = self(
             batch["video"],
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
             sample_posterior=sample_posterior,
         )
         rgb_target = batch["video"][:, :, 0]
@@ -527,6 +644,8 @@ class StereoVAE(pl.LightningModule):
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
+        *,
+        temporal_mode: TemporalMode,
     ):
         zero = prediction.new_zeros(())
         if not self._gan_is_active():
@@ -550,7 +669,7 @@ class StereoVAE(pl.LightningModule):
             image_features = self._feature_matching_loss(
                 fake_feature_list, real_feature_list
             )
-        if self.video_gan_weight > 0:
+        if temporal_mode == "four_frame" and self.video_gan_weight > 0:
             fake_videos = self._flatten_view_videos(prediction)
             real_videos = self._flatten_view_videos(target)
             fake_logits, fake_feature_list = self.video_discriminator(
@@ -577,6 +696,8 @@ class StereoVAE(pl.LightningModule):
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
+        *,
+        temporal_mode: TemporalMode,
     ):
         zero = prediction.new_zeros(())
         if not self._gan_is_active():
@@ -596,7 +717,7 @@ class StereoVAE(pl.LightningModule):
                 self.apply_diffaug,
             )
             image_loss = self.disc_loss(real_logits, fake_logits)
-        if self.video_gan_weight > 0:
+        if temporal_mode == "four_frame" and self.video_gan_weight > 0:
             real_logits, _ = self.video_discriminator(
                 self._flatten_view_videos(target).detach(),
                 self.apply_diffaug,
@@ -616,10 +737,18 @@ class StereoVAE(pl.LightningModule):
     def _as_sequence(value):
         return list(value) if isinstance(value, (list, tuple)) else [value]
 
-    def _log_loss_breakdown(self, prefix: str, result: _StereoCoreLossOutput) -> None:
+    def _log_loss_breakdown(
+        self,
+        prefix: str,
+        result: _StereoCoreLossOutput,
+        *,
+        total_loss: Optional[torch.Tensor] = None,
+    ) -> None:
         pixels_per_view = result.model.disparity.numel() // self.stereo_num_views
         metrics = {
-            f"{prefix}/loss": result.loss.total,
+            f"{prefix}/total_loss": (
+                result.loss.total if total_loss is None else total_loss
+            ),
             f"{prefix}/rgb_loss": result.loss.rgb,
             f"{prefix}/disparity_loss": result.loss.disparity,
             f"{prefix}/gradient_loss": result.loss.disparity_gradient,
@@ -648,19 +777,33 @@ class StereoVAE(pl.LightningModule):
             metrics,
             prog_bar=False,
             logger=True,
-            on_step=prefix == "train",
+            on_step=prefix.startswith("train/"),
             on_epoch=True,
             sync_dist=True,
         )
 
     def training_step(self, batch, batch_idx):
-        batch = self._unwrap_batch(batch)
-        result = self.compute_core_loss(batch, sample_posterior=True)
+        source_batch = self._unwrap_batch(batch)
+        temporal_mode = self._temporal_mode_for_update(self.generator_updates)
+        batch = self._prepare_temporal_batch(
+            source_batch,
+            temporal_mode=temporal_mode,
+        )
+        result = self.compute_core_loss(
+            batch,
+            eye_mode="stereo",
+            temporal_mode=temporal_mode,
+            sample_posterior=True,
+        )
         rgb_target = batch["video"][:, :, 0]
         perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
         gan_active = self._gan_is_active()
         adversarial, feature_matching, image_gan, video_gan = (
-            self._generator_adversarial_loss(result.model.rgb, rgb_target)
+            self._generator_adversarial_loss(
+                result.model.rgb,
+                rgb_target,
+                temporal_mode=temporal_mode,
+            )
         )
         generator_loss = (
             result.loss.total + perceptual + adversarial + feature_matching
@@ -682,6 +825,10 @@ class StereoVAE(pl.LightningModule):
                 )
             generator_optimizer.step()
             generator_optimizer.zero_grad()
+            if temporal_mode == "four_frame":
+                self.four_frame_updates += 1
+            else:
+                self.single_frame_updates += 1
             self.generator_updates += 1
             schedulers[0].step_update(self.generator_updates)
             self._micro_step = 0
@@ -689,12 +836,19 @@ class StereoVAE(pl.LightningModule):
         discriminator_total = result.model.rgb.new_zeros(())
         discriminator_image = result.model.rgb.new_zeros(())
         discriminator_video = result.model.rgb.new_zeros(())
-        if gan_active:
+        discriminator_has_path = self.image_gan_weight > 0 or (
+            temporal_mode == "four_frame" and self.video_gan_weight > 0
+        )
+        if gan_active and discriminator_has_path:
             (
                 discriminator_total,
                 discriminator_image,
                 discriminator_video,
-            ) = self._discriminator_loss(result.model.rgb, rgb_target)
+            ) = self._discriminator_loss(
+                result.model.rgb,
+                rgb_target,
+                temporal_mode=temporal_mode,
+            )
             self.manual_backward(discriminator_total / self.grad_accumulates)
             if should_step:
                 discriminator_optimizer = optimizers[1]
@@ -711,28 +865,41 @@ class StereoVAE(pl.LightningModule):
         if should_step and self.generator_updates >= self.args.max_steps:
             self.trainer.should_stop = True
 
-        self._log_loss_breakdown("train", result)
+        mode_name = "four" if temporal_mode == "four_frame" else "single"
+        prefix = f"train/{mode_name}"
+        self._log_loss_breakdown(
+            prefix,
+            result,
+            total_loss=generator_loss,
+        )
+        mode_metrics = {
+            f"{prefix}/perceptual_loss": perceptual,
+            f"{prefix}/adversarial_loss": adversarial,
+            f"{prefix}/feature_matching_loss": feature_matching,
+            f"{prefix}/g_image_loss": image_gan,
+            f"{prefix}/discriminator_loss": discriminator_total,
+            f"{prefix}/d_image_loss": discriminator_image,
+            "train/generator_updates": result.model.rgb.new_tensor(
+                float(self.generator_updates)
+            ),
+            "train/discriminator_updates": result.model.rgb.new_tensor(
+                float(self.discriminator_updates)
+            ),
+            "train/batch_updates": result.model.rgb.new_tensor(
+                float(self.batch_updates)
+            ),
+            "train/four_frame_updates": result.model.rgb.new_tensor(
+                float(self.four_frame_updates)
+            ),
+            "train/single_frame_updates": result.model.rgb.new_tensor(
+                float(self.single_frame_updates)
+            ),
+        }
+        if temporal_mode == "four_frame":
+            mode_metrics[f"{prefix}/g_video_loss"] = video_gan
+            mode_metrics[f"{prefix}/d_video_loss"] = discriminator_video
         self.log_dict(
-            {
-                "train/generator_loss": generator_loss,
-                "train/perceptual_loss": perceptual,
-                "train/adversarial_loss": adversarial,
-                "train/feature_matching_loss": feature_matching,
-                "train/g_image_loss": image_gan,
-                "train/g_video_loss": video_gan,
-                "train/discriminator_loss": discriminator_total,
-                "train/d_image_loss": discriminator_image,
-                "train/d_video_loss": discriminator_video,
-                "train/generator_updates": result.model.rgb.new_tensor(
-                    float(self.generator_updates)
-                ),
-                "train/discriminator_updates": result.model.rgb.new_tensor(
-                    float(self.discriminator_updates)
-                ),
-                "train/batch_updates": result.model.rgb.new_tensor(
-                    float(self.batch_updates)
-                ),
-            },
+            mode_metrics,
             logger=True,
             on_step=True,
             on_epoch=True,
@@ -741,26 +908,37 @@ class StereoVAE(pl.LightningModule):
         return {"loss": generator_loss.detach()}
 
     def validation_step(self, batch, batch_idx):
-        result = self.compute_core_loss(batch, sample_posterior=False)
-        rgb_target = self._unwrap_batch(batch)["video"][:, :, 0]
-        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
-        self._log_loss_breakdown("val", result)
-        self.log(
-            "val/perceptual_loss",
-            perceptual,
-            prog_bar=False,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
-        self.log(
-            "val/total_loss",
-            result.loss.total + perceptual,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
+        source_batch = self._unwrap_batch(batch)
+        for temporal_mode, mode_name in (
+            ("four_frame", "four"),
+            ("single_frame", "single"),
+        ):
+            mode_batch = self._prepare_temporal_batch(
+                source_batch,
+                temporal_mode=temporal_mode,
+            )
+            result = self.compute_core_loss(
+                mode_batch,
+                eye_mode="stereo",
+                temporal_mode=temporal_mode,
+                sample_posterior=False,
+            )
+            rgb_target = mode_batch["video"][:, :, 0]
+            perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+            prefix = f"val/{mode_name}"
+            self._log_loss_breakdown(
+                prefix,
+                result,
+                total_loss=result.loss.total + perceptual,
+            )
+            self.log(
+                f"{prefix}/perceptual_loss",
+                perceptual,
+                prog_bar=False,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
 
     def configure_optimizers(self):
         generator_parameters = (
@@ -832,16 +1010,44 @@ class StereoVAE(pl.LightningModule):
         return optimizers, schedulers
 
     def log_images(self, batch, **kwargs):
-        batch = self._unwrap_batch(batch)
-        output = self(batch["video"], sample_posterior=False)
+        source_batch = self._unwrap_batch(batch)
+        four_output = self(
+            source_batch["video"],
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+            sample_posterior=False,
+        )
+        single_batch = self._prepare_temporal_batch(
+            source_batch,
+            temporal_mode="single_frame",
+        )
+        single_output = self(
+            single_batch["video"],
+            eye_mode="stereo",
+            temporal_mode="single_frame",
+            sample_posterior=False,
+        )
         return {
-            "inputs": self._flatten_view_frames(batch["video"][:, :, 0]),
-            "reconstructions": self._flatten_view_frames(output.rgb),
+            "four_inputs": self._flatten_view_frames(
+                source_batch["video"][:, :, 0]
+            ),
+            "four_reconstructions": self._flatten_view_frames(four_output.rgb),
+            "single_inputs": self._flatten_view_frames(
+                single_batch["video"][:, :, 0]
+            ),
+            "single_reconstructions": self._flatten_view_frames(
+                single_output.rgb
+            ),
         }
 
     def log_videos(self, batch, **kwargs):
         batch = self._unwrap_batch(batch)
-        output = self(batch["video"], sample_posterior=False)
+        output = self(
+            batch["video"],
+            eye_mode="stereo",
+            temporal_mode="four_frame",
+            sample_posterior=False,
+        )
         return {
             "inputs": self._flatten_view_videos(batch["video"][:, :, 0]),
             "reconstructions": self._flatten_view_videos(output.rgb),
@@ -932,6 +1138,11 @@ class StereoVAE(pl.LightningModule):
 
         parser.add_argument("--stereo_num_views", type=int, default=3)
         parser.add_argument("--stereo_num_frames", type=int, default=4)
+        parser.add_argument(
+            "--single_frame_source_index",
+            type=int,
+            required=True,
+        )
         parser.add_argument(
             "--stereo_search_radii",
             nargs=3,
@@ -1082,6 +1293,11 @@ class StereoEncoder(nn.Module):
             nn.Linear(temporal_projection_width, dim),
             nn.LayerNorm(dim),
         )
+        self.single_frame_projection = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+        )
 
         if initialize:
             self.apply(self._init_weights)
@@ -1137,17 +1353,20 @@ class StereoEncoder(nn.Module):
         self,
         video: torch.Tensor,
         *,
-        mode: Literal["mono", "stereo"],
+        eye_mode: EyeMode,
+        temporal_mode: TemporalMode,
     ) -> _StereoEncoderOutput:
-        """Encode four synchronized frames into one temporal latent slot.
+        """Encode one or four synchronized frames into one temporal latent slot.
 
         ``video`` uses ``[B,V,E,C,T,H,W]``. Spatial encoding is applied to
-        every frame independently. StereoFusion runs next, then the four fused
-        frame features exchange information before the final 4-to-1 sampler.
+        every frame independently. StereoFusion is optional. A single frame
+        uses its own D-to-D projection, while four fused frames exchange
+        information before the final 4-to-1 sampler.
         """
 
-        if mode not in ("mono", "stereo"):
-            raise ValueError(f"unsupported stereo encoder mode {mode!r}")
+        if eye_mode not in ("mono", "stereo"):
+            raise ValueError(f"unsupported eye mode {eye_mode!r}")
+        expected_time = temporal_mode_num_frames(temporal_mode)
         if video.ndim != 7:
             raise ValueError(
                 "structured Stereo Encoder expects [B,V,E,C,T,H,W], "
@@ -1157,13 +1376,15 @@ class StereoEncoder(nn.Module):
         batch, views, eyes, channels, time, height, width = video.shape
         if views != self.stereo_num_views:
             raise ValueError(f"expected {self.stereo_num_views} views, got {views}")
-        if time != self.stereo_num_frames:
-            raise ValueError(f"expected T={self.stereo_num_frames}, got T={time}")
+        if time != expected_time:
+            raise ValueError(
+                f"{temporal_mode} requires T={expected_time}, got T={time}"
+            )
         if channels != 3:
             raise ValueError(f"expected RGB inputs, got {channels} channels")
-        if mode == "stereo" and eyes != 2:
+        if eye_mode == "stereo" and eyes != 2:
             raise ValueError("stereo mode requires exactly two eyes")
-        if mode == "mono" and eyes not in (1, 2):
+        if eye_mode == "mono" and eyes not in (1, 2):
             raise ValueError("mono mode accepts one eye or ignores the second eye")
         if (height, width) != self.image_size:
             raise ValueError(
@@ -1187,35 +1408,43 @@ class StereoEncoder(nn.Module):
 
         left = frame_features[:, :, 0]
         fusion_output: Optional[StereoFusionOutput]
-        if mode == "stereo":
+        if eye_mode == "stereo":
             fusion_output = self.stereo_fusion(left, frame_features[:, :, 1])
             fused = fusion_output.features
         else:
             fusion_output = None
             fused = left
 
-        # 每个 View、每个空间位置各自形成长度为 4 的序列，不跨 View/空间混合。
-        temporal_tokens = rearrange(
-            fused,
-            "b v t h w d -> (b v h w) t d",
-        )
-        temporal_tokens = temporal_tokens + self.enc_temporal_position
-        temporal_tokens = self.enc_temporal_transformer(
-            temporal_tokens,
-            video_shape=(batch * views * grid_height * grid_width, time, 1, 1),
-            is_spatial=False,
-        )
-        temporal_features = rearrange(
-            temporal_tokens,
-            "(b v h w) t d -> b v h w (t d)",
-            b=batch,
-            v=views,
-            h=grid_height,
-            w=grid_width,
-        )
+        if temporal_mode == "single_frame":
+            projected = self.single_frame_projection(fused[:, :, 0])
+        else:
+            # 每个 View、每个空间位置各自形成长度为 4 的序列，不跨 View/空间混合。
+            temporal_tokens = rearrange(
+                fused,
+                "b v t h w d -> (b v h w) t d",
+            )
+            temporal_tokens = temporal_tokens + self.enc_temporal_position
+            temporal_tokens = self.enc_temporal_transformer(
+                temporal_tokens,
+                video_shape=(
+                    batch * views * grid_height * grid_width,
+                    time,
+                    1,
+                    1,
+                ),
+                is_spatial=False,
+            )
+            temporal_features = rearrange(
+                temporal_tokens,
+                "(b v h w) t d -> b v h w (t d)",
+                b=batch,
+                v=views,
+                h=grid_height,
+                w=grid_width,
+            )
 
-        # Temporal Sampler 只负责在帧间注意力之后执行 4D -> D 压缩。
-        projected = self.stereo_temporal_projection(temporal_features)
+            # Temporal Sampler 只负责在帧间注意力之后执行 4D -> D 压缩。
+            projected = self.stereo_temporal_projection(temporal_features)
         features = rearrange(projected, "b v h w d -> (b v) d 1 h w")
         return _StereoEncoderOutput(
             features=features,
@@ -1282,6 +1511,10 @@ class StereoDecoder(nn.Module):
         self.stereo_temporal_expansion = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, stereo_num_frames * dim),
+        )
+        self.single_frame_expansion = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
         )
         self.dec_temporal_position = nn.Parameter(torch.empty(1, stereo_num_frames, dim))
         self.dec_temporal_transformer = Transformer(
@@ -1353,23 +1586,38 @@ class StereoDecoder(nn.Module):
             self.image_size[1] // self.patch_size[1],
         )
 
-    def _decode_transformer_features(self, tokens: torch.Tensor) -> torch.Tensor:
+    def _decode_transformer_features(
+        self,
+        tokens: torch.Tensor,
+        *,
+        temporal_mode: TemporalMode,
+    ) -> torch.Tensor:
         batch_views, time, height, width, dim = tokens.shape
         if time != 1:
             raise ValueError("temporal expansion expects exactly one latent slot")
 
-        # D -> 4D 后恢复四个帧级 feature，时间 Attention 在空间解码之前执行。
-        expanded = self.stereo_temporal_expansion(tokens[:, 0])
-        expanded = expanded.reshape(
-            batch_views, height, width, self.stereo_num_frames, dim
-        )
-        expanded = rearrange(expanded, "n h w t d -> (n h w) t d")
-        expanded = expanded + self.dec_temporal_position
-        expanded = self.dec_temporal_transformer(
-            expanded,
-            video_shape=(batch_views * height * width, self.stereo_num_frames, 1, 1),
-            is_spatial=False,
-        )
+        output_time = temporal_mode_num_frames(temporal_mode)
+        if temporal_mode == "single_frame":
+            expanded = self.single_frame_expansion(tokens[:, 0])[:, None]
+            expanded = rearrange(expanded, "n t h w d -> (n h w) t d")
+        else:
+            # D -> 4D 后恢复四个帧级 feature，时间 Attention 在空间解码之前执行。
+            expanded = self.stereo_temporal_expansion(tokens[:, 0])
+            expanded = expanded.reshape(
+                batch_views, height, width, self.stereo_num_frames, dim
+            )
+            expanded = rearrange(expanded, "n h w t d -> (n h w) t d")
+            expanded = expanded + self.dec_temporal_position
+            expanded = self.dec_temporal_transformer(
+                expanded,
+                video_shape=(
+                    batch_views * height * width,
+                    self.stereo_num_frames,
+                    1,
+                    1,
+                ),
+                is_spatial=False,
+            )
 
         # Spatial Decoder 把每帧视为独立样本，PEG 只能看到 T=1。
         frame_tokens = rearrange(
@@ -1381,14 +1629,14 @@ class StereoDecoder(nn.Module):
         )
         frame_tokens = self.dec_spatial_transformer(
             frame_tokens,
-            video_shape=(batch_views * self.stereo_num_frames, 1, height, width),
+            video_shape=(batch_views * output_time, 1, height, width),
             is_spatial=True,
         )
         return rearrange(
             frame_tokens,
             "(n t) (h w) d -> n t h w d",
             n=batch_views,
-            t=self.stereo_num_frames,
+            t=output_time,
             h=height,
             w=width,
         )
@@ -1399,10 +1647,12 @@ class StereoDecoder(nn.Module):
         patches: torch.Tensor,
         *,
         output_channels: int,
+        temporal_mode: TemporalMode,
     ) -> torch.Tensor:
-        if patches.ndim != 5 or patches.shape[1] != self.stereo_num_frames:
+        expected_time = temporal_mode_num_frames(temporal_mode)
+        if patches.ndim != 5 or patches.shape[1] != expected_time:
             raise ValueError(
-                "structured decoder patches must use [B*V,4,H,W,D]"
+                f"structured decoder patches must use [B*V,{expected_time},H,W,D]"
             )
         patch_height, patch_width = self.patch_size
         return rearrange(
@@ -1413,8 +1663,13 @@ class StereoDecoder(nn.Module):
             p2=patch_width,
         )
 
-    def forward_stereo(self, tokens: torch.Tensor) -> StereoDecodeOutput:
-        """Decode one latent slot into four RGB and disparity frames."""
+    def forward_stereo(
+        self,
+        tokens: torch.Tensor,
+        *,
+        temporal_mode: TemporalMode,
+    ) -> StereoDecodeOutput:
+        """Decode one latent slot into one or four RGB/disparity frames."""
 
         if tokens.ndim != 5:
             raise ValueError(
@@ -1426,15 +1681,25 @@ class StereoDecoder(nn.Module):
             raise ValueError("flattened decoder batch must be divisible by views")
 
         features = rearrange(tokens, "n d t h w -> n t h w d")
-        features = self._decode_transformer_features(features)
-        if features.shape[1] != self.stereo_num_frames:
-            raise RuntimeError("decoder must produce four frame-level features")
+        features = self._decode_transformer_features(
+            features,
+            temporal_mode=temporal_mode,
+        )
+        expected_time = temporal_mode_num_frames(temporal_mode)
+        if features.shape[1] != expected_time:
+            raise RuntimeError(
+                f"decoder must produce {expected_time} frame-level features"
+            )
 
         rgb = self._unpatch_stereo(
-            self.stereo_rgb_head(features), output_channels=3
+            self.stereo_rgb_head(features),
+            output_channels=3,
+            temporal_mode=temporal_mode,
         )
         raw_disparity = self._unpatch_stereo(
-            self.stereo_disparity_head(features), output_channels=1
+            self.stereo_disparity_head(features),
+            output_channels=1,
+            temporal_mode=temporal_mode,
         )
         batch = tokens.shape[0] // self.stereo_num_views
         rgb = rearrange(rgb, "(b v) c t h w -> b v c t h w", b=batch, v=self.stereo_num_views)
