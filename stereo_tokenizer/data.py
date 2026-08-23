@@ -21,22 +21,6 @@ def _profiled_collate(batch):
         return default_collate(batch)
 
 
-class RepeatedDataset(data.Dataset):
-    """Repeat a fixed dataset within one loader epoch."""
-
-    def __init__(self, dataset, repeats: int):
-        if repeats < 1:
-            raise ValueError("dataset repeats must be positive")
-        self.dataset = dataset
-        self.repeats = repeats
-
-    def __len__(self):
-        return len(self.dataset) * self.repeats
-
-    def __getitem__(self, index):
-        return self.dataset[index % len(self.dataset)]
-
-
 class StereoManifestDataset(data.Dataset):
     """Structured stereo samples backed by independent RGB and GT caches."""
 
@@ -296,7 +280,7 @@ class StereoDataModule(pl.LightningDataModule):
         )
         repeats = int(getattr(self.args, "train_epoch_repeats", 1))
         if train and repeats != 1:
-            dataset = RepeatedDataset(dataset, repeats)
+            dataset = data.ConcatDataset([dataset] * repeats)
         return dataset
 
     def _dataloader(self, train: bool):
