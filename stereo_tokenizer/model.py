@@ -711,7 +711,7 @@ class StereoVAE(pl.LightningModule):
             prog_bar=False,
             logger=True,
             on_step=prefix == "train",
-            on_epoch=True,
+            on_epoch=prefix != "train",
             sync_dist=True,
         )
 
@@ -812,7 +812,7 @@ class StereoVAE(pl.LightningModule):
                 },
                 logger=True,
                 on_step=True,
-                on_epoch=True,
+                on_epoch=False,
                 sync_dist=True,
             )
         return {"loss": generator_loss.detach()}

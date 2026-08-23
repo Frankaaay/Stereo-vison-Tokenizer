@@ -161,6 +161,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "self.check_frequency(pl_module.global_step, split)", callbacks
         )
         self.assertNotIn("self.check_frequency(batch_idx)", callbacks)
+        model = (ROOT / "stereo_tokenizer" / "model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('on_epoch=prefix != "train"', model)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
