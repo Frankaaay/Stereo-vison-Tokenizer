@@ -128,7 +128,7 @@ Keep the final measured path:
 - batch 8 per GPU, global batch 64, no accumulation
 - BF16, T=1 Conv2d PEG, pinned memory, eight workers per rank
 - non-GAN static-graph DDP
-- checkpoint every 100 optimizer updates
+- checkpoint every 500 optimizer updates
 - global-step media logging and step-only training metrics
 - one loader epoch covering the intended update budget
 
