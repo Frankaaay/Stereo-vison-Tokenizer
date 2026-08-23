@@ -150,10 +150,12 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             '--train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}"', launcher
         )
         self.assertIn(
-            '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}"',
+            '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-500}"',
             launcher,
         )
+        self.assertIn("DISABLE_MEDIA_LOGGING:-0", launcher)
         train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        self.assertIn("peak_memory_bytes_by_rank", train)
         self.assertIn("DDPStrategy(", train)
         self.assertIn("static_graph=not args.gan_enabled", train)
         self.assertIn("find_unused_parameters=args.gan_enabled", train)

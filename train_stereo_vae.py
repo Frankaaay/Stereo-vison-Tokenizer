@@ -25,6 +25,7 @@ class StepTimingCallback(Callback):
         self.timings = []
 
     def on_train_start(self, trainer, pl_module):
+        torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         self.last_batch_end = time.perf_counter()
 
@@ -40,6 +41,20 @@ class StepTimingCallback(Callback):
         self.last_batch_end = now
 
     def on_train_end(self, trainer, pl_module):
+        local_memory = torch.tensor(
+            [
+                torch.cuda.max_memory_allocated(),
+                torch.cuda.max_memory_reserved(),
+            ],
+            device=pl_module.device,
+            dtype=torch.long,
+        )
+        rank_memory = [local_memory]
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank_memory = [
+                torch.zeros_like(local_memory) for _ in range(trainer.world_size)
+            ]
+            torch.distributed.all_gather(rank_memory, local_memory)
         if not trainer.is_global_zero:
             return
         stable = self.timings[self.warmup_updates :]
@@ -48,6 +63,14 @@ class StepTimingCallback(Callback):
             "world_size": int(trainer.world_size),
             "per_device_batch_size": int(pl_module.args.batch_size),
             "warmup_updates": self.warmup_updates,
+            "peak_memory_bytes_by_rank": [
+                {
+                    "rank": rank,
+                    "allocated": int(memory[0].item()),
+                    "reserved": int(memory[1].item()),
+                }
+                for rank, memory in enumerate(rank_memory)
+            ],
             "timings": self.timings,
             "stable": {
                 "count": len(values),
@@ -70,6 +93,7 @@ def build_parser():
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--disable_wandb", action="store_true")
+    parser.add_argument("--disable_media_logging", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="stereo-vae")
     parser.add_argument("--image_log_every_n_steps", type=int, default=750)
     parser.add_argument("--video_log_every_n_steps", type=int, default=1500)
@@ -77,7 +101,7 @@ def build_parser():
     parser.add_argument("--num_nodes", type=int, default=1)
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
-    parser.add_argument("--checkpoint_every_n_steps", type=int, default=100)
+    parser.add_argument("--checkpoint_every_n_steps", type=int, default=500)
     parser.add_argument("--step_timing_output", type=str, default=None)
     parser.add_argument("--step_timing_warmup", type=int, default=5)
     parser = StereoVAE.add_model_specific_args(parser)
@@ -117,18 +141,23 @@ def build_callbacks(args, has_validation):
             save_top_k=-1,
             save_last=True,
             filename="{epoch}-{step}",
-        ),
-        ImageLogger(
-            batch_frequency=args.image_log_every_n_steps,
-            max_images=4,
-            clamp=True,
-        ),
-        VideoLogger(
-            batch_frequency=args.video_log_every_n_steps,
-            max_videos=4,
-            clamp=True,
-        ),
+        )
     ]
+    if not args.disable_media_logging:
+        callbacks.extend(
+            [
+                ImageLogger(
+                    batch_frequency=args.image_log_every_n_steps,
+                    max_images=4,
+                    clamp=True,
+                ),
+                VideoLogger(
+                    batch_frequency=args.video_log_every_n_steps,
+                    max_videos=4,
+                    clamp=True,
+                ),
+            ]
+        )
     if not args.disable_wandb:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     if args.step_timing_output is not None:

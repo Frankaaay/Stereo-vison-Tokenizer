@@ -36,6 +36,11 @@ if [[ "${DISABLE_WANDB:-0}" == "1" ]]; then
   WANDB_ARGS+=(--disable_wandb)
 fi
 
+MEDIA_ARGS=()
+if [[ "${DISABLE_MEDIA_LOGGING:-0}" == "1" ]]; then
+  MEDIA_ARGS+=(--disable_media_logging)
+fi
+
 TIMING_ARGS=()
 if [[ -n "${STEP_TIMING_OUTPUT:-}" ]]; then
   TIMING_ARGS+=(
@@ -104,9 +109,10 @@ python3 train_stereo_vae.py \
   --warmup_steps "${WARMUP_STEPS}" \
   --kl_warmup_steps "${KL_WARMUP_STEPS}" \
   --max_steps "${MAX_STEPS}" \
-  --checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}" \
+  --checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-500}" \
   --default_root_dir "${OUTPUT_ROOT}" \
   --devices "${GPU_COUNT}" \
   --bf16 \
   "${WANDB_ARGS[@]}" \
+  "${MEDIA_ARGS[@]}" \
   "${TIMING_ARGS[@]}"
