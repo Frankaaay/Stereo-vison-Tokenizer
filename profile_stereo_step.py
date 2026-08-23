@@ -58,9 +58,10 @@ class ProfiledCSVLogger(CSVLogger):
 
 
 class StepTraceCallback(Callback):
-    def __init__(self, profiler, output_dir: Path):
+    def __init__(self, profiler, output_dir: Path, advance_on_epoch_end: bool):
         self.profiler = profiler
         self.output_dir = output_dir
+        self.advance_on_epoch_end = advance_on_epoch_end
         self.last_batch_end = None
         self.step_timings = []
         self.pending_loss = None
@@ -74,8 +75,14 @@ class StepTraceCallback(Callback):
         self.pending_loss = None
         if isinstance(outputs, dict) and torch.is_tensor(outputs.get("loss")):
             self.pending_loss = float(outputs["loss"].detach().float().cpu())
+        if not self.advance_on_epoch_end:
+            self._record_step(trainer, pl_module)
 
     def on_train_epoch_end(self, trainer, pl_module) -> None:
+        if self.advance_on_epoch_end:
+            self._record_step(trainer, pl_module)
+
+    def _record_step(self, trainer, pl_module) -> None:
         now = time.perf_counter()
         interval_s = now - self.last_batch_end
         self.last_batch_end = now
@@ -208,6 +215,11 @@ def build_profile_parser():
     parser.add_argument("--profile_warmup", type=int, default=5)
     parser.add_argument("--profile_active", type=int, default=10)
     parser.add_argument(
+        "--profile_dataset_mode",
+        choices=("selected8", "full3407"),
+        default="selected8",
+    )
+    parser.add_argument(
         "--profile_peg_backend",
         choices=(
             "conv3d_contiguous",
@@ -234,8 +246,16 @@ def validate_profile_args(args) -> None:
     validate_runtime_args(args)
     if args.devices != 1 or args.num_nodes != 1:
         raise ValueError("step profiling requires exactly one node and one GPU")
-    if args.batch_size != 8 or args.num_workers != 0:
-        raise ValueError("step profiling freezes batch_size=8 and num_workers=0")
+    if args.batch_size != 8:
+        raise ValueError("step profiling freezes batch_size=8")
+    if args.profile_dataset_mode == "selected8" and args.num_workers != 0:
+        raise ValueError("selected8 profiling freezes num_workers=0")
+    if args.profile_dataset_mode == "full3407" and args.num_workers != 8:
+        raise ValueError("full3407 profiling freezes num_workers=8")
+    if args.profile_dataset_mode == "full3407" and args.profile_preload_data:
+        raise ValueError("full3407 profiling forbids data preload")
+    if args.profile_dataset_mode == "full3407" and args.profile_lpips_gt_cache:
+        raise ValueError("full3407 profiling forbids the fixed-GT LPIPS cache")
     if args.max_steps != 5000:
         raise ValueError("model max_steps must remain 5000 for scheduler equivalence")
     if args.gan_enabled:
@@ -273,8 +293,11 @@ def main() -> None:
     if args.profile_preload_data:
         preloaded_sample_count = data.profile_preload_train_dataset()
     dataset = data._dataset(True)
-    if len(dataset) != 8:
-        raise RuntimeError(f"expected exactly eight samples, got {len(dataset)}")
+    expected_samples = 8 if args.profile_dataset_mode == "selected8" else 3407
+    if len(dataset) != expected_samples:
+        raise RuntimeError(
+            f"expected exactly {expected_samples} samples, got {len(dataset)}"
+        )
     model = StereoVAE(args)
     model.set_profile_lpips_gt_cache(bool(args.profile_lpips_gt_cache))
     peg_count = 0
@@ -301,7 +324,11 @@ def main() -> None:
         with_stack=False,
         with_flops=False,
     )
-    callback = StepTraceCallback(profiler, output_dir)
+    callback = StepTraceCallback(
+        profiler,
+        output_dir,
+        advance_on_epoch_end=args.profile_dataset_mode == "selected8",
+    )
     logger = ProfiledCSVLogger(
         save_dir=str(output_dir), name="csv_metrics", version=0
     )

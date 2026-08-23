@@ -13,6 +13,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 REPO_ROOT="${REPO_ROOT:-/data/home/frank/projects/Stereo-vison-Tokenizer}"
 TORCH_HOME="${TORCH_HOME:-/home/frank/.cache/torch}"
 PROFILE_PEG_BACKEND="${PROFILE_PEG_BACKEND:-conv3d_contiguous}"
+PROFILE_DATASET_MODE="${PROFILE_DATASET_MODE:-selected8}"
+PROFILE_NUM_WORKERS="${PROFILE_NUM_WORKERS:-0}"
 PROFILE_PRELOAD_DATA="${PROFILE_PRELOAD_DATA:-0}"
 PROFILE_PIN_MEMORY="${PROFILE_PIN_MEMORY:-0}"
 PROFILE_LPIPS_GT_CACHE="${PROFILE_LPIPS_GT_CACHE:-0}"
@@ -46,6 +48,7 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --profile_wait 15 \
   --profile_warmup 5 \
   --profile_active 10 \
+  --profile_dataset_mode "${PROFILE_DATASET_MODE}" \
   --profile_peg_backend "${PROFILE_PEG_BACKEND}" \
   --profile_preload_data "${PROFILE_PRELOAD_DATA}" \
   --profile_pin_memory "${PROFILE_PIN_MEMORY}" \
@@ -100,7 +103,7 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --sequence_length 4 \
   --resolution 256 \
   --batch_size 8 \
-  --num_workers 0 \
+  --num_workers "${PROFILE_NUM_WORKERS}" \
   --image_channels 3 \
   --stereo_train_manifest "${STEREO_TRAIN_MANIFEST}" \
   --stereo_rgb_root "${STEREO_RGB_ROOT}" \

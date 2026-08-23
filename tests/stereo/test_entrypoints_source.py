@@ -55,7 +55,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("set_profiling_enabled(True)", source)
         self.assertIn("max_steps=args.profile_updates", source)
         self.assertIn("if args.max_steps != 5000", source)
-        self.assertIn("if args.batch_size != 8 or args.num_workers != 0", source)
+        self.assertIn("if args.batch_size != 8", source)
+        self.assertIn("selected8 profiling freezes num_workers=0", source)
         self.assertIn("ProfilerActivity.CPU", source)
         self.assertIn("ProfilerActivity.CUDA", source)
         self.assertIn("record_shapes=True", source)
@@ -71,7 +72,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         for argument in (
             "--devices 1",
             "--batch_size 8",
-            "--num_workers 0",
+            '--num_workers "${PROFILE_NUM_WORKERS}"',
             "--bf16",
             "--max_steps 5000",
             "--profile_updates 40",
@@ -165,6 +166,18 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             self.assertIn(value, launcher)
         self.assertIn("profile_preload_train_dataset", data)
         self.assertIn("LPIPS GT cache sample order changed", model)
+
+    def test_full_dataset_profile_is_fail_closed(self):
+        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
+        launcher = (
+            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('choices=("selected8", "full3407")', profile)
+        self.assertIn("full3407 profiling freezes num_workers=8", profile)
+        self.assertIn("full3407 profiling forbids data preload", profile)
+        self.assertIn("expected exactly {expected_samples} samples", profile)
+        self.assertIn("PROFILE_DATASET_MODE:-selected8", launcher)
+        self.assertIn("PROFILE_NUM_WORKERS:-0", launcher)
 
 
 if __name__ == "__main__":
