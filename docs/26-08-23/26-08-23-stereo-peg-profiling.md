@@ -168,14 +168,12 @@ with unchanged parameters.
 ## Current conclusion
 
 PEG depthwise Conv3d backward was the original dominant bottleneck. The T=1
-Conv2d slice is the only successful PEG candidate so far. It remains an
-explicit profiling backend; ordinary training still defaults to Conv3d pending
-a separate decision to promote it. For the fixed eight-sample acceptance run,
-preloading is the largest measured follow-up improvement. LPIPS GT caching is a
-smaller but real improvement with a 2.859 GiB persistent cache cost. Pinned
-memory improves H2D substantially but yields only a small end-to-end gain once
-CPU pinning cost is included. All three remain explicit profiling switches
-pending a decision about production or acceptance-run defaults.
+Conv2d slice is the only successful PEG candidate so far. For the fixed
+eight-sample acceptance run, preloading is the largest measured follow-up
+improvement. LPIPS GT caching is a smaller but real improvement with a 2.859
+GiB persistent cache cost. The full-dataset experiment below supersedes the
+earlier conclusion about pinned memory and records the production-launcher
+decision.
 
 ## Full-dataset applicability audit
 
@@ -215,3 +213,94 @@ only after the full-manifest input pipeline is measured. Re-encoding GT as
 uncompressed or memory-mappable data should be considered only if DataLoader
 wait remains on the end-to-end critical path; its decompression cost may
 already be hidden by worker prefetch.
+
+## Full-dataset F0/F1/F2 experiment
+
+Status: completed on `h200-2`, physical GPU 0. All three runs used commit
+`f22c6eeabf615aa4846f4baed786c36fb1399364`, the complete 3407-sample manifest,
+batch 8, BF16, eight DataLoader workers, 40 optimizer updates, the same seed,
+and no preload or LPIPS cache. F0 used the original Conv3d PEG and pageable
+memory. F1 changed only PEG to the T=1 Conv2d slice. F2 changed only F1's
+DataLoader memory to pinned memory with the existing non-blocking transfer.
+
+| Run | Active median | Post-profile median | Main-process loader wait | H2D CUDA | Peak allocated |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| F0 Conv3d, pageable | 452.06 ms | 440.90 ms | 1.32 ms | 25.55 ms | 30.11 GiB |
+| F1 Conv2d, pageable | 301.81 ms | 293.37 ms | 1.28 ms | 24.92 ms | 29.69 GiB |
+| F2 Conv2d, pinned | 264.45 ms | 255.99 ms | 0.05 ms | 3.33 ms | 29.70 GiB |
+
+F1 reduced active-step latency by 33.2% relative to F0 and provided 1.50x
+throughput. F2 reduced active-step latency by another 12.4% relative to F1.
+Relative to F0, F2 reduced active latency by 41.5%; its post-profile steady
+speed was about 256 ms/step, or 31.25 samples/s on one GPU. F1 and F2 produced
+exactly equal values for every logged metric at all 40 updates. F0 and F1 had
+the same first two generator losses and then developed bounded BF16
+reduction-order differences, consistent with the PEG microbenchmark.
+
+The full-data result changes the interpretation of pinning. With eight workers,
+NPZ loading and collate are prefetched off the critical path, while pinning
+reduces H2D from about 25 ms to 3.3 ms and removes nearly all main-process
+loader wait. F2 is therefore the appropriate measured single-GPU baseline for
+the planned distributed comparison. Preloading remains limited to fixed-small
+acceptance runs and is not proposed for full training. The LPIPS cache also
+remains excluded from full training because a per-sample cache does not scale
+with dataset size and its persistent device-memory cost was measured only for
+eight samples.
+
+Outputs and result SHA256 values:
+
+- F0: `/data/home/frank/runtime/stereo-full-profile-v1/f22c6ee-h2002-gpu0-b8-40u-f0-conv3d-w8-v1`, result `3b250c28ac13c8ec153729da2bc708854b81f1cb6ae0fd590138a5cce8c2db58`
+- F1: `/data/home/frank/runtime/stereo-full-profile-v1/f22c6ee-h2002-gpu0-b8-40u-f1-conv2d-w8-v1`, result `0d53026516f28621d71769bed761670a135f018dadb2d0aaef4b4191d33b02e7`
+- F2: `/data/home/frank/runtime/stereo-full-profile-v1/f22c6ee-h2002-gpu0-b8-40u-f2-conv2d-w8-pinned-v1`, result `1dc2b21a208879e67d51767686d07897bdc93b858565d054dca9d15557823fe1`
+
+## Launcher promotion and verification
+
+The formal `scripts/stereo/train_stereo_vae.sh` launcher now explicitly passes
+`--peg_backend conv2d_t1_slice`. The model default remains Conv3d for backward
+compatibility with direct API construction, while the training launcher opts
+into the measured T=1 path. Conv2d fails closed if a future call presents
+`T != 1`; that smoke check raised the expected `RuntimeError` on H200-2.
+
+The production change is at commit
+`1b278c1382889f5915172057258e60e0974647ca`. Twenty-one targeted H200
+integration and entrypoint tests passed. The PEG microbenchmark again produced
+identical forward values and zero gradients for inactive temporal slices. At
+the large BF16 PEG shape, forward plus backward changed from 29.26 ms for
+Conv3d to 0.96 ms for Conv2d. A broad discovery run passed 53 of 54 tests; the
+only failure was the pre-existing source-boundary check seeing 28 legacy
+`__pycache__` files. Those unrelated files were preserved.
+
+The documented `/data/home/maxliu/runtime/ngadv1-hy/bin/python` is currently a
+broken symlink on H200-2. Validation and profiling instead used Frank's
+`omnitokenizer-e2` Python 3.12.11 environment, which provides PyTorch 2.7.1 and
+PyTorch Lightning 2.5.6. This runtime drift must be resolved or explicitly
+pinned before launching the eight-GPU overfit run.
+
+## Planned 128-sample eight-GPU comparison
+
+The H200-2 overfit manifest was revalidated at 128 records with SHA256
+`3df1278276ef855c605b774af3ff34dcb13a23ca2c8481698698e0faea86700c`.
+The requested distributed recipe uses one node, eight GPUs, batch 8 per GPU,
+no accumulation, and therefore global batch 64. It has two optimizer updates
+per 128-sample epoch, whereas the single-GPU batch-8 run has sixteen.
+
+The speed comparison should use two paired, update-limited measurements with
+the same manifest, model, BF16 mode, Conv2d PEG, eight workers per rank, pinned
+memory, loss, optimizer, and logging: one GPU at batch 8 and eight GPUs at
+batch 8 per GPU. Record median wall time per update, global samples/s, peak
+memory, DDP communication, and throughput scaling. With measured times `t1`
+and `t8`, scaling is `8 * t1 / t8` and efficiency is `t1 / t8`. No eight-GPU
+speed is claimed before this measurement.
+
+The requested comparison is valid for systems throughput but not for
+optimization equivalence because global batch changes from 8 to 64. Any loss
+or convergence comparison needs a separate single-GPU control with eight-step
+gradient accumulation so both sides have global batch 64 and the same number
+of sample exposures.
+
+The current epoch-based checkpoint callback would save every two distributed
+updates and contaminate both throughput and long overfit timing. Before the
+eight-GPU run, the launcher needs an explicit checkpoint cadence suitable for
+an update-based overfit and persistent DataLoader workers should be measured,
+because a two-batch epoch otherwise restarts worker processes repeatedly.
+Those are proposed experiment changes, not yet implemented or launched.
