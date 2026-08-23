@@ -300,10 +300,10 @@ class PEG(nn.Module):
         super().__init__()
         self.causal = causal
         self.dsconv = nn.Conv3d(dim, dim, 3, groups=dim)
-        self._profile_backend = "conv3d_contiguous"
+        self._backend = "conv3d_contiguous"
 
-    def set_profile_backend(self, backend: str) -> None:
-        """Select an experimental PEG backend for controlled profiling only."""
+    def set_backend(self, backend: str) -> None:
+        """Select the PEG convolution backend."""
         supported = {
             "conv3d_contiguous",
             "conv3d_channels_last_3d",
@@ -311,7 +311,7 @@ class PEG(nn.Module):
         }
         if backend not in supported:
             raise ValueError(f"unsupported PEG profiling backend: {backend}")
-        self._profile_backend = backend
+        self._backend = backend
         if backend == "conv3d_channels_last_3d":
             self.dsconv.to(memory_format=torch.channels_last_3d)
         else:
@@ -338,7 +338,7 @@ class PEG(nn.Module):
 
         frame_padding = (2, 0) if self.causal else (1, 1)
 
-        if self._profile_backend == "conv2d_t1_slice":
+        if self._backend == "conv2d_t1_slice":
             if x.shape[2] != 1:
                 raise RuntimeError(
                     "conv2d_t1_slice requires PEG temporal length T=1"
@@ -353,7 +353,7 @@ class PEG(nn.Module):
             ).unsqueeze(2)
         else:
             x = F.pad(x, (1, 1, 1, 1, *frame_padding), value=0.)
-            if self._profile_backend == "conv3d_channels_last_3d":
+            if self._backend == "conv3d_channels_last_3d":
                 x = x.contiguous(memory_format=torch.channels_last_3d)
             x = self.dsconv(x)
 

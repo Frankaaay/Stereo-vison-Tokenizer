@@ -57,6 +57,7 @@ python3 train_stereo_vae.py \
   --spatial_pos rope \
   --causal_in_temporal_transformer \
   --causal_in_peg \
+  --peg_backend conv2d_t1_slice \
   --dim_head 64 \
   --heads 8 \
   --initialize_vit \

@@ -129,17 +129,21 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         ):
             self.assertIn(region, losses)
 
-    def test_peg_profile_backends_are_explicit_and_default_preserves_conv3d(self):
+    def test_peg_backends_are_explicit_and_training_uses_t1_conv2d(self):
         attention = (
             ROOT / "stereo_tokenizer" / "modules" / "attention.py"
         ).read_text(encoding="utf-8")
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
         self.assertIn(
-            'self._profile_backend = "conv3d_contiguous"', attention
+            'self._backend = "conv3d_contiguous"', attention
         )
         self.assertIn('"conv3d_channels_last_3d"', attention)
         self.assertIn('"conv2d_t1_slice"', attention)
         self.assertIn("expected 14 PEG modules", profile)
+        launcher = (
+            ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--peg_backend conv2d_t1_slice", launcher)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")

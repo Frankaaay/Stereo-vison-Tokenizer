@@ -303,7 +303,7 @@ def main() -> None:
     peg_count = 0
     for module in model.modules():
         if isinstance(module, PEG):
-            module.set_profile_backend(args.profile_peg_backend)
+            module.set_backend(args.profile_peg_backend)
             peg_count += 1
     if peg_count != 14:
         raise RuntimeError(f"expected 14 PEG modules, got {peg_count}")

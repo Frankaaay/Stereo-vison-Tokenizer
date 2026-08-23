@@ -122,7 +122,7 @@ def main() -> None:
         for backend in BACKENDS:
             module = PEG(512, causal=True).to(device=device, dtype=dtype)
             module.load_state_dict(initial_state)
-            module.set_profile_backend(backend)
+            module.set_backend(backend)
             modules[backend] = module
             observations[backend] = _run_once(
                 module, source, output_grad, shape
@@ -130,7 +130,7 @@ def main() -> None:
 
             adam_module = PEG(512, causal=True).to(device=device, dtype=dtype)
             adam_module.load_state_dict(initial_state)
-            adam_module.set_profile_backend(backend)
+            adam_module.set_backend(backend)
             adam_states[backend] = _adam_step(
                 adam_module, source, output_grad, shape
             )

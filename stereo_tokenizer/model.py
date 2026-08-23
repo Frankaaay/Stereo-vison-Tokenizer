@@ -20,7 +20,7 @@ from .modules import (
     StereoLossBreakdown,
     StereoReconstructionKLLoss,
 )
-from .modules.attention import Transformer
+from .modules.attention import PEG, Transformer
 from .modules.discriminator import NLayerDiscriminator, NLayerDiscriminator3D
 from .modules.vae import (
     DiagonalGaussianDistribution,
@@ -148,6 +148,14 @@ class StereoVAE(pl.LightningModule):
             stereo_disparity_bias=args.stereo_disparity_bias,
             stereo_disparity_epsilon=args.stereo_disparity_epsilon,
         )
+        self.peg_backend = getattr(args, "peg_backend", "conv3d_contiguous")
+        peg_count = 0
+        for module in self.modules():
+            if isinstance(module, PEG):
+                module.set_backend(self.peg_backend)
+                peg_count += 1
+        if peg_count != 14:
+            raise RuntimeError(f"expected 14 PEG modules, got {peg_count}")
         self.posterior_projection = nn.Sequential(
             Rearrange("b c t h w -> b t h w c"),
             nn.Linear(args.embedding_dim, 2 * args.latent_channels),
@@ -993,6 +1001,11 @@ class StereoVAE(pl.LightningModule):
             "--causal_in_temporal_transformer", action="store_true"
         )
         parser.add_argument("--causal_in_peg", action="store_true")
+        parser.add_argument(
+            "--peg_backend",
+            choices=("conv3d_contiguous", "conv2d_t1_slice"),
+            default="conv3d_contiguous",
+        )
         parser.add_argument("--dim_head", type=int, default=64)
         parser.add_argument("--heads", type=int, default=8)
         parser.add_argument("--attn_dropout", type=float, default=0.0)
