@@ -16,6 +16,7 @@ from torch.profiler import ProfilerActivity
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
+from stereo_tokenizer.modules.attention import PEG
 from stereo_tokenizer.profiling import profile_region, set_profiling_enabled
 from train_stereo_vae import build_parser, validate_runtime_args
 
@@ -206,6 +207,15 @@ def build_profile_parser():
     parser.add_argument("--profile_wait", type=int, default=15)
     parser.add_argument("--profile_warmup", type=int, default=5)
     parser.add_argument("--profile_active", type=int, default=10)
+    parser.add_argument(
+        "--profile_peg_backend",
+        choices=(
+            "conv3d_contiguous",
+            "conv3d_channels_last_3d",
+            "conv2d_t1_slice",
+        ),
+        default="conv3d_contiguous",
+    )
     parser.add_argument("--expected_git_sha", type=str, required=True)
     parser.add_argument("--expected_manifest_sha256", type=str, required=True)
     return parser
@@ -254,6 +264,13 @@ def main() -> None:
     if len(dataset) != 8:
         raise RuntimeError(f"expected exactly eight samples, got {len(dataset)}")
     model = StereoVAE(args)
+    peg_count = 0
+    for module in model.modules():
+        if isinstance(module, PEG):
+            module.set_profile_backend(args.profile_peg_backend)
+            peg_count += 1
+    if peg_count != 14:
+        raise RuntimeError(f"expected 14 PEG modules, got {peg_count}")
 
     trace_writer = TraceWriter(output_dir, args.profile_active)
     schedule = torch.profiler.schedule(
@@ -300,6 +317,7 @@ def main() -> None:
             "manifest_sha256": manifest_sha256,
             "shuffle": False,
             "trainer_max_steps": args.profile_updates,
+            "peg_count": peg_count,
         }
     )
     _write_json(output_dir / "resolved_config.json", resolved)

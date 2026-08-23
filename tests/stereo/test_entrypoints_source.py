@@ -112,6 +112,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "stereo/transfer/cpu_to_gpu",
         ):
             self.assertIn(region, model)
+
         for region in (
             "stereo/data/rgb_npz_read_decompress",
             "stereo/data/gt_npz_read_decompress",
@@ -126,6 +127,18 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "stereo/loss/kl",
         ):
             self.assertIn(region, losses)
+
+    def test_peg_profile_backends_are_explicit_and_default_preserves_conv3d(self):
+        attention = (
+            ROOT / "stereo_tokenizer" / "modules" / "attention.py"
+        ).read_text(encoding="utf-8")
+        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'self._profile_backend = "conv3d_contiguous"', attention
+        )
+        self.assertIn('"conv3d_channels_last_3d"', attention)
+        self.assertIn('"conv2d_t1_slice"', attention)
+        self.assertIn("expected 14 PEG modules", profile)
 
 
 if __name__ == "__main__":

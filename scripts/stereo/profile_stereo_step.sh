@@ -12,6 +12,7 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 REPO_ROOT="${REPO_ROOT:-/data/home/frank/projects/Stereo-vison-Tokenizer}"
 TORCH_HOME="${TORCH_HOME:-/home/frank/.cache/torch}"
+PROFILE_PEG_BACKEND="${PROFILE_PEG_BACKEND:-conv3d_contiguous}"
 
 test "$(git -C "${REPO_ROOT}" branch --show-current)" = frank-profiling
 test "$(git -C "${REPO_ROOT}" rev-parse HEAD)" = "${EXPECTED_GIT_SHA}"
@@ -42,6 +43,7 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --profile_wait 15 \
   --profile_warmup 5 \
   --profile_active 10 \
+  --profile_peg_backend "${PROFILE_PEG_BACKEND}" \
   --default_root_dir "${OUTPUT_ROOT}" \
   --embedding_dim 512 \
   --lr 0.0001 \
