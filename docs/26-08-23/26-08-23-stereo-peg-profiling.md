@@ -10,6 +10,7 @@ eight samples, the same seed, and 40 updates with 10 active Kineto steps.
 - Branch: `frank-profiling`
 - Initial profiling commit: `1c05b398b1c34bd38d064287010284603f225c0f`
 - PEG experiment commit: `e0420dae062ee6a3f3bbd0240c6a36a1d1b560d6`
+- Follow-up experiment commit: `09af7ff8e2e04cbc1f427df3aa651c699f8f7065`
 - Node/GPU: `h200-2`, physical GPU 0
 - Manifest: `/data/home/frank/runtime/stereo-step-profile-input-v1/selected_8_manifest.jsonl`
 - Manifest SHA256: `134287c322698fc06bb22f611664dc7f2f5d7a9b3066debdb0014a92a770c267`
@@ -76,7 +77,7 @@ diverged, as expected from the gradient comparison.
 
 ## Follow-up experiments
 
-Status at creation: approved, implementation and measurements pending.
+Status: completed.
 
 The next experiments keep the PEG Conv2d path as their common baseline and
 change exactly one factor at a time:
@@ -86,6 +87,45 @@ change exactly one factor at a time:
 2. Enable DataLoader pinned memory and non-blocking H2D transfer.
 3. Cache the fixed GT LPIPS normalized VGG features only after verifying loss,
    prediction gradient, scaling, normalization, dtype, and autocast behavior.
+
+The new-SHA control and all three single-variable runs completed 40 updates.
+Every logged metric at every one of the 40 steps was exactly equal to control.
+
+| Run | Active median | Change from control | Peak allocated | Peak reserved |
+| --- | ---: | ---: | ---: | ---: |
+| PEG Conv2d control | 509.37 ms | baseline | 29.70 GiB | 30.98 GiB |
+| Preload eight samples | 288.93 ms | -43.3% | 29.69 GiB | 30.98 GiB |
+| Pinned CPU memory | 501.77 ms | -1.49% | 29.69 GiB | 30.98 GiB |
+| LPIPS GT cache, repeat | 482.82 ms | -5.21% | 29.50 GiB | 33.49 GiB |
+
+Preloading reduced the DataLoader region from 223.86 ms to 7.06 ms and removed
+the NPZ and NumPy work from the measured step. This is directly useful for the
+fixed eight-sample acceptance run, but it is not evidence that the complete
+3407-sample pilot should be held in memory.
+
+Pinned memory reduced H2D CUDA time from 14.88 ms to 3.91 ms. DataLoader CPU
+time increased from 223.86 ms to 238.50 ms because pinning itself has a cost,
+leaving only a 7.59 ms end-to-end median improvement. Lightning already used
+non-blocking GPU transfers; the experiment changed only DataLoader pinning.
+
+The isolated 96-frame LPIPS check produced exactly equal loss and prediction
+gradient. Baseline forward/backward took 118.17 ms and the cached form took
+89.06 ms. The normalized GT feature cache is FP32 on GPU and occupies
+3,070,230,528 bytes, or 2.859 GiB.
+
+In the full step, caching reduced LPIPS CUDA time from 64.16 ms to 34.33 ms and
+the backward CPU envelope from 142.47 ms to 114.63 ms. The first full cache run
+contained several approximately 0.97 s DataLoader outliers and had an active
+median of 481.25 ms. A repeat removed the unrelated CPU outliers and measured a
+stable 482.82 ms median. Reserved GPU memory increased by about 2.51 GiB.
+
+Follow-up outputs:
+
+- Control: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-control-v1`
+- Preload: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-preload-v1`
+- Pinned: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-pinned-v1`
+- LPIPS cache repeat: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-b8-40u-lpips-cache-v2`
+- LPIPS equivalence microbenchmark: `/data/home/frank/runtime/stereo-followup-profile-v1/09af7ff-h2002-gpu0-lpips-micro-v2/result.json`
 
 The apparent 60.6 ms `loss_breakdown` CPU region is not treated as logger cost:
 the measured CSV logger and save work totals only about 0.48 ms per step. It is
@@ -103,4 +143,9 @@ with unchanged parameters.
 PEG depthwise Conv3d backward was the original dominant bottleneck. The T=1
 Conv2d slice is the only successful PEG candidate so far. It remains an
 explicit profiling backend; ordinary training still defaults to Conv3d pending
-a separate decision to promote it.
+a separate decision to promote it. For the fixed eight-sample acceptance run,
+preloading is the largest measured follow-up improvement. LPIPS GT caching is a
+smaller but real improvement with a 2.859 GiB persistent cache cost. Pinned
+memory improves H2D substantially but yields only a small end-to-end gain once
+CPU pinning cost is included. All three remain explicit profiling switches
+pending a decision about production or acceptance-run defaults.
