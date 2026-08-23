@@ -147,6 +147,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("--pin_memory 1", launcher)
         self.assertIn("--persistent_workers 1", launcher)
         self.assertIn(
+            '--train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}"', launcher
+        )
+        self.assertIn(
             '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}"',
             launcher,
         )

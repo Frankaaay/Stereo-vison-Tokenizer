@@ -106,6 +106,8 @@ def validate_runtime_args(args):
         raise ValueError("--checkpoint_every_n_steps must be positive")
     if args.step_timing_warmup < 0:
         raise ValueError("--step_timing_warmup must be non-negative")
+    if args.train_epoch_repeats < 1:
+        raise ValueError("--train_epoch_repeats must be positive")
 
 
 def build_callbacks(args, has_validation):

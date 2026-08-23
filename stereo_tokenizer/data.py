@@ -21,6 +21,22 @@ def _profiled_collate(batch):
         return default_collate(batch)
 
 
+class RepeatedDataset(data.Dataset):
+    """Repeat a fixed dataset within one loader epoch."""
+
+    def __init__(self, dataset, repeats: int):
+        if repeats < 1:
+            raise ValueError("dataset repeats must be positive")
+        self.dataset = dataset
+        self.repeats = repeats
+
+    def __len__(self):
+        return len(self.dataset) * self.repeats
+
+    def __getitem__(self, index):
+        return self.dataset[index % len(self.dataset)]
+
+
 class StereoManifestDataset(data.Dataset):
     """Structured stereo samples backed by independent RGB and GT caches."""
 
@@ -265,7 +281,7 @@ class StereoDataModule(pl.LightningDataModule):
             if train:
                 raise ValueError("--stereo_train_manifest is required")
             return None
-        return StereoManifestDataset(
+        dataset = StereoManifestDataset(
             manifest,
             self.args.stereo_rgb_root,
             self.args.stereo_gt_root,
@@ -278,6 +294,10 @@ class StereoDataModule(pl.LightningDataModule):
                 self.args.stereo_lr_error_relative_threshold
             ),
         )
+        repeats = int(getattr(self.args, "train_epoch_repeats", 1))
+        if train and repeats != 1:
+            dataset = RepeatedDataset(dataset, repeats)
+        return dataset
 
     def _dataloader(self, train: bool):
         dataset = self._dataset(train)
@@ -332,6 +352,7 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument(
             "--persistent_workers", type=int, choices=(0, 1), default=1
         )
+        parser.add_argument("--train_epoch_repeats", type=int, default=1)
         parser.add_argument("--image_channels", type=int, default=3)
         parser.add_argument("--stereo_train_manifest", type=str, default=None)
         parser.add_argument("--stereo_val_manifest", type=str, default=None)

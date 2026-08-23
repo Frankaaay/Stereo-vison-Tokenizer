@@ -96,6 +96,7 @@ python3 train_stereo_vae.py \
   --num_workers "${NUM_WORKERS:-8}" \
   --pin_memory 1 \
   --persistent_workers 1 \
+  --train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}" \
   --grad_accumulates "${GRAD_ACCUMULATES}" \
   --grad_clip_val 1.0 \
   --lr "${LEARNING_RATE}" \
