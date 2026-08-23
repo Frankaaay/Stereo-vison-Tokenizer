@@ -304,3 +304,29 @@ eight-GPU run, the launcher needs an explicit checkpoint cadence suitable for
 an update-based overfit and persistent DataLoader workers should be measured,
 because a two-batch epoch otherwise restarts worker processes repeatedly.
 Those are proposed experiment changes, not yet implemented or launched.
+
+## Eight-GPU benchmark preparation and resource interruption
+
+The user approved the update-based checkpoint and persistent-worker changes.
+Commit `a576319b90829ffa728a07caf3e3619d830e7fa7` makes the formal training
+launcher explicitly use the measured F2 data path: T=1 Conv2d PEG, pinned
+memory, eight workers, and persistent workers. The default periodic checkpoint
+cadence is now 100 optimizer updates rather than every epoch. An opt-in timing
+callback records synchronized per-step intervals for the paired one-GPU and
+eight-GPU benchmark without changing model calculations. Twenty-three targeted
+H200 tests passed.
+
+The first one-GPU 128-sample benchmark attempt used H200-2 GPU 0, batch 8,
+BF16, 40 updates, and the revalidated manifest. It did not complete its first
+update. A different user's eight-GPU job started after the empty-GPU precheck
+and occupied about 129--133 GiB on every H200-2 GPU. The StereoVAE process used
+about 13.4 GiB when LPIPS requested another 384 MiB and failed because only
+167 MiB remained. This is an external resource collision, not an F2 memory
+regression. The partial output and first traceback are retained at
+`/data/home/frank/runtime/stereo-128-ddp-benchmark-v1/a576319-h2002-1gpu-b8-40u-v1/run.log`.
+
+A read-only fallback check found all eight H200-1 GPUs also occupied, and that
+node remains on clean branch `frank` at
+`45c423162727e50b52060b4fd8bb88f5849b8394`, not the authorized profiling
+branch. No process was killed, no alternate node was synchronized, and neither
+the paired benchmark nor the 128-sample overfit was started.
