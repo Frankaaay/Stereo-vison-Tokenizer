@@ -154,6 +154,13 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("DDPStrategy(", train)
         self.assertIn("static_graph=not args.gan_enabled", train)
         self.assertIn("find_unused_parameters=args.gan_enabled", train)
+        callbacks = (
+            ROOT / "stereo_tokenizer" / "modules" / "callbacks.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "self.check_frequency(pl_module.global_step, split)", callbacks
+        )
+        self.assertNotIn("self.check_frequency(batch_idx)", callbacks)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")

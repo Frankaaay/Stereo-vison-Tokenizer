@@ -44,9 +44,10 @@ class ImageLogger(Callback):
         super().__init__()
         self.batch_freq = batch_frequency
         self.max_images = max_images
-        self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
+        self.log_steps = {2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)}
         if not increase_log_steps:
-            self.log_steps = [self.batch_freq]
+            self.log_steps = {self.batch_freq}
+        self._last_logged_step = {}
         self.clamp = clamp
 
 
@@ -72,7 +73,7 @@ class ImageLogger(Callback):
             Image.fromarray(grid).save(path)
 
     def log_img(self, trainer, pl_module, batch, batch_idx, split="train"):
-        if (self.check_frequency(batch_idx) and  # batch_idx % self.batch_freq == 0
+        if (self.check_frequency(pl_module.global_step, split) and
                 hasattr(pl_module, "log_images") and
                 callable(pl_module.log_images) and
                 self.max_images > 0):
@@ -97,14 +98,17 @@ class ImageLogger(Callback):
             if is_train:
                 pl_module.train()
 
-    def check_frequency(self, batch_idx):
-        if (batch_idx % self.batch_freq) == 0 or (batch_idx in self.log_steps):
-            try:
-                self.log_steps.pop(0)
-            except IndexError:
-                pass
-            return True
-        return False
+    def check_frequency(self, global_step, split):
+        global_step = int(global_step)
+        if self._last_logged_step.get(split) == global_step:
+            return False
+        should_log = (
+            (global_step % self.batch_freq) == 0
+            or global_step in self.log_steps
+        )
+        if should_log:
+            self._last_logged_step[split] = global_step
+        return should_log
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         self.log_img(trainer, pl_module, batch, batch_idx, split="train")
@@ -122,9 +126,10 @@ class VideoLogger(Callback):
         super().__init__()
         self.batch_freq = batch_frequency
         self.max_videos = max_videos
-        self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
+        self.log_steps = {2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)}
         if not increase_log_steps:
-            self.log_steps = [self.batch_freq]
+            self.log_steps = {self.batch_freq}
+        self._last_logged_step = {}
         self.clamp = clamp
 
 
@@ -144,12 +149,10 @@ class VideoLogger(Callback):
             save_video_grid(grid, path)
 
     def log_vid(self, trainer, pl_module, batch, batch_idx, split="train"):
-        # print(batch_idx, self.batch_freq, self.check_frequency(batch_idx) and hasattr(pl_module, "log_videos") and callable(pl_module.log_videos) and self.max_videos > 0)
-        if (self.check_frequency(batch_idx) and  # batch_idx % self.batch_freq == 0
+        if (self.check_frequency(pl_module.global_step, split) and
                 hasattr(pl_module, "log_videos") and
                 callable(pl_module.log_videos) and
                 self.max_videos > 0):
-            # print(batch_idx, self.batch_freq,  self.check_frequency(batch_idx))
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
@@ -171,14 +174,17 @@ class VideoLogger(Callback):
             if is_train:
                 pl_module.train()
 
-    def check_frequency(self, batch_idx):
-        if (batch_idx % self.batch_freq) == 0 or (batch_idx in self.log_steps):
-            try:
-                self.log_steps.pop(0)
-            except IndexError:
-                pass
-            return True
-        return False
+    def check_frequency(self, global_step, split):
+        global_step = int(global_step)
+        if self._last_logged_step.get(split) == global_step:
+            return False
+        should_log = (
+            (global_step % self.batch_freq) == 0
+            or global_step in self.log_steps
+        )
+        if should_log:
+            self._last_logged_step[split] = global_step
+        return should_log
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         self.log_vid(trainer, pl_module, batch, batch_idx, split="train")
