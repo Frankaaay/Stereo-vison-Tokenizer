@@ -274,6 +274,8 @@ def validate_profile_args(args) -> None:
 
 def main() -> None:
     args = build_profile_parser().parse_args()
+    if args.num_workers == 0:
+        args.persistent_workers = 0
     validate_profile_args(args)
     output_dir = Path(args.default_root_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=False)

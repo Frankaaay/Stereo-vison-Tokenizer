@@ -1,13 +1,66 @@
 import argparse
+import json
 import os
+import statistics
+import time
+from pathlib import Path
 
 import pytorch_lightning as pl
+import torch
+from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
+
+
+class StepTimingCallback(Callback):
+    def __init__(self, output_path, warmup_updates):
+        self.output_path = Path(output_path)
+        self.warmup_updates = warmup_updates
+        self.last_batch_end = None
+        self.timings = []
+
+    def on_train_start(self, trainer, pl_module):
+        torch.cuda.synchronize()
+        self.last_batch_end = time.perf_counter()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        torch.cuda.synchronize()
+        now = time.perf_counter()
+        self.timings.append(
+            {
+                "step": int(trainer.global_step),
+                "interval_s": now - self.last_batch_end,
+            }
+        )
+        self.last_batch_end = now
+
+    def on_train_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+        stable = self.timings[self.warmup_updates :]
+        values = [row["interval_s"] for row in stable]
+        payload = {
+            "world_size": int(trainer.world_size),
+            "per_device_batch_size": int(pl_module.args.batch_size),
+            "warmup_updates": self.warmup_updates,
+            "timings": self.timings,
+            "stable": {
+                "count": len(values),
+                "mean_s": statistics.fmean(values),
+                "median_s": statistics.median(values),
+                "min_s": min(values),
+                "max_s": max(values),
+            },
+        }
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 def build_parser():
@@ -23,6 +76,9 @@ def build_parser():
     parser.add_argument("--num_nodes", type=int, default=1)
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
+    parser.add_argument("--checkpoint_every_n_steps", type=int, default=100)
+    parser.add_argument("--step_timing_output", type=str, default=None)
+    parser.add_argument("--step_timing_warmup", type=int, default=5)
     parser = StereoVAE.add_model_specific_args(parser)
     parser = StereoDataModule.add_data_specific_args(parser)
     return parser
@@ -45,12 +101,16 @@ def validate_runtime_args(args):
         raise ValueError("--num_nodes must be positive")
     if args.max_steps < 1:
         raise ValueError("--max_steps must be positive")
+    if args.checkpoint_every_n_steps < 1:
+        raise ValueError("--checkpoint_every_n_steps must be positive")
+    if args.step_timing_warmup < 0:
+        raise ValueError("--step_timing_warmup must be non-negative")
 
 
 def build_callbacks(args, has_validation):
     callbacks = [
         ModelCheckpoint(
-            every_n_epochs=1,
+            every_n_train_steps=args.checkpoint_every_n_steps,
             save_top_k=-1,
             save_last=True,
             filename="{epoch}-{step}",
@@ -68,6 +128,10 @@ def build_callbacks(args, has_validation):
     ]
     if not args.disable_wandb:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
+    if args.step_timing_output is not None:
+        callbacks.append(
+            StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
+        )
     if has_validation:
         callbacks.append(
             ModelCheckpoint(

@@ -292,11 +292,20 @@ class StereoDataModule(pl.LightningDataModule):
             )
         else:
             sampler = None
+        pin_memory = bool(getattr(self.args, "pin_memory", False))
+        if hasattr(self.args, "profile_pin_memory"):
+            pin_memory = bool(self.args.profile_pin_memory)
+        persistent_workers = bool(
+            getattr(self.args, "persistent_workers", False)
+        )
+        if persistent_workers and self.args.num_workers == 0:
+            raise ValueError("persistent_workers requires num_workers > 0")
         return data.DataLoader(
             dataset,
             batch_size=self.args.batch_size,
             num_workers=self.args.num_workers,
-            pin_memory=bool(getattr(self.args, "profile_pin_memory", 0)),
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
             collate_fn=_profiled_collate,
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,
@@ -319,6 +328,10 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--resolution", type=int, default=256)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=8)
+        parser.add_argument("--pin_memory", type=int, choices=(0, 1), default=1)
+        parser.add_argument(
+            "--persistent_workers", type=int, choices=(0, 1), default=1
+        )
         parser.add_argument("--image_channels", type=int, default=3)
         parser.add_argument("--stereo_train_manifest", type=str, default=None)
         parser.add_argument("--stereo_val_manifest", type=str, default=None)

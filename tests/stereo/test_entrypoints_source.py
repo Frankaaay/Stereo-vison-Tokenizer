@@ -144,6 +144,12 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("--peg_backend conv2d_t1_slice", launcher)
+        self.assertIn("--pin_memory 1", launcher)
+        self.assertIn("--persistent_workers 1", launcher)
+        self.assertIn(
+            '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}"',
+            launcher,
+        )
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")

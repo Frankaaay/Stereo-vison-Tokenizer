@@ -36,6 +36,14 @@ if [[ "${DISABLE_WANDB:-0}" == "1" ]]; then
   WANDB_ARGS+=(--disable_wandb)
 fi
 
+TIMING_ARGS=()
+if [[ -n "${STEP_TIMING_OUTPUT:-}" ]]; then
+  TIMING_ARGS+=(
+    --step_timing_output "${STEP_TIMING_OUTPUT}"
+    --step_timing_warmup "${STEP_TIMING_WARMUP:-5}"
+  )
+fi
+
 python3 train_stereo_vae.py \
   --stereo_train_manifest "${STEREO_TRAIN_MANIFEST}" \
   --stereo_rgb_root "${STEREO_RGB_ROOT}" \
@@ -86,6 +94,8 @@ python3 train_stereo_vae.py \
   --smooth_l1_beta 1.0 \
   --batch_size "${PER_DEVICE_BATCH_SIZE}" \
   --num_workers "${NUM_WORKERS:-8}" \
+  --pin_memory 1 \
+  --persistent_workers 1 \
   --grad_accumulates "${GRAD_ACCUMULATES}" \
   --grad_clip_val 1.0 \
   --lr "${LEARNING_RATE}" \
@@ -93,7 +103,9 @@ python3 train_stereo_vae.py \
   --warmup_steps "${WARMUP_STEPS}" \
   --kl_warmup_steps "${KL_WARMUP_STEPS}" \
   --max_steps "${MAX_STEPS}" \
+  --checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-100}" \
   --default_root_dir "${OUTPUT_ROOT}" \
   --devices "${GPU_COUNT}" \
   --bf16 \
-  "${WANDB_ARGS[@]}"
+  "${WANDB_ARGS[@]}" \
+  "${TIMING_ARGS[@]}"
