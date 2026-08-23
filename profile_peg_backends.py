@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+from itertools import product
 
 import torch
 
@@ -103,8 +104,9 @@ def main() -> None:
     device = torch.device("cuda")
     results = []
 
-    for dtype in (torch.bfloat16, torch.float32):
-      for batch in (192, 24):
+    for dtype, batch in product(
+        (torch.bfloat16, torch.float32), (192, 24)
+    ):
         shape = (batch, 1, 16, 16)
         source = torch.randn(batch, 256, 512, device=device, dtype=dtype)
         output_grad = torch.randn_like(source)
