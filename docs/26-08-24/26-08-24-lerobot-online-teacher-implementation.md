@@ -250,3 +250,30 @@ No item below has run yet. Each needs user approval before execution.
 - GPU work on an idle H200-2 was subsequently authorized. FoundationStereo
   forward remains gated on the manifest/decoder/selection checks and a fresh
   GPU ownership snapshot immediately before launch.
+- Resident-shard selection implementation commit
+  `cc128f13721cf2e0436e16ea60e2f81186eaf4be` was pushed and both H200 clones
+  were cleanly fast-forwarded to it. The directly relevant contract suite passed
+  9/9 independently on H200-1 and H200-2.
+- The replacement H200-2-resident 512-sample selection started at approximately
+  2026-08-24 14:00 +08:00 in tmux
+  `stereo-teacher-selection-h2-260824`, using `--maximum-shard-index 1551`.
+  Output/log paths are `teacher_selection_512_h200_2_resident_v1.json`,
+  `teacher_selection_visuals_h200_2_resident_v1`, and
+  `teacher_selection_h200_2_resident.log` under the H200-1 experiment root.
+  Startup health found the expected CPU process and no immediate traceback.
+  ETA is 15-20 minutes based on the first 512-sample contact-sheet run's actual
+  17-minute duration. GPU forward remains not started.
+- GPU preflight found that H200-2 lacked the complete FoundationStereo repo,
+  local DINOv2 tree, and checkpoint-adjacent `cfg.yaml`. The H200-1 source was
+  verified clean at `master@6e8806816b533e4d13ddbb95ffa907b797060a62`;
+  `cfg.yaml` SHA256 is
+  `a9d9dd2137c30edc2236194f62df14d222dad5fd3287a33c7540b543bb93853f`.
+  Rsync of these assets to H200-2 is in progress through the jump host.
+- FoundationStereo imports Open3D unconditionally from `Utils.py`, even though
+  online disparity inference does not use its point-cloud helpers. The project
+  loader now installs an import-only Open3D stub while importing FoundationStereo
+  and restores the original module immediately afterward. Any actual Open3D API
+  access raises an explicit runtime error. This avoids adding the unrelated
+  Dash/Jupyter/scikit-learn dependency closure to the training environment.
+  Local Python compilation, `git diff --check`, and 23/23 source tests pass;
+  server strict construction remains pending asset sync and code deployment.

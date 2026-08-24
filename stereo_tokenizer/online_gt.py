@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,16 @@ from .profiling import profile_region
 
 
 CACHE_SCHEMA = "stereo-online-foundation-gt-v1"
+
+
+class _UnavailableOpen3D(types.ModuleType):
+    """Import-only stub for FoundationStereo's unused point-cloud helpers."""
+
+    def __getattr__(self, name):
+        raise RuntimeError(
+            "Open3D is unavailable in online FoundationStereo inference; "
+            f"attempted to access open3d.{name}"
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -66,12 +77,18 @@ class FoundationStereoOnlineTeacher:
                 "online FoundationStereo requires timm and omegaconf"
             ) from error
 
+        original_open3d = sys.modules.get("open3d")
+        sys.modules["open3d"] = _UnavailableOpen3D("open3d")
         sys.path.insert(0, str(self.repo))
         try:
             from core.foundation_stereo import FoundationStereo
         finally:
             if sys.path[0] == str(self.repo):
                 sys.path.pop(0)
+            if original_open3d is None:
+                sys.modules.pop("open3d", None)
+            else:
+                sys.modules["open3d"] = original_open3d
 
         config = OmegaConf.load(self.checkpoint.parent / "cfg.yaml")
         if "vit_size" not in config:

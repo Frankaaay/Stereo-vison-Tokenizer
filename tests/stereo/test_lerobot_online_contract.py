@@ -14,7 +14,10 @@ from stereo_tokenizer.lerobot_data import (
     fixed_episode_subset_indices,
     window_count,
 )
-from stereo_tokenizer.online_gt import FoundationStereoOnlineTeacher
+from stereo_tokenizer.online_gt import (
+    FoundationStereoOnlineTeacher,
+    _UnavailableOpen3D,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +80,11 @@ def record(episode_id, shard_id, length, split, audit_sha):
 
 
 class LeRobotOnlineContractTest(unittest.TestCase):
+    def test_open3d_inference_stub_fails_only_if_point_cloud_api_is_used(self):
+        module = _UnavailableOpen3D("open3d")
+        with self.assertRaisesRegex(RuntimeError, "open3d.geometry"):
+            _ = module.geometry
+
     def test_teacher_selection_can_be_limited_to_resident_shards(self):
         records = [
             {
