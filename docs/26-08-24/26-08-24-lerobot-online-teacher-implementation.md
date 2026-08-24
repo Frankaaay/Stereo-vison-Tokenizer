@@ -423,3 +423,28 @@ Manifest regeneration, rectification audit/remap, another decoder audit, strict
 FoundationStereo load, another 32/16/12 forward comparison, H200-2-local full
 manifest generation, and offline GT-cache generation are not required before
 this H200-1 full-data launch under the accepted scope.
+
+## Eight-H200 online-teacher batch sweep (in progress)
+
+- Status: in progress from approximately 2026-08-24 15:25 +08:00.
+- Node/session: `h200-1`, tmux `stereo-online-bs-sweep-260824-retry1`.
+- Code: clean `frank-profiling@860848bb8e47268daf2ae2c5d51d90be1f5710e0`.
+- Output: `/data/home/frank/experiments/stereo_online_fs_8gpu_bs_sweep_20260824_retry1`.
+- Fixed contract: eight GPUs, BF16, online FoundationStereo with 32 valid
+  iterations, pair microbatch 48, online cache disabled, GA=1, WandB/media
+  disabled, and the previously accepted model/loss/optimizer/data settings.
+- Arms: BS4/global32 for 35 updates, BS8/global64 for 20 updates, and
+  BS12/global96 for 15 updates. Each arm discards five warmup updates and then
+  measures 960 global samples.
+- Artifacts per arm: `resolved_env.txt`, `run.log`, `gpu_telemetry.csv`,
+  `step_timings.json`, status timestamps, and the final checkpoint when the arm
+  completes.
+- Startup health: the tmux and all eight DDP ranks exist, telemetry is being
+  written, and the first log snapshot contains no traceback or OOM while model
+  initialization is in progress.
+- Initial ETA at 15:26 +08:00: 10-25 minutes for all three benchmark arms,
+  followed by approximately 3-5 minutes for artifact/checkpoint validation and
+  result aggregation. This is an initial range because no completed optimizer
+  update was available at the startup snapshot.
+- Stop boundary: report the fastest stable batch size before any full-data long
+  training; do not launch that training from this sweep.
