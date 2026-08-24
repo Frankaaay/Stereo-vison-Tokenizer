@@ -471,3 +471,22 @@ this H200-1 full-data launch under the accepted scope.
 - Initial ETA at 15:40 +08:00: approximately 6-12 minutes for the BS32 body,
   then 2-3 minutes for checkpoint and artifact validation. This is extrapolated
   from the completed BS12 timing because no stable BS32 update existed yet.
+
+### BS32 completed result
+
+- The corrected BS32 run completed successfully from 15:49:19 to 15:57:07
+  +08:00. The tmux and matching workers exited normally after 15 updates.
+- Ten post-warmup updates averaged 21.5944 seconds (median 21.4980, range
+  21.4884-22.4516), giving 11.8549 global samples/s at global batch 256.
+- Peak callback memory across ranks was 117.73 GiB allocated and 123.96 GiB
+  reserved per GPU. One-second `nvidia-smi` telemetry observed a 125.62 GiB
+  maximum used-memory value and 100% maximum utilization.
+- The run wrote a 730,737,523-byte `checkpoints/last.ckpt`. Training stopped at
+  the configured 15 updates, validation reported `val/total_loss=1.080`, and no
+  OOM or traceback occurred.
+- BS32 is 1.32% faster than the exact BS12 result (11.7003 samples/s) and is the
+  fastest tested setting so far. The small gain confirms that online-teacher
+  end-to-end throughput is already close to its batch-scaling plateau.
+- A later status snapshot found a new unrelated eight-GPU workload using about
+  7.1 GiB per H200. BS28/BS24 were not started and no existing process was
+  modified. Those arms remain pending an idle target-host preflight.
