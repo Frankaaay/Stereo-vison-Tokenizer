@@ -102,3 +102,15 @@
   01:35--01:50 完成。依据是 pairmb48 单臂实测约 15 分钟，其中 step 12 trace
   export pause 约 608 秒；正常吞吐统计必须排除 step 12，但 FS active region 仍从
   active trace 提取。
+- pairmb288 在首个 update 的 FoundationStereo feature upsample 失败。模型在特征
+  提取前拼接左右图，288 pairs 变成 batch 576；NHWC bilinear upsample 输出 shape
+  `[576,256,192,192]`，共 5,435,817,984 个元素，超过该 CUDA kernel 的有符号
+  32-bit `INT_MAX=2,147,483,647` 元素索引上限。首因是 RuntimeError，不是 OOM；
+  distributed teardown 后 launcher 显示 exit 137，0/15 updates 完成。
+- 原队列因失败返回瞬间仍检测到本任务 rank 而安全停止。清理完成后曾启动 144，
+  随后用户要求直接优先运行 96；144 tmux 已停止，输出标记为
+  `cancelled_by_user_before_result`，不能作为失败或性能结论。
+- pairmb96 于 00:51 +08:00 单独启动，tmux `stereo-pairmb96-260825`。启动健康
+  检查确认主进程和八个 DDP rank 存在、进入 BF16/DDP 初始化，且无 INT_MAX、
+  OOM 或 traceback。理论 upsample 输出 `[192,256,192,192]`，共
+  1,811,939,328 个元素，低于 INT_MAX；仍需以实际 15-update 结果判定稳定性。
