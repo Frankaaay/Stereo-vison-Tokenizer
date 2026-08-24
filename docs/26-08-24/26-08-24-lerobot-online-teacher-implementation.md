@@ -448,3 +448,26 @@ this H200-1 full-data launch under the accepted scope.
   update was available at the startup snapshot.
 - Stop boundary: report the fastest stable batch size before any full-data long
   training; do not launch that training from this sweep.
+
+## BS24-BS32 extension (BS32 in progress)
+
+- The user extended the approved sweep beyond BS12 and requested BS32 first,
+  followed by lower candidates in the BS24-BS32 range as needed to identify the
+  fastest stable setting. GA comparison remains excluded.
+- Prior sweep validation reproduced successful BS4/BS8/BS12 timing artifacts;
+  H200-1 was fully idle immediately before this launch.
+- The first BS32 operational attempt failed before Python/CUDA because the
+  external sweep script omitted the required `OUTPUT_ROOT` export. Its empty
+  telemetry and first causal error are preserved under `bs32`; no GPU work ran.
+- The corrected attempt started at approximately 2026-08-24 15:39 +08:00 in
+  tmux `stereo-online-bs32-retry1-260824`, using output
+  `/data/home/frank/experiments/stereo_online_fs_8gpu_bs24_32_sweep_20260824_v1/bs32_retry1`.
+- Resolved contract: eight GPUs, BS32/global256, GA=1, 15 updates with five
+  warmup and ten measured updates, BF16, FoundationStereo 32 iterations and
+  pair microbatch 48, cache disabled, and otherwise unchanged data/model/loss/
+  optimizer settings at clean code SHA `860848b`.
+- Startup health: tmux and all eight DDP ranks exist, telemetry is being written,
+  and the first log snapshot has no traceback or OOM during initialization.
+- Initial ETA at 15:40 +08:00: approximately 6-12 minutes for the BS32 body,
+  then 2-3 minutes for checkpoint and artifact validation. This is extrapolated
+  from the completed BS12 timing because no stable BS32 update existed yet.
