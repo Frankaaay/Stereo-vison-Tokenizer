@@ -361,3 +361,11 @@ No item below has run yet. Each needs user approval before execution.
   throughput/quality aggregation without attempting visual exports. The normal
   reviewed-selection path remains unchanged. CPU-only py_compile and all 11
   entrypoint source regressions pass before relaunch.
+- The fixed comparison was relaunched at approximately 2026-08-24 14:52 +08:00
+  from clean commit `1a95ee4` in tmux
+  `fs-teacher-408-retry1-8gpu-260824`. To preserve the failed launch evidence it
+  uses new output/log paths ending in
+  `foundation_teacher_compare_h200_2_verified_408_20260824_retry1`. All data,
+  model, 408-sample selection, 32/16/12 iteration order, batch sizes, and eight
+  GPU ranks are unchanged. Initial ETA remains 5-15 minutes for the comparison
+  plus about 2 minutes for result aggregation and artifact validation.
