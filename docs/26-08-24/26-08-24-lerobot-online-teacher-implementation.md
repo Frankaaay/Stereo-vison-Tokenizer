@@ -336,3 +336,19 @@ No item below has run yet. Each needs user approval before execution.
   preserving `review_status=pending_quantitative_only`; it does not fabricate
   visual coverage approval. This run is for throughput and quantitative
   32/16/12 comparison only.
+- The approved 408-sample eight-GPU comparison started on H200-2 at
+  approximately 2026-08-24 14:47 +08:00 from clean commit `a7214d7`, in tmux
+  `fs-teacher-408-8gpu-260824`. It uses 51 verified-decodable samples per rank,
+  bidirectional LR consistency, valid iterations 32/16/12, sample batch size 8,
+  and pair microbatch 48. Output and log are
+  `/data/home/frank/experiments/foundation_teacher_compare_h200_2_verified_408_20260824_v1`
+  and the same path with `.log`. The initial `torchrun --standalone` attempt
+  spawned no workers because local rendezvous hostname resolution stalled; its
+  own tmux was stopped before CUDA initialization or output creation, then the
+  same experiment was restarted with explicit single-node rendezvous at
+  `127.0.0.1:29651`. Startup health passed: all eight workers exist, ranks map
+  to GPU0-7, each GPU holds about 1.5 GiB during model initialization, and no
+  traceback is present. Initial ETA at 14:48 +08:00 is 5-15 minutes for all
+  three configurations, based on the 3.09-second unbatched single-sample smoke
+  and the expected gain from eight GPUs plus pair batching; result aggregation
+  and artifact validation should finish within roughly 2 additional minutes.
