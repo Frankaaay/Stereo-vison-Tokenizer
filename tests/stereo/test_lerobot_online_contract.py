@@ -22,6 +22,12 @@ BUILDER_PATH = ROOT / "scripts" / "data" / "build_lerobot_stereo_manifest.py"
 SPEC = importlib.util.spec_from_file_location("lerobot_manifest_builder", BUILDER_PATH)
 BUILDER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BUILDER)
+SELECTION_PATH = ROOT / "scripts" / "data" / "build_lerobot_teacher_selection.py"
+SELECTION_SPEC = importlib.util.spec_from_file_location(
+    "lerobot_teacher_selection", SELECTION_PATH
+)
+SELECTION = importlib.util.module_from_spec(SELECTION_SPEC)
+SELECTION_SPEC.loader.exec_module(SELECTION)
 
 
 def camera(fx=200.0, tx=0.0):
@@ -71,6 +77,25 @@ def record(episode_id, shard_id, length, split, audit_sha):
 
 
 class LeRobotOnlineContractTest(unittest.TestCase):
+    def test_teacher_selection_can_be_limited_to_resident_shards(self):
+        records = [
+            {
+                "episode_id": f"episode-{index}",
+                "shard_id": f"shard_{index:04d}",
+                "first_dataset_index": index * 10,
+                "window_count": 10,
+            }
+            for index in range(4)
+        ]
+        filtered = SELECTION.filter_by_maximum_shard_index(records, 1)
+        self.assertEqual(
+            [record["shard_id"] for record in filtered],
+            ["shard_0000", "shard_0001"],
+        )
+        self.assertEqual(filtered[1]["first_dataset_index"], 10)
+        with self.assertRaisesRegex(ValueError, "maximum shard index"):
+            SELECTION.filter_by_maximum_shard_index(records, -1)
+
     def test_failed_audit_requires_explicit_provisional_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

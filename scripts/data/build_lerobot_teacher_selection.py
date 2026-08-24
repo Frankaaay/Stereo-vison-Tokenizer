@@ -60,6 +60,25 @@ def _read_train_records(path: Path):
     return records
 
 
+def filter_by_maximum_shard_index(records, maximum_shard_index):
+    if maximum_shard_index is None:
+        return records
+    maximum_shard_index = int(maximum_shard_index)
+    if maximum_shard_index < 0:
+        raise ValueError("maximum shard index must be non-negative")
+    filtered = []
+    for record in records:
+        shard_id = record.get("shard_id", "")
+        prefix, separator, suffix = shard_id.partition("_")
+        if prefix != "shard" or separator != "_" or not suffix.isdigit():
+            raise ValueError(f"invalid shard ID: {shard_id}")
+        if int(suffix) <= maximum_shard_index:
+            filtered.append(record)
+    if not filtered:
+        raise ValueError("shard filter removed every train episode")
+    return filtered
+
+
 def select(records, count, seed):
     by_task = defaultdict(list)
     for record in records:
@@ -173,6 +192,7 @@ def build_parser():
     parser.add_argument("--rectification-audit-sha256", required=True)
     parser.add_argument("--count", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--maximum-shard-index", type=int)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--visual-root", type=Path, required=True)
     return parser
@@ -190,7 +210,11 @@ def main():
         raise FileExistsError(f"refusing to overwrite {output}")
     if visual_root.exists():
         raise FileExistsError(f"refusing to overwrite {visual_root}")
-    samples = select(_read_train_records(manifest), args.count, args.seed)
+    train_records = _read_train_records(manifest)
+    eligible_records = filter_by_maximum_shard_index(
+        train_records, args.maximum_shard_index
+    )
+    samples = select(eligible_records, args.count, args.seed)
     dataset = LeRobotStereoDataset(
         manifest,
         dataset_root,
@@ -208,6 +232,12 @@ def main():
         "seed": args.seed,
         "sample_count": len(samples),
         "selection_granularity": "one_sample_per_episode",
+        "selection_scope": {
+            "source": "episode_manifest_train_split",
+            "maximum_shard_index": args.maximum_shard_index,
+            "eligible_episode_count": len(eligible_records),
+            "full_train_episode_count": len(train_records),
+        },
         "all_samples_cover_views": ["head", "lefthand", "righthand"],
         "required_visual_tags": list(REQUIRED_VISUAL_TAGS),
         "coverage_counts": {tag: 0 for tag in REQUIRED_VISUAL_TAGS},

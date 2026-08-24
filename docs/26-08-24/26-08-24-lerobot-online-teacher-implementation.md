@@ -189,8 +189,64 @@ No item below has run yet. Each needs user approval before execution.
   pass.
 - Local validation for the provisional path: Python compilation passed,
   `git diff --check` passed, and the CPU-hidden entrypoint/source-boundary suite
-  passed 23/23. Manifest generation, real-data decoder smoke, and 512-sample
-  selection are next and have not yet started.
+  passed 23/23. Commit `e36756a573aaf19a3b676e2776c8aece645d29e1`
+  was pushed and both H200 clones were cleanly fast-forwarded to that exact SHA.
+  H200-1 passed all 31 targeted tests. H200-2 passed the eight directly relevant
+  online-contract tests; its combined 31-test run had one unrelated failure
+  because 28 ignored legacy `OmniTokenizer/__pycache__/*.pyc` files remain. They
+  were not deleted.
+- H200-1-only provisional manifest generation ran from approximately 13:27 to
+  13:37 +08:00 in tmux `stereo-lerobot-manifest-260824`. Inputs were 1983
+  `shard_*` directories and 63,453 source-manifest rows. Outputs are
+  `h200_1_provisional_manifest_v1.jsonl`,
+  `h200_1_provisional_manifest_v1_summary.json`, and `manifest_build.log` under
+  `/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1`.
+  It contains 62,626 unique episodes and 1,384,393 four-frame samples; split
+  episode counts are 56,363/3,131/3,132 and sample counts are
+  1,246,294/68,932/69,167 for train/val/test. Independent streaming validation
+  reproduced all counts and SHA256
+  `31457d9b1834953024d7e7ff59f5a21b74500d3ece4c19c755a14aff3dccaf6d`.
+  Contract SHA256 is
+  `6144b1b0c4690ad374491209f5f20c306184703986119e521177fd3642ed77f3`.
+- The real six-stream decoder/data-contract smoke passed on two consecutive
+  samples. It verified six MP4 streams per sample, offsets `[0,3,6,9]`, stride
+  12, output shape `[3,2,3,4,256,256]`, letterbox padding, finite scaled `fx`,
+  and positive unscaled baselines of 54.997-55.270 mm. CPU decode measured
+  0.137 seconds per four-frame sample. Result:
+  `decoder_contract_smoke_v1.json` in the same experiment root.
+- The first fixed 512-sample selection/contact-sheet job ran from approximately
+  13:36 to 13:53 +08:00 in tmux `stereo-teacher-selection-260824`; log is
+  `teacher_selection.log`. It produced `teacher_selection_512_v1.json` and 32
+  PNG sheets under `teacher_selection_visuals_v1`. Its review status remains
+  pending because the visual coverage tags have not been inspected.
+- The data team subsequently confirmed that the encoded stereo videos are
+  already rectified. This supersedes the provisional uncertainty: production
+  preprocessing must use `verified_pre_rectified` and must not apply OpenCV
+  calibration remap. The failed ORB audit remains useful only as evidence that
+  its Lowe-ratio-only P95 gate was not robust enough; it is no longer a data
+  readiness blocker.
+- Selection generation completed with 512 unique episodes and 32 contact
+  sheets, but its review remains pending and all seven required visual coverage
+  counts are zero. The eight-GPU comparison correctly refuses this state.
+- Latest GPU readiness snapshot: H200-2 has eight idle H200 GPUs and no compute
+  processes, while all H200-1 GPUs are occupied by `maxliu` processes. H200-2
+  has only shards 0-1551; 68 of the current H200-1 selection's 512 samples come
+  from shards 1552-1978 and are therefore unavailable there.
+  Formal GPU comparison is blocked until the sampling scope is explicitly
+  changed to an H200-2-resident subset (or the missing data is synchronized),
+  the exact checkpoint is synchronized and hash-verified, and visual coverage
+  review is approved.
+- The user approved restarting selection against the H200-2-resident scope.
+  The new frozen scope is H1-manifest train episodes in shards 0-1551, with the
+  same seed, task balancing, and one-sample-per-episode rule; it must be labeled
+  as an H200-2-resident subset. A `--maximum-shard-index` selection filter and
+  its unit test were added locally; Python compilation, `git diff --check`, and
+  23/23 source tests pass.
+- Checkpoint rsync from the H200-1 node-local artifact to the identical H200-2
+  path completed through the jump host: 3,298,527,334 bytes in approximately
+  2 minutes 56 seconds. H200-2 local SHA256 is
+  `60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`,
+  exactly matching the frozen reference. No GPU process has been started.
 - GPU work on an idle H200-2 was subsequently authorized. FoundationStereo
   forward remains gated on the manifest/decoder/selection checks and a fresh
   GPU ownership snapshot immediately before launch.
