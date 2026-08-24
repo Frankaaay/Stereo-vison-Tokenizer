@@ -42,30 +42,33 @@
 - `git diff --check`：通过；仅有 Windows LF/CRLF 提示。
 - Windows 当前 Python 缺少 Torch，因此 tensor forward/backward、PEG 动态路径和 online teacher 动态合同未在本地执行。
 
-## 尚未执行的 H200 Gate
+## H200 合并后验证与 BS32 profiling（进行中）
 
-1. CPU/CUDA 动态测试：single/four shape、梯度、temporal attention 顺序、PEG T=1 fail-closed、online T=4 GT 与 single source index 对齐、checkpoint strict resume。
-2. 单 GPU 四个 optimizer updates：`four -> single -> four -> single`，覆盖 online FS、VAE、finite losses、显存和 checkpoint。
-
-## H200-2 BS24 在线链路测试（准备中）
-
-- 用户已授权将第三分支 push 并在 H200-2 上进行 GPU 测试；目标为每卡
-  BS24、八卡 global batch 192、BF16、online FoundationStereo 32 iterations、
-  pair microbatch 48、cache off、GA=1。
-- 目标分支已 push 为 `merged-fs-vae-single-four-profiling`，同步时精确 SHA 为
-  `027c253f3114f95139905e7263a7dab1bff1c497`；H200-2 已切换到该分支并保持 clean。
-- H200-2 同时存在 `melody` 的 NGADv1pp eval：GPU 1/3/6 各占约 14.3 GiB，
-  GPU4 约 5.7 GiB，且部分卡有约 27--32% 计算利用率。用户明确允许共卡测试；
-  因此本次 wall time 必须标记为共享 GPU 条件，不能视为独占卡吞吐基准。
+- 第三分支已 push 为 `merged-fs-vae-single-four-profiling`。H200-1 的本轮
+  精确运行 SHA 为 `e93a7aaf8b4dad7b3b54c03e7f4f4e56656fe1b8`，同步后
+  branch/upstream/HEAD 一致且 worktree clean。
 - 主训练入口原先只输出完整 step timing，细粒度 regions 仅在旧 cached-GT
   单卡 profiler 中启用。为准确测量 online FS -> VAE 串行链路，新增默认关闭的
   rank0-only PyTorch profiler 参数；它不改变默认训练数学，运行时输出 data/H2D、
   FoundationStereo、encoder/single-four temporal/decoder、loss、backward、Adam、
   operator 和 Chrome trace。八个 rank 的完整 step timing 仍由原 callback 输出。
-- 计划先运行定向 Torch/合同测试与四步交替 smoke，再运行 15 updates 的八卡
-  BS24 profiling（5 wait、2 warmup、4 active，并保留 post-profile updates）。结果、
-  首个异常、显存、吞吐和瓶颈将在本节完成后补记。
-3. 八 GPU 动态 DDP smoke：确认 changing unused-parameter set 不报 reducer/NCCL 错误，各 rank mode counters 一致。
-4. 合并后重新测量 BS 和 single/four 分模式吞吐；不得把旧模型结果直接升级为正式 recipe。
-
-上述 H200 测试、服务器同步、commit push 和正式训练均需按授权边界单独执行。
+- 本地验证：24/24 source/entrypoint tests、compileall 和 diff-check 通过。H200-1
+  使用 Python 3.12、Torch 2.7.1+cu128、Lightning 2.5.6，在 CUDA hidden 下运行
+  53 个 encoder、decoder、loss、StereoVAE 和 entrypoint 定向测试，全部通过。
+- H200-1 运行前八张 H200 均为零 compute process、零显存占用。FoundationStereo
+  repo 为 clean `6e880681`；checkpoint SHA256 为
+  `60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`。
+  使用 H200-1 full manifest，共 1,384,393 个 four-frame samples。
+- 进行中的端到端测试：tmux `stereo-merged-bs32-profile-260824`，输出
+  `/data/home/frank/experiments/stereo_merged_fs_vae_bs32_profile_20260824_v1`。
+  配置为 8 GPU、每卡 BS32/global256、GA=1、BF16、15 optimizer updates、
+  single source index 0、online FS 32 iterations、pair microbatch 48、cache off。
+  Step timing 丢弃前五个 warmup；rank0 profiler 为 wait 5、warmup 2、active 4。
+- 启动健康检查已通过：tmux 与八个 DDP rank 均存在，日志进入 BF16/DDP 初始化，
+  没有 traceback 或 OOM。检查时尚未产生第一个 optimizer update。初始 ETA 为
+  8--15 分钟完成主体，另需约 2--3 分钟验证 timing、trace、显存、loss、checkpoint
+  和 strict resume；依据是旧模型独占 H200 的 BS32 约 21.5 秒/step，另计 profiler
+  active steps 的额外开销。
+- 完成后必须核对：`four -> single` 交替与 counters、finite loss、动态 DDP、
+  single/four 分模式 step time、各 named region、peak allocated/reserved、checkpoint
+  写入和 strict resume。不得把旧模型的 BS32 吞吐直接当作本次结果。
