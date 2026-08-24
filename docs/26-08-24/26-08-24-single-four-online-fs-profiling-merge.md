@@ -59,16 +59,22 @@
   repo 为 clean `6e880681`；checkpoint SHA256 为
   `60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`。
   使用 H200-1 full manifest，共 1,384,393 个 four-frame samples。
-- 进行中的端到端测试：tmux `stereo-merged-bs32-profile-260824`，输出
+- BS32 输出为
   `/data/home/frank/experiments/stereo_merged_fs_vae_bs32_profile_20260824_v1`。
-  配置为 8 GPU、每卡 BS32/global256、GA=1、BF16、15 optimizer updates、
-  single source index 0、online FS 32 iterations、pair microbatch 48、cache off。
-  Step timing 丢弃前五个 warmup；rank0 profiler 为 wait 5、warmup 2、active 4。
-- 启动健康检查已通过：tmux 与八个 DDP rank 均存在，日志进入 BF16/DDP 初始化，
-  没有 traceback 或 OOM。检查时尚未产生第一个 optimizer update。初始 ETA 为
-  8--15 分钟完成主体，另需约 2--3 分钟验证 timing、trace、显存、loss、checkpoint
-  和 strict resume；依据是旧模型独占 H200 的 BS32 约 21.5 秒/step，另计 profiler
-  active steps 的额外开销。
+  它在第一个 optimizer update（初始 `four_frame`）的 LPIPS convolution 失败；八个
+  rank 均 OOM，每卡 PyTorch 已分配约 136.18 GiB、仅余约 0.5--0.7 GiB，却仍需
+  申请 3.00 GiB。profiler 当时仍处于 wait 阶段，因此不是 active trace 的额外显存；
+  没有完成任何 update，退出码为 1，所有 rank 已退出且显存恢复为零。
+- 用户随后要求降到 BS24。新测试在 tmux `stereo-merged-bs24-profile-260824`
+  进行中，输出
+  `/data/home/frank/experiments/stereo_merged_fs_vae_bs24_profile_20260824_v1`。
+  除每卡 BS24/global192 外，其余配置保持不变：8 GPU、GA=1、BF16、15 updates、
+  single source index 0、online FS 32 iterations、pair microbatch 48、cache off；
+  timing 丢弃前五步，rank0 profiler 为 wait 5、warmup 2、active 4。
+- BS24 启动健康检查通过：tmux、主进程和八个 DDP rank 均存在，日志进入 BF16/DDP
+  初始化，没有 traceback 或 OOM；检查时尚未产生第一个 update。初始 ETA 为
+  7--12 分钟完成主体，另需约 2--3 分钟验证 timing、trace、显存、loss、checkpoint
+  和 strict resume。
 - 完成后必须核对：`four -> single` 交替与 counters、finite loss、动态 DDP、
   single/four 分模式 step time、各 named region、peak allocated/reserved、checkpoint
   写入和 strict resume。不得把旧模型的 BS32 吞吐直接当作本次结果。
