@@ -283,3 +283,56 @@ No item below has run yet. Each needs user approval before execution.
   FoundationStereo training payload contains NumPy scalar metadata. The loader
   now explicitly uses `weights_only=False` only after the frozen checkpoint
   SHA256 has matched, and still applies `load_state_dict(strict=True)`.
+- Compatibility commit `e2b0c2d621b35ec5e3515627ddd31c08c0dca360`
+  was pushed and both H200 clones were cleanly fast-forwarded to it. H200-2
+  strict CPU construction then passed completely: FoundationStereo, offline
+  DINOv2, checkpoint payload, and `load_state_dict(strict=True)` all succeeded
+  with zero visible CUDA devices and an uninitialized CUDA runtime. xFormers is
+  absent, so DINOv2 reports its standard attention/MLP fallback.
+- A single-GPU functional smoke on H200-2 GPU0 passed for one four-frame sample,
+  bidirectional inference, 16 iterations, and pair microbatch 1. Forward-only
+  time was 3.090 seconds/sample, finite disparity ratio 1.0, LR-valid ratio
+  0.6684, and peak allocated/reserved memory 1.875/2.047 GB. Dataset decode was
+  0.163 seconds. Result:
+  `/data/home/frank/experiments/stereo_lerobot_gpu_20260824_h2/teacher_single_sample_smoke_v1.json`.
+  This is a functionality gate, not the formal throughput result.
+- The H200-2-resident selection completed with 512 unique episodes/indices,
+  eligible shard range 7-1551, 44,006 eligible train episodes, and manifest SHA
+  `31457d9b1834953024d7e7ff59f5a21b74500d3ece4c19c755a14aff3dccaf6d`.
+  Selection SHA is
+  `96e2461d98c3952d703e5680a94e74277f2033eb33aa7f63a70fccd801d9b0a0`.
+- The full H200-2 512-sample/six-stream CPU decode audit started at
+  approximately 2026-08-24 14:21 +08:00 in tmux
+  `stereo-h2-decode-audit-260824`, with retry log
+  `h200_2_resident_decode_audit_retry1.log`. The first launch did not decode any
+  sample because the selection JSON had not landed; that failed log is retained.
+  The explicit rsync retry transferred 155,300 bytes and the second launch is
+  healthy at about 258% CPU, 1.28 GB RSS, zero GPU memory, and no immediate
+  traceback. ETA is 15-25 minutes based on the two contact-sheet decode runs.
+- That H1-manifest-on-H2 audit completed in 64.9 seconds and failed: 413/512
+  samples decoded, 90 lacked a decodable frame near the requested timestamp,
+  and nine referenced a missing MP4. Failures covered 87 shards from
+  `shard_0045` through `shard_1544` and first surfaced on `head_left` because
+  dataset decoding stops at the first stream error. This proves that shard-name
+  overlap does not make the two node-local datasets interchangeable.
+- Per user direction, H1 manifest reuse was abandoned. Direct H200-2-local
+  manifest generation started at approximately 2026-08-24 14:34 +08:00 in tmux
+  `stereo-h2-local-manifest-260824`, using H200-2's own 1552 shards, 49,564
+  source rows, failures, Parquet metadata, videos, source calibration, and
+  confirmed-pre-rectified mode. Outputs/log are `h200_2_local_manifest_v1.jsonl`,
+  `h200_2_local_manifest_v1_summary.json`, and
+  `h200_2_local_manifest_build.log` under the H200-2 experiment root. Startup
+  health was clean at about 165% CPU, 1.13 GB RSS, and zero GPU memory. ETA is
+  7-12 minutes, scaled from the H200-1 1,983-shard manifest's actual duration.
+  H200-2-local selection will follow immediately; no redundant full decode audit
+  will be run because contact-sheet generation itself decodes all 512 samples.
+- The user then prioritized immediate quantitative speed measurement over
+  waiting for the H200-2-local full manifest. The local-manifest tmux was stopped
+  to avoid CPU/I/O contention; no GPU work was running. From the prior decode
+  audit's 413 verified-complete samples, the first 408 were frozen so eight ranks
+  receive exactly 51 samples each. Selection SHA256 is
+  `e7165387e9c40583c9c00e3f27eb7d05d3ee96e0f820347dfee8614f16736306`.
+  The comparison accepts an explicit `--allow-pending-visual-review` mode while
+  preserving `review_status=pending_quantitative_only`; it does not fabricate
+  visual coverage approval. This run is for throughput and quantitative
+  32/16/12 comparison only.

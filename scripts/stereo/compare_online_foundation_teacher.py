@@ -50,14 +50,20 @@ def _distributed_device():
     return torch.device("cuda", local_rank), world_size, local_rank
 
 
-def _read_selection(path: Path, dataset: LeRobotStereoDataset, expected_count: int):
+def _read_selection(
+    path: Path,
+    dataset: LeRobotStereoDataset,
+    expected_count: int,
+    *,
+    require_visual_review: bool = True,
+):
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != "lerobot-teacher-selection-v1":
         raise ValueError("unsupported teacher selection schema")
-    if payload.get("review_status") != "approved":
+    if require_visual_review and payload.get("review_status") != "approved":
         raise ValueError("teacher selection requires approved visual review")
     required_tags = set(payload.get("required_visual_tags", []))
-    if required_tags != EXPECTED_VISUAL_TAGS:
+    if require_visual_review and required_tags != EXPECTED_VISUAL_TAGS:
         raise ValueError("teacher selection required visual tags changed")
     coverage = payload.get("coverage_counts", {})
     entries = payload.get("samples", [])
@@ -85,14 +91,14 @@ def _read_selection(path: Path, dataset: LeRobotStereoDataset, expected_count: i
     declared_coverage = {
         tag: int(coverage.get(tag, 0)) for tag in sorted(required_tags)
     }
-    if declared_coverage != {
+    if require_visual_review and declared_coverage != {
         tag: actual_coverage[tag] for tag in sorted(required_tags)
     }:
         raise ValueError("teacher selection coverage_counts do not match samples")
     missing_coverage = [
         tag for tag in sorted(required_tags) if actual_coverage[tag] < 1
     ]
-    if missing_coverage:
+    if require_visual_review and missing_coverage:
         raise ValueError(
             "teacher selection lacks required visual coverage: "
             + ", ".join(missing_coverage)
@@ -455,6 +461,7 @@ def build_parser():
     parser.add_argument("--rectification-audit-sha256", required=True)
     parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--selection-count", type=int, default=512)
+    parser.add_argument("--allow-pending-visual-review", action="store_true")
     parser.add_argument("--expected-world-size", type=int, default=8)
     parser.add_argument("--foundation-stereo-repo", type=Path, required=True)
     parser.add_argument("--foundation-stereo-checkpoint", type=Path, required=True)
@@ -481,8 +488,8 @@ def main():
             f"teacher comparison requires world size {args.expected_world_size}, "
             f"got {world_size}"
         )
-    if args.selection_count != 512 or args.selection_count % world_size:
-        raise ValueError("teacher comparison requires 512 samples evenly split")
+    if args.selection_count < world_size or args.selection_count % world_size:
+        raise ValueError("teacher comparison samples must divide evenly by rank")
     if args.sample_batch_size < 1 or args.pair_microbatch < 1:
         raise ValueError("teacher comparison batch sizes must be positive")
     if args.metric_pixel_stride < 1:
@@ -501,7 +508,10 @@ def main():
         expected_rectification_audit_sha256=args.rectification_audit_sha256,
     )
     selection, indices = _read_selection(
-        args.selection, dataset, args.selection_count
+        args.selection,
+        dataset,
+        args.selection_count,
+        require_visual_review=not args.allow_pending_visual_review,
     )
     visual_sample_ids = set()
     for tag in sorted(EXPECTED_VISUAL_TAGS):
@@ -550,6 +560,8 @@ def main():
         summary["selection"] = str(args.selection.resolve())
         summary["selection_sha256"] = sha256_file(args.selection.resolve())
         summary["selection_schema"] = selection["schema"]
+        summary["selection_review_status"] = selection.get("review_status")
+        summary["visual_review_required"] = not args.allow_pending_visual_review
         summary["episode_manifest"] = str(args.episode_manifest.resolve())
         summary["episode_manifest_sha256"] = sha256_file(
             args.episode_manifest.resolve()
