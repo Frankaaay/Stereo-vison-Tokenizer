@@ -173,6 +173,15 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("DDPStrategy(", train)
         self.assertIn("static_graph=False", train)
         self.assertIn("find_unused_parameters=True", train)
+        self.assertIn("--torch_profile_output_dir", train)
+        self.assertIn("set_profiling_enabled(True)", train)
+        self.assertIn("TrainingProfilerStepCallback", train)
+        self.assertIn("ProfilerActivity.CPU", train)
+        self.assertIn("ProfilerActivity.CUDA", train)
+        self.assertIn('os.environ.get("LOCAL_RANK", "0")', train)
+        self.assertIn("profile_memory=True", train)
+        self.assertIn("record_shapes=True", train)
+        self.assertIn("TORCH_PROFILE_OUTPUT_DIR", launcher)
         callbacks = (
             ROOT / "stereo_tokenizer" / "modules" / "callbacks.py"
         ).read_text(encoding="utf-8")

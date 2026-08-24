@@ -94,6 +94,16 @@ if [[ -n "${STEP_TIMING_OUTPUT:-}" ]]; then
   )
 fi
 
+PROFILE_ARGS=()
+if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
+  PROFILE_ARGS+=(
+    --torch_profile_output_dir "${TORCH_PROFILE_OUTPUT_DIR}"
+    --torch_profile_wait "${TORCH_PROFILE_WAIT:-5}"
+    --torch_profile_warmup "${TORCH_PROFILE_WARMUP:-2}"
+    --torch_profile_active "${TORCH_PROFILE_ACTIVE:-4}"
+  )
+fi
+
 python3 train_stereo_vae.py \
   "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
@@ -159,4 +169,5 @@ python3 train_stereo_vae.py \
   --bf16 \
   "${WANDB_ARGS[@]}" \
   "${MEDIA_ARGS[@]}" \
-  "${TIMING_ARGS[@]}"
+  "${TIMING_ARGS[@]}" \
+  "${PROFILE_ARGS[@]}"

@@ -3,6 +3,7 @@ import json
 import os
 import statistics
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -11,11 +12,13 @@ from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
+from torch.profiler import ProfilerActivity
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
 from stereo_tokenizer.online_gt import OnlineFoundationGTCallback
+from stereo_tokenizer.profiling import set_profiling_enabled
 
 
 def _timing_summary(values):
@@ -115,6 +118,116 @@ class StepTimingCallback(Callback):
         )
 
 
+def _profile_event_time_us(event, name):
+    value = getattr(event, name, None)
+    if value is not None:
+        return float(value)
+    legacy = {
+        "device_time_total": "cuda_time_total",
+        "self_device_time_total": "self_cuda_time_total",
+    }.get(name)
+    return float(getattr(event, legacy, 0.0)) if legacy else 0.0
+
+
+class TrainingTraceWriter:
+    def __init__(self, output_dir, configured_active_steps):
+        self.output_dir = Path(output_dir)
+        self.configured_active_steps = configured_active_steps
+        self.trace_index = 0
+
+    @staticmethod
+    def _row(event, denominator):
+        return {
+            "name": event.key,
+            "calls": int(event.count),
+            "cpu_total_ms_per_step": (
+                float(event.cpu_time_total) / 1000.0 / denominator
+            ),
+            "cpu_self_ms_per_step": (
+                float(event.self_cpu_time_total) / 1000.0 / denominator
+            ),
+            "device_total_ms_per_step": (
+                _profile_event_time_us(event, "device_time_total")
+                / 1000.0
+                / denominator
+            ),
+            "device_self_ms_per_step": (
+                _profile_event_time_us(event, "self_device_time_total")
+                / 1000.0
+                / denominator
+            ),
+        }
+
+    def __call__(self, profiler):
+        averages = list(profiler.key_averages())
+        training_step = next(
+            (
+                event
+                for event in averages
+                if event.key == "stereo/step/training_step"
+            ),
+            None,
+        )
+        denominator = (
+            int(training_step.count)
+            if training_step is not None and training_step.count > 0
+            else self.configured_active_steps
+        )
+        rows = [self._row(event, denominator) for event in averages]
+        regions = [
+            row
+            for row in rows
+            if row["name"].startswith("stereo/")
+            or "DataLoader" in row["name"]
+        ]
+        regions.sort(
+            key=lambda row: (
+                row["device_total_ms_per_step"],
+                row["cpu_total_ms_per_step"],
+            ),
+            reverse=True,
+        )
+        rows.sort(key=lambda row: row["device_self_ms_per_step"], reverse=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        suffix = f"rank0-trace-{self.trace_index:02d}"
+        for filename, payload in (
+            (
+                f"{suffix}-regions.json",
+                {"observed_active_steps": denominator, "regions": regions},
+            ),
+            (
+                f"{suffix}-top-operators.json",
+                {"observed_active_steps": denominator, "operators": rows[:100]},
+            ),
+        ):
+            (self.output_dir / filename).write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        profiler.export_chrome_trace(
+            str(self.output_dir / f"{suffix}.json.gz")
+        )
+        self.trace_index += 1
+
+
+class TrainingProfilerStepCallback(Callback):
+    def __init__(self, profiler):
+        self.profiler = profiler
+        self.last_generator_update = None
+
+    def on_train_start(self, trainer, pl_module):
+        self.last_generator_update = int(pl_module.generator_updates)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        generator_update = int(pl_module.generator_updates)
+        if generator_update == self.last_generator_update:
+            return
+        if generator_update != self.last_generator_update + 1:
+            raise RuntimeError("profiler observed a non-consecutive generator update")
+        self.last_generator_update = generator_update
+        self.profiler.step()
+
+
 def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=1234)
@@ -133,6 +246,10 @@ def build_parser():
     parser.add_argument("--checkpoint_every_n_steps", type=int, default=500)
     parser.add_argument("--step_timing_output", type=str, default=None)
     parser.add_argument("--step_timing_warmup", type=int, default=5)
+    parser.add_argument("--torch_profile_output_dir", type=Path, default=None)
+    parser.add_argument("--torch_profile_wait", type=int, default=5)
+    parser.add_argument("--torch_profile_warmup", type=int, default=2)
+    parser.add_argument("--torch_profile_active", type=int, default=4)
     parser.add_argument("--online_gt_enabled", type=int, choices=(0, 1), default=0)
     parser.add_argument("--foundation_stereo_repo", type=str, default=None)
     parser.add_argument("--foundation_stereo_checkpoint", type=str, default=None)
@@ -252,6 +369,22 @@ def validate_runtime_args(args):
         and args.step_timing_warmup >= args.max_steps
     ):
         raise ValueError("step timing warmup must leave at least one measured update")
+    profile_schedule_steps = (
+        args.torch_profile_wait
+        + args.torch_profile_warmup
+        + args.torch_profile_active
+    )
+    if args.torch_profile_output_dir is not None:
+        if min(
+            args.torch_profile_wait,
+            args.torch_profile_warmup,
+            args.torch_profile_active,
+        ) < 0 or args.torch_profile_active < 1:
+            raise ValueError("invalid torch profiler schedule")
+        if profile_schedule_steps >= args.max_steps:
+            raise ValueError(
+                "torch profiler schedule must leave a post-profile update"
+            )
     if args.train_epoch_repeats < 1:
         raise ValueError("--train_epoch_repeats must be positive")
 
@@ -316,6 +449,30 @@ def main():
     )
     callbacks = build_callbacks(args, has_validation)
 
+    profiler = None
+    if args.torch_profile_output_dir is not None and int(
+        os.environ.get("LOCAL_RANK", "0")
+    ) == 0:
+        set_profiling_enabled(True)
+        trace_writer = TrainingTraceWriter(
+            args.torch_profile_output_dir,
+            args.torch_profile_active,
+        )
+        profiler = torch.profiler.profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(
+                wait=args.torch_profile_wait,
+                warmup=args.torch_profile_warmup,
+                active=args.torch_profile_active,
+                repeat=1,
+            ),
+            on_trace_ready=trace_writer,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        )
+        callbacks.append(TrainingProfilerStepCallback(profiler))
+
     logger = False
     if not args.disable_wandb:
         logger = WandbLogger(
@@ -362,11 +519,12 @@ def main():
         val_check_interval=val_check_interval,
         use_distributed_sampler=False,
     )
-    trainer.fit(
-        model,
-        datamodule=data,
-        ckpt_path=args.resume_from_checkpoint,
-    )
+    with profiler if profiler is not None else nullcontext():
+        trainer.fit(
+            model,
+            datamodule=data,
+            ckpt_path=args.resume_from_checkpoint,
+        )
 
 
 if __name__ == "__main__":
