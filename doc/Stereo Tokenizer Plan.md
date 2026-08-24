@@ -83,9 +83,9 @@ Spatial Encoder 的 `t` 表示全局 Spatial Attention，`w` 表示 Window Atten
 
 六路图像不在像素空间拼接。输入保留显式的 View 和 Eye 维度，一次传入模型：
 
-$X\in\mathbb{R}^{B\times3\times2\times3\times4\times256\times256}$
+$X\in\mathbb{R}^{B\times3\times2\times3\times T\times256\times256},\qquad T\in\{1,4\}$
 
-其中，三个连续的维度 `3×2×3` 分别表示 View、Eye 和 RGB channel。
+其中，三个连续的维度 `3×2×3` 分别表示 View、Eye 和 RGB channel。调用方必须显式传入 `eye_mode=mono|stereo` 与 `temporal_mode=single_frame|four_frame`；`single_frame` 严格要求 `T=1`，`four_frame` 严格要求 `T=4`，不根据 tensor shape 静默推断。
 
 ### 3\.2 Shared Spatial Encoder
 
@@ -135,15 +135,15 @@ $[B,3,2,4,512,16,16]
 
 ### 3\.4 Temporal Encoder
 
-StereoFusion 后，三个视角分别进行时间压缩和 Temporal Transformer，不进行跨视角融合。时间压缩必须发生在 StereoFusion 之后。当前训练主链路使用连续 4 帧且不保留 anchor，先在每个空间位置将 4 帧特征拼接，再沿用 OmniTokenizer temporal patch projection 的线性投影方式完成 `4×512→512`：
+StereoFusion 后，三个视角分别进入显式 temporal branch，不进行跨视角融合。`four_frame` 路径在每个空间位置形成长度为 4 的序列，加入 learned temporal position 后执行双向 temporal attention，最后通过 sampler 完成 `4×512→512`：
 
 $[B,3,4,512,16,16]
 \rightarrow
 [B,3,1,512,16,16]$
 
-投影前后均使用与 OmniTokenizer patch embedding 对齐的归一化层。随后保留原 temporal Transformer，其输入 temporal length 已经是 1，因此它不在 4 个 raw frames 之间执行 self-attention。4 帧内部只有上述联合线性投影；不同 latent slots 之间的 temporal attention 由下游世界模型实现。
+`single_frame` 路径不复制输入，不加入四帧 temporal position，不调用四帧 temporal attention，也不调用 `4D→D` sampler；StereoFusion 输出直接进入独立的 `LayerNorm(D)→Linear(D,D)→LayerNorm(D)` projection。两条路径随后共享 posterior head，并都输出一个 temporal latent slot。
 
-主 `OmniTokenizer` 第一版严格要求结构化 $T=4$，不实现 anchor、单帧或 legacy image-mode；Stereo 能力直接进入原 Encoder、Decoder 和训练主类，不保留旁路 tokenizer。
+训练数据合同仍保持结构化 `T=4` cache。训练按 `generator_updates` 严格 1:1 交替：偶数 optimizer update 运行 `four_frame`，奇数 optimizer update 从显式配置的 `single_frame_source_index` 截取 `T=1` 并运行 `single_frame`。同一 gradient accumulation window 内 `generator_updates` 不变，因此模式不会混合。
 
 ### 3\.5 VAE Posterior
 
@@ -172,23 +172,20 @@ $[B,3,48,1,16,16]
 \rightarrow
 [B\times3,48,1,16,16]$
 
-Shared Decoder Transformer 将三个视角作为 batch 并行处理，所有主干参数共享。Decoder 保留原 temporal Transformer 和 Spatial Transformer；temporal Transformer 接收长度为 1 的 latent sequence。输出仍为一个 temporal latent slot：
+Shared Decoder 将三个视角作为 batch 并行处理。`four_frame` 先执行 `D→4D` expansion、四帧 learned position 和双向 temporal attention；`single_frame` 只执行独立 `D→D` expansion，并跳过所有四帧 temporal 模块。两条路径共享 Spatial Decoder、RGB Head 和 disparity Head。
 
 $[B\times3,512,1,16,16]$
 
 
 
-仅最后的 spatiotemporal pixel projection 分为两个独立 Head。当前链路没有 anchor，也不把唯一 slot 当成 legacy first-frame slot；两个 Head 都直接将这个 slot 展开为完整 4 帧：
+PR #3 后两个 Head 均按 frame token 独立输出一帧 patch。因此同一组 Head 可按所选 temporal branch 输出 1 帧或 4 帧：
 
-$\text{RGB Head}:
-\operatorname{Linear}(512,3\times4\times16\times16=3072)
-\rightarrow[B,3,3,4,256,256]$
+$\text{RGB Head}:\operatorname{Linear}(512,3\times16\times16)\rightarrow[B,3,3,T,256,256]$
 
-$\text{Disparity Head}:
-\operatorname{Linear}(512,1\times4\times16\times16=1024)
+$\text{Disparity Head}:\operatorname{Linear}(512,1\times16\times16)
 \rightarrow\operatorname{softplus}(d_{\mathrm{raw}})+\epsilon
 \rightarrow\times s_{\mathrm{disp}}
-\rightarrow[B,3,1,4,256,256]$
+\rightarrow[B,3,1,T,256,256],\qquad T\in\{1,4\}$
 
 
 
@@ -904,9 +901,11 @@ Manifest、统计文件、calibration 报告或 resolved config 任一缺失，�
 
 - 原 `OmniTokenizer` 主类改为 Stereo-only，legacy image-mode 和旁路 `StereoTokenizer` 均不保留；
 
-- 当前无 anchor 4 帧链路 forward/backward 通过，shape 为 `4 raw frames→1 temporal latent slot→4 reconstructed frames`；
+- `four_frame` shape 为 `4 raw frames→T=4 bidirectional attention→1 latent slot→4 reconstructed frames`；
 
-- 本轮不要求 `T=1+4n` anchor 模式通过；该模式留作后续独立实现；
+- `single_frame` shape 为 `1 raw frame→single projection→1 latent slot→1 reconstructed frame`，且不得调用或伪装成四帧 temporal 路径；
+
+- 训练按 optimizer update 严格交替，同一 accumulation window 不混合模式，checkpoint resume 后由恢复的 `generator_updates` 选择正确的下一模式；
 
 - 所有中间 shape 与本文合同一致；
 
@@ -920,7 +919,7 @@ Manifest、统计文件、calibration 报告或 resolved config 任一缺失，�
 
 - 验证 Tokenizer 对外只暴露 `[B,3,48,1,16,16]` latent ABI，源码、配置和 checkpoint 中不包含下游 DiT patchify/unpatchify 或 $d_{\mathrm{DiT}}$；
 
-- RGB Head 输出 `[B,3,3,4,256,256]`，Disparity Head 输出 `[B,3,1,4,256,256]`，两者最后 projection 参数不共享；
+- RGB Head 输出 `[B,3,3,T,256,256]`，Disparity Head 输出 `[B,3,1,T,256,256]`，其中 `T=1|4`，两者最后 projection 参数不共享；
 
 - disparity 始终为正且无 NaN/Inf；
 
@@ -1026,17 +1025,17 @@ Manifest、统计文件、calibration 报告或 resolved config 任一缺失，�
 
 - 将 OmniTokenizer spatial patch size 设为 16，冻结 VAE/Tokenizer 的 16×16 空间接口；
 
-- 实现无 anchor 的 `4 frames→1 latent slot` Temporal Encoder；时间投影位于 StereoFusion 之后，并保留长度为 1 的原 temporal Transformer；
+- 实现共享 Spatial/Stereo 主干以及独立 single/four temporal branch；four 路径保留 PR #3 的双向 temporal attention，single 路径显式跳过四帧 temporal 模块；
 
 - 将 VAE posterior latent channels 设为 48；
 
 - 实现 Shared Spatial Encoder、StereoFusion、Temporal Encoder、48\-channel VAE posterior 和共享 Decoder；
 
-- 直接修改原 `OmniTokenizer` 主类为 Stereo-only，第一版只接受结构化 `T=4` 输入；
+- Dataset/cache 仍为结构化 `T=4`；模型显式接受 `T=1|4`，训练从 `T=4` batch 中按配置截取 current 帧；
 
 - Tokenizer 只输出 `[B,3,48,1,16,16]` latent，不实现或配置下游 DiT patchify/unpatchify；
 
-- Shared Decoder 最后分为 `Linear(512,3072)` RGB Head 和 `Linear(512,1024)` Disparity Head；
+- Shared Decoder 最后使用逐帧 patch head：`Linear(512, 3*16*16)` RGB Head 和 `Linear(512, 1*16*16)` Disparity Head；
 
 - Disparity Head 使用独立 bias、normalization scale 和 `softplus+epsilon`，其初始化由 train split 扫描结果冻结；
 

@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -23,6 +24,7 @@ def build_parser():
     parser.add_argument("--num_nodes", type=int, default=1)
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
+    parser.add_argument("--resume_from_checkpoint", type=Path, default=None)
     parser = StereoVAE.add_model_specific_args(parser)
     parser = StereoDataModule.add_data_specific_args(parser)
     return parser
@@ -31,6 +33,8 @@ def build_parser():
 def validate_runtime_args(args):
     if args.sequence_length != 4:
         raise ValueError("StereoVAE training requires sequence_length=4")
+    if not 0 <= args.single_frame_source_index < args.sequence_length:
+        raise ValueError("--single_frame_source_index must be in [0, 3]")
     if args.resolution != 256:
         raise ValueError("the frozen pilot recipe requires resolution=256")
     if args.stereo_train_manifest is None:
@@ -71,7 +75,7 @@ def build_callbacks(args, has_validation):
     if has_validation:
         callbacks.append(
             ModelCheckpoint(
-                monitor="val/total_loss",
+                monitor="val/four/total_loss",
                 every_n_epochs=1,
                 save_top_k=3,
                 mode="min",
@@ -123,7 +127,11 @@ def main():
         num_sanity_val_steps=0,
         check_val_every_n_epoch=1,
     )
-    trainer.fit(model, datamodule=data)
+    trainer.fit(
+        model,
+        datamodule=data,
+        ckpt_path=args.resume_from_checkpoint,
+    )
 
 
 if __name__ == "__main__":
