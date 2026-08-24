@@ -133,3 +133,39 @@ No item below has run yet. Each needs user approval before execution.
 12. Separately approved long training launch. No code-level ten-hour graceful
     stop will be added; the resolved launch must use the retained `max_steps`
     contract or another separately reviewed operational boundary.
+
+## CPU-only execution status (2026-08-24 12:22 +08:00)
+
+- Code commit: `0ee70f14b452438dd2db7d51cd149aefae1976ac` on
+  `frank-profiling`; pushed to `origin/frank-profiling` and fast-forwarded to a
+  clean H200-1 clone. H200-2 was not touched.
+- Local source regression: 11/11 passed with CUDA hidden. The local Python lacks
+  Torch, so dynamic contract tests were moved to the H200 CPU runtime rather
+  than installing local dependencies.
+- H200-1 CPU regression: 18/18 passed with `CUDA_VISIBLE_DEVICES=-1`;
+  `torch.cuda.device_count()==0` and `torch.cuda.is_initialized()==False`.
+- H200-1 GPUs 0-7 are occupied by `wuhao98` LIBERO evaluation processes. No GPU
+  process was modified; every FoundationStereo forward and training experiment
+  is deferred.
+- H200-1 dataset snapshot: node-local LeRobot root is 1.4 TiB with 1983 shard
+  directories; `/data` has 7.4 TiB available.
+- Unified CPU runtime: Python 3.12, Torch 2.7.1+cu128, Lightning 2.5.6, PyAV
+  16.0.1, PyArrow 23.0.0, OpenCV 4.10.0, timm 1.0.28, OmegaConf 2.3.0.
+- FoundationStereo checkpoint: 3.1 GiB, SHA256
+  `60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`.
+  CPU payload inspection found 1360 model tensors, all on CPU, at
+  `global_step=200000`, `epoch=40`.
+- CPU strict model construction is dependency-blocked: the Python 3.12 training
+  runtime lacks `trimesh`; mixing the old Python 3.11 FoundationStereo
+  site-packages is invalid because its binary scikit-learn extension is ABI
+  incompatible. No environment was modified.
+- Rectification audit status: **in progress** in tmux
+  `stereo-lerobot-rectify-260824`, output root
+  `/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1`, log
+  `rectification_audit.log`. Initial ETA at 12:22 is 12:27-12:42, based on 576
+  random MP4 seeks plus ORB/remap and no prior steady-state sample.
+- The launch command's auxiliary exit marker was expanded by the outer shell and
+  is not authoritative. Completion must be judged from process/tmux state, log,
+  and a schema-valid `rectification_audit.json`.
+- Manifest generation, real-data decoder smoke, and 512-sample contact sheets
+  are waiting on the rectification audit artifact and have not started.
