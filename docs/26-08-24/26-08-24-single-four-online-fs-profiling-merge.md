@@ -78,3 +78,27 @@
 - 完成后必须核对：`four -> single` 交替与 counters、finite loss、动态 DDP、
   single/four 分模式 step time、各 named region、peak allocated/reserved、checkpoint
   写入和 strict resume。不得把旧模型的 BS32 吞吐直接当作本次结果。
+
+## H200-2 FoundationStereo pair microbatch sweep（进行中，2026-08-25）
+
+- 用户指定严格顺序 `288 -> 144 -> 96`，并授权在 H200-2 与现有低显存 GPU
+  任务叠跑。由于共享 GPU，本轮只用于判断大致相对快慢，不作为严格绝对吞吐。
+- 运行代码固定为 clean
+  `merged-fs-vae-single-four-profiling@e93a7aaf8b4dad7b3b54c03e7f4f4e56656fe1b8`。
+  数据改为 H200-2 自己的 1552-shard local manifest：48,529 episodes、771,950
+  windows，SHA256
+  `96024f091bcf7aca844b4d4b99fad2eb6cb0f420aa693f1431340b79ac5fa53e`。
+- 固定配置：8 GPU、BS24/global192、GA=1、BF16、15 updates、online FS 32
+  iterations、cache off、single source index 0，以及与成功 pairmb48 基准相同的
+  loss、LR、worker、checkpoint 和 profiler `wait=5,warmup=2,active=4`。
+- 串行 tmux：`stereo-pairmb-sweep-260825`；队列目录：
+  `/data/home/frank/experiments/stereo_merged_fs_vae_pairmb_sweep_20260825_v1`。
+  三个 arm 使用用户指定的独立输出目录。单臂失败会保留日志、exit code 和 GPU
+  快照；确认无本任务残留 rank 后继续下一档，不修改 allocator 或其他参数。
+- 00:43 +08:00 启动 arm 288。启动检查确认主进程和八个 DDP rank 存在、日志进入
+  BF16/DDP 初始化、无立即 traceback/OOM；144 和 96 输出目录尚未创建，串行顺序
+  正确。启动时其他用户进程占 GPU3/4/6，各约 14.3 GiB。
+- 初始 ETA：三臂主体约 01:25--01:40 完成，trace/timing/checkpoint/结果解析约
+  01:35--01:50 完成。依据是 pairmb48 单臂实测约 15 分钟，其中 step 12 trace
+  export pause 约 608 秒；正常吞吐统计必须排除 step 12，但 FS active region 仍从
+  active trace 提取。
