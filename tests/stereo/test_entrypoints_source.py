@@ -14,7 +14,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("StereoVAE(args)", source)
         self.assertIn("StereoDataModule(args)", source)
         self.assertIn("limit_val_batches=1.0 if has_validation else 0", source)
-        self.assertIn("check_val_every_n_epoch=1", source)
+        self.assertIn("check_val_every_n_epoch = 1", source)
+        self.assertIn("check_val_every_n_epoch=check_val_every_n_epoch", source)
         self.assertIn("max_steps=-1 if args.gan_enabled else args.max_steps", source)
         self.assertIn("max_epochs=-1", source)
 
@@ -170,6 +171,32 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('on_epoch=prefix != "train"', model)
+
+    def test_train_launcher_online_gt_is_explicit_and_cache_defaults_off(self) -> None:
+        launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'STEREO_DATA_BACKEND="${STEREO_DATA_BACKEND:-manifest_v3}"',
+            launcher,
+        )
+        self.assertIn(
+            'ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"',
+            launcher,
+        )
+        self.assertIn("--foundation_stereo_valid_iters", launcher)
+        self.assertIn("--lerobot_rectification_audit_sha256", launcher)
+        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        self.assertIn("use_distributed_sampler=False", train)
+        self.assertNotIn("max_time=", train)
+
+    def test_online_teacher_comparison_freezes_requested_order(self) -> None:
+        source = (
+            ROOT / "scripts/stereo/compare_online_foundation_teacher.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("args.valid_iters != [32, 16, 12]", source)
+        self.assertIn("valid_mask_iou_with_32", source)
+        self.assertIn("automatic_numeric_pass", source)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")

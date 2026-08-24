@@ -15,6 +15,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
+from stereo_tokenizer.online_gt import OnlineFoundationGTCallback
 
 
 class StepTimingCallback(Callback):
@@ -104,6 +105,28 @@ def build_parser():
     parser.add_argument("--checkpoint_every_n_steps", type=int, default=500)
     parser.add_argument("--step_timing_output", type=str, default=None)
     parser.add_argument("--step_timing_warmup", type=int, default=5)
+    parser.add_argument("--online_gt_enabled", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--foundation_stereo_repo", type=str, default=None)
+    parser.add_argument("--foundation_stereo_checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--foundation_stereo_checkpoint_sha256", type=str, default=None
+    )
+    parser.add_argument(
+        "--foundation_stereo_valid_iters",
+        type=int,
+        choices=(12, 16, 32),
+        default=16,
+    )
+    parser.add_argument(
+        "--foundation_stereo_pair_microbatch", type=int, default=48
+    )
+    parser.add_argument(
+        "--online_gt_cache_enabled", type=int, choices=(0, 1), default=0
+    )
+    parser.add_argument("--online_gt_cache_root", type=str, default=None)
+    parser.add_argument(
+        "--online_val_check_interval_steps", type=int, default=500
+    )
     parser = StereoVAE.add_model_specific_args(parser)
     parser = StereoDataModule.add_data_specific_args(parser)
     return parser
@@ -114,10 +137,74 @@ def validate_runtime_args(args):
         raise ValueError("StereoVAE training requires sequence_length=4")
     if args.resolution != 256:
         raise ValueError("the frozen pilot recipe requires resolution=256")
-    if args.stereo_train_manifest is None:
-        raise ValueError("--stereo_train_manifest is required")
-    if args.stereo_rgb_root is None or args.stereo_gt_root is None:
-        raise ValueError("--stereo_rgb_root and --stereo_gt_root are required")
+    geometry_values = {
+        "stereo_disparity_min_px": args.stereo_disparity_min_px,
+        "stereo_disparity_max_px": args.stereo_disparity_max_px,
+        "stereo_lr_error_abs_threshold_px": (
+            args.stereo_lr_error_abs_threshold_px
+        ),
+        "stereo_lr_error_relative_threshold": (
+            args.stereo_lr_error_relative_threshold
+        ),
+    }
+    missing_geometry = [
+        name for name, value in geometry_values.items() if value is None
+    ]
+    if missing_geometry:
+        raise ValueError(
+            "stereo supervision requires " + ", ".join(missing_geometry)
+        )
+    if not 0 <= args.stereo_disparity_min_px < args.stereo_disparity_max_px:
+        raise ValueError("invalid disparity supervision range")
+    if args.stereo_lr_error_abs_threshold_px < 0:
+        raise ValueError("absolute LR threshold must be non-negative")
+    if args.stereo_lr_error_relative_threshold < 0:
+        raise ValueError("relative LR threshold must be non-negative")
+    if args.stereo_data_backend == "manifest_v3":
+        if args.stereo_train_manifest is None:
+            raise ValueError("--stereo_train_manifest is required")
+        if args.stereo_rgb_root is None or args.stereo_gt_root is None:
+            raise ValueError("--stereo_rgb_root and --stereo_gt_root are required")
+        if args.online_gt_enabled:
+            raise ValueError("Manifest-v3 training cannot enable online GT")
+    elif args.stereo_data_backend == "lerobot_online":
+        required = {
+            "lerobot_episode_manifest": args.lerobot_episode_manifest,
+            "lerobot_dataset_root": args.lerobot_dataset_root,
+            "lerobot_rectification_audit_sha256": (
+                args.lerobot_rectification_audit_sha256
+            ),
+            "foundation_stereo_repo": args.foundation_stereo_repo,
+            "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
+            "foundation_stereo_checkpoint_sha256": (
+                args.foundation_stereo_checkpoint_sha256
+            ),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError(
+                "LeRobot online training requires " + ", ".join(missing)
+            )
+        if not args.online_gt_enabled:
+            raise ValueError("LeRobot online training requires --online_gt_enabled=1")
+        if len(args.lerobot_rectification_audit_sha256) != 64:
+            raise ValueError("a full rectification audit SHA256 is required")
+        if len(args.foundation_stereo_checkpoint_sha256) != 64:
+            raise ValueError("a full FoundationStereo checkpoint SHA256 is required")
+        if args.online_gt_cache_enabled and not args.online_gt_cache_root:
+            raise ValueError("online GT cache requires --online_gt_cache_root")
+        if args.foundation_stereo_pair_microbatch < 1:
+            raise ValueError("FoundationStereo pair microbatch must be positive")
+        if args.online_val_check_interval_steps < 1:
+            raise ValueError("online validation interval must be positive")
+        if args.lerobot_val_sample_limit != 512:
+            raise ValueError("online validation sample count is frozen to 512")
+        if args.lerobot_video_cache_capacity < 1:
+            raise ValueError("LeRobot video cache capacity must be positive")
+        if args.lerobot_maximum_timestamp_error_s <= 0:
+            raise ValueError("LeRobot timestamp tolerance must be positive")
+    else:
+        raise ValueError(f"unsupported stereo data backend {args.stereo_data_backend}")
     if args.bf16 and args.fp16:
         raise ValueError("--bf16 and --fp16 are mutually exclusive")
     if args.devices < 1:
@@ -135,14 +222,17 @@ def validate_runtime_args(args):
 
 
 def build_callbacks(args, has_validation):
-    callbacks = [
+    callbacks = []
+    if args.online_gt_enabled:
+        callbacks.append(OnlineFoundationGTCallback(args))
+    callbacks.extend([
         ModelCheckpoint(
             every_n_train_steps=args.checkpoint_every_n_steps,
             save_top_k=-1,
             save_last=True,
             filename="{epoch}-{step}",
         )
-    ]
+    ])
     if not args.disable_media_logging:
         callbacks.extend(
             [
@@ -164,7 +254,7 @@ def build_callbacks(args, has_validation):
         callbacks.append(
             StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
         )
-    if has_validation:
+    if has_validation and args.stereo_data_backend == "manifest_v3":
         callbacks.append(
             ModelCheckpoint(
                 monitor="val/total_loss",
@@ -185,7 +275,10 @@ def main():
 
     data = StereoDataModule(args)
     model = StereoVAE(args)
-    has_validation = args.stereo_val_manifest is not None
+    has_validation = (
+        args.stereo_data_backend == "lerobot_online"
+        or args.stereo_val_manifest is not None
+    )
     callbacks = build_callbacks(args, has_validation)
 
     logger = False
@@ -210,6 +303,12 @@ def main():
             find_unused_parameters=args.gan_enabled,
         )
 
+    val_check_interval = 1.0
+    check_val_every_n_epoch = 1
+    if args.stereo_data_backend == "lerobot_online":
+        val_check_interval = args.online_val_check_interval_steps
+        check_val_every_n_epoch = None
+
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=args.devices,
@@ -224,7 +323,9 @@ def main():
         log_every_n_steps=1,
         limit_val_batches=1.0 if has_validation else 0,
         num_sanity_val_steps=0,
-        check_val_every_n_epoch=1,
+        check_val_every_n_epoch=check_val_every_n_epoch,
+        val_check_interval=val_check_interval,
+        use_distributed_sampler=False,
     )
     trainer.fit(model, datamodule=data)
 

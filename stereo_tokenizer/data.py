@@ -13,6 +13,11 @@ import torch.distributed as dist
 from torch.utils import data
 from torch.utils.data import default_collate
 
+from .lerobot_data import (
+    EpisodeSequentialDistributedSampler,
+    LeRobotStereoDataset,
+    fixed_episode_subset_indices,
+)
 from .profiling import profile_region
 
 
@@ -253,9 +258,42 @@ class StereoDataModule(pl.LightningDataModule):
         ]
         return len(self._profile_preloaded_train_dataset)
 
-    def _dataset(self, train: bool):
+    def _dataset(self, train: bool, split: str | None = None):
         if train and self._profile_preloaded_train_dataset is not None:
             return self._profile_preloaded_train_dataset
+        backend = getattr(self.args, "stereo_data_backend", "manifest_v3")
+        if backend == "lerobot_online":
+            if self.args.train_epoch_repeats != 1:
+                raise ValueError(
+                    "LeRobot online training requires train_epoch_repeats=1"
+                )
+            resolved_split = split or ("train" if train else "val")
+            dataset = LeRobotStereoDataset(
+                self.args.lerobot_episode_manifest,
+                self.args.lerobot_dataset_root,
+                split=resolved_split,
+                expected_rectification_audit_sha256=(
+                    self.args.lerobot_rectification_audit_sha256
+                ),
+                video_cache_capacity=self.args.lerobot_video_cache_capacity,
+                maximum_timestamp_error_s=(
+                    self.args.lerobot_maximum_timestamp_error_s
+                ),
+            )
+            if resolved_split == "val":
+                limit = int(self.args.lerobot_val_sample_limit)
+                if limit < 1:
+                    raise ValueError("LeRobot validation sample limit must be positive")
+                indices = fixed_episode_subset_indices(
+                    dataset,
+                    limit,
+                    seed=int(getattr(self.args, "seed", 1234)),
+                )
+                dataset = data.Subset(dataset, indices)
+            return dataset
+        if backend != "manifest_v3":
+            raise ValueError(f"unsupported stereo data backend: {backend}")
+
         manifest = (
             self.args.stereo_train_manifest
             if train
@@ -283,11 +321,17 @@ class StereoDataModule(pl.LightningDataModule):
             dataset = data.ConcatDataset([dataset] * repeats)
         return dataset
 
-    def _dataloader(self, train: bool):
-        dataset = self._dataset(train)
+    def _dataloader(self, train: bool, split: str | None = None):
+        dataset = self._dataset(train, split=split)
         if dataset is None:
             return None
-        if dist.is_initialized():
+        if isinstance(dataset, LeRobotStereoDataset):
+            sampler = EpisodeSequentialDistributedSampler(
+                dataset,
+                shuffle=train and self.shuffle,
+                seed=int(getattr(self.args, "seed", 1234)),
+            )
+        elif dist.is_initialized():
             sampler = data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=dist.get_world_size(),
@@ -323,6 +367,8 @@ class StereoDataModule(pl.LightningDataModule):
         return self._dataloader(False)
 
     def test_dataloader(self):
+        if getattr(self.args, "stereo_data_backend", "manifest_v3") == "lerobot_online":
+            return self._dataloader(False, split="test")
         return self.val_dataloader()
 
     @staticmethod
@@ -338,6 +384,11 @@ class StereoDataModule(pl.LightningDataModule):
         )
         parser.add_argument("--train_epoch_repeats", type=int, default=1)
         parser.add_argument("--image_channels", type=int, default=3)
+        parser.add_argument(
+            "--stereo_data_backend",
+            choices=("manifest_v3", "lerobot_online"),
+            default="manifest_v3",
+        )
         parser.add_argument("--stereo_train_manifest", type=str, default=None)
         parser.add_argument("--stereo_val_manifest", type=str, default=None)
         parser.add_argument("--stereo_rgb_root", type=str, default=None)
@@ -350,4 +401,16 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument(
             "--stereo_lr_error_relative_threshold", type=float, default=None
         )
+        parser.add_argument("--lerobot_episode_manifest", type=str, default=None)
+        parser.add_argument("--lerobot_dataset_root", type=str, default=None)
+        parser.add_argument(
+            "--lerobot_rectification_audit_sha256", type=str, default=None
+        )
+        parser.add_argument(
+            "--lerobot_video_cache_capacity", type=int, default=12
+        )
+        parser.add_argument(
+            "--lerobot_maximum_timestamp_error_s", type=float, default=0.05
+        )
+        parser.add_argument("--lerobot_val_sample_limit", type=int, default=512)
         return parser
