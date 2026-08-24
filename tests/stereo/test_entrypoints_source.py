@@ -197,6 +197,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("args.valid_iters != [32, 16, 12]", source)
         self.assertIn("valid_mask_iou_with_32", source)
         self.assertIn("automatic_numeric_pass", source)
+        self.assertIn("if not args.allow_pending_visual_review:", source)
+        self.assertIn('"visual_sample_ids": sorted(visual_sample_ids)', source)
 
     def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
         profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")

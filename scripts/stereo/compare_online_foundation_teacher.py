@@ -514,11 +514,12 @@ def main():
         require_visual_review=not args.allow_pending_visual_review,
     )
     visual_sample_ids = set()
-    for tag in sorted(EXPECTED_VISUAL_TAGS):
-        entry = next(
-            item for item in selection["samples"] if tag in item["visual_tags"]
-        )
-        visual_sample_ids.add(entry["sample_id"])
+    if not args.allow_pending_visual_review:
+        for tag in sorted(EXPECTED_VISUAL_TAGS):
+            entry = next(
+                item for item in selection["samples"] if tag in item["visual_tags"]
+            )
+            visual_sample_ids.add(entry["sample_id"])
     local_indices = indices[rank::world_size]
     teacher = FoundationStereoOnlineTeacher(
         args.foundation_stereo_repo,

@@ -352,3 +352,12 @@ No item below has run yet. Each needs user approval before execution.
   three configurations, based on the 3.09-second unbatched single-sample smoke
   and the expected gain from eight GPUs plus pair batching; result aggregation
   and artifact validation should finish within roughly 2 additional minutes.
+- The first 408-sample launch exited before inference and produced no speed
+  result. Root cause was an incomplete pending-review bypass: selection loading
+  skipped the visual-review gate, but `main()` still unconditionally searched
+  for one sample per visual tag and raised `StopIteration` on every rank. The
+  fix keeps `visual_sample_ids` empty when
+  `--allow-pending-visual-review` is active, so the run performs quantitative
+  throughput/quality aggregation without attempting visual exports. The normal
+  reviewed-selection path remains unchanged. CPU-only py_compile and all 11
+  entrypoint source regressions pass before relaunch.
