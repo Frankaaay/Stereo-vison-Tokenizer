@@ -71,6 +71,37 @@ def record(episode_id, shard_id, length, split, audit_sha):
 
 
 class LeRobotOnlineContractTest(unittest.TestCase):
+    def test_failed_audit_requires_explicit_provisional_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            audit = root / "audit.json"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "schema": "lerobot-stereo-rectification-audit-v1",
+                        "dataset_root": str(root),
+                        "result": "fail",
+                        "selected_mode": None,
+                        "representative_pair_count": 12,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "audit did not pass"):
+                BUILDER._load_rectification_audit(audit, root)
+            payload, decision = BUILDER._load_rectification_audit(
+                audit,
+                root,
+                allow_provisional_pre_rectified=True,
+            )
+            self.assertEqual(payload["result"], "fail")
+            self.assertEqual(decision["mode"], "verified_pre_rectified")
+            self.assertEqual(
+                decision["status"], "provisional_user_assumption"
+            )
+            self.assertEqual(decision["source_audit_result"], "fail")
+            self.assertEqual(len(decision["audit_sha256"]), 64)
+
     def test_window_count_preserves_point_one_second_frame_offsets(self):
         self.assertEqual(window_count(9), 0)
         self.assertEqual(window_count(10), 1)

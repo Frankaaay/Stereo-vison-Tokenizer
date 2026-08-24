@@ -134,7 +134,7 @@ No item below has run yet. Each needs user approval before execution.
     stop will be added; the resolved launch must use the retained `max_steps`
     contract or another separately reviewed operational boundary.
 
-## CPU-only execution status (2026-08-24 12:22 +08:00)
+## CPU-only execution status (2026-08-24)
 
 - Code commit: `0ee70f14b452438dd2db7d51cd149aefae1976ac` on
   `frank-profiling`; pushed to `origin/frank-profiling` and fast-forwarded to a
@@ -144,9 +144,9 @@ No item below has run yet. Each needs user approval before execution.
   than installing local dependencies.
 - H200-1 CPU regression: 18/18 passed with `CUDA_VISIBLE_DEVICES=-1`;
   `torch.cuda.device_count()==0` and `torch.cuda.is_initialized()==False`.
-- H200-1 GPUs 0-7 are occupied by `wuhao98` LIBERO evaluation processes. No GPU
-  process was modified; every FoundationStereo forward and training experiment
-  is deferred.
+- H200-1 GPUs 0-7 are occupied by `wuhao98` LIBERO evaluation processes. H200-2
+  GPUs 0-7 were idle in the latest read-only snapshot. No GPU process was
+  modified and no FoundationStereo forward or training experiment was started.
 - H200-1 dataset snapshot: node-local LeRobot root is 1.4 TiB with 1983 shard
   directories; `/data` has 7.4 TiB available.
 - Unified CPU runtime: Python 3.12, Torch 2.7.1+cu128, Lightning 2.5.6, PyAV
@@ -155,17 +155,42 @@ No item below has run yet. Each needs user approval before execution.
   `60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`.
   CPU payload inspection found 1360 model tensors, all on CPU, at
   `global_step=200000`, `epoch=40`.
-- CPU strict model construction is dependency-blocked: the Python 3.12 training
-  runtime lacks `trimesh`; mixing the old Python 3.11 FoundationStereo
-  site-packages is invalid because its binary scikit-learn extension is ABI
-  incompatible. No environment was modified.
-- Rectification audit status: **in progress** in tmux
-  `stereo-lerobot-rectify-260824`, output root
-  `/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1`, log
-  `rectification_audit.log`. Initial ETA at 12:22 is 12:27-12:42, based on 576
-  random MP4 seeks plus ORB/remap and no prior steady-state sample.
-- The launch command's auxiliary exit marker was expanded by the outer shell and
-  is not authoritative. Completion must be judged from process/tmux state, log,
-  and a schema-valid `rectification_audit.json`.
-- Manifest generation, real-data decoder smoke, and 512-sample contact sheets
-  are waiting on the rectification audit artifact and have not started.
+- The unified Python 3.12 runtime on both H200 nodes was supplemented with
+  `trimesh==5.0.0`, `joblib==1.5.2`, and the FoundationStereo-runtime-matched
+  `open3d==0.19.0`. Imports of the first two were verified with CUDA hidden;
+  both checks reported zero visible CUDA devices and an uninitialized CUDA
+  runtime. `pip check` still reports the pre-existing unsupported `decord 0.6.0`
+  package. CPU strict model construction now reaches the unconditional Open3D
+  import in FoundationStereo `Utils.py`, then stops because Open3D's optional
+  visualization dependency `plotly` is absent. A dry-run showed that completing
+  Open3D's dependency closure would add about 30 packages including Dash,
+  IPython/Jupyter components, and a scikit-learn binary wheel; this unrelated UI
+  stack was not added to the unified training runtime. No model forward ran.
+- Rectification audit completed in tmux `stereo-lerobot-rectify-260824`, output
+  root `/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1`.
+  The schema-valid `rectification_audit.json` result is **fail** with no selected
+  mode: 96 candidate episodes, 267 representative pairs, and 21 failed pair
+  probes. Raw P50/P95 vertical residuals were head 1.728/20.902 px, left hand
+  1.200/20.736 px, and right hand 1.200/40.320 px. Applying calibration was not
+  better: 4.800/27.360, 2.986/24.883, and 2.986/40.248 px respectively.
+- Visual inspection of the three fixed `*_000_*` audit panels shows that raw
+  stereo content is already approximately aligned to horizontal epipolar lines;
+  calibration remap introduces crop/black borders without a visible alignment
+  gain. This is evidence that the encoded videos may already be rectified, but
+  the current Lowe-ratio-only ORB residual distribution contains too many
+  outliers to freeze `verified_pre_rectified`. A symmetric/RANSAC-inlier audit
+  is required before selecting the manifest rectification mode.
+- The user authorized a temporary `verified_pre_rectified` assumption while the
+  data team confirms upstream processing. The manifest builder now requires the
+  explicit `--allow-provisional-pre-rectified` flag for this path and preserves
+  `status=provisional_user_assumption`, the failed source-audit result, and its
+  SHA256 in every record and in the contract. Without the flag, the original
+  fail-closed behavior is unchanged; the failed audit is never rewritten as a
+  pass.
+- Local validation for the provisional path: Python compilation passed,
+  `git diff --check` passed, and the CPU-hidden entrypoint/source-boundary suite
+  passed 23/23. Manifest generation, real-data decoder smoke, and 512-sample
+  selection are next and have not yet started.
+- GPU work on an idle H200-2 was subsequently authorized. FoundationStereo
+  forward remains gated on the manifest/decoder/selection checks and a fresh
+  GPU ownership snapshot immediately before launch.

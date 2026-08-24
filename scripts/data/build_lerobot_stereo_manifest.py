@@ -111,22 +111,38 @@ def _calibration(source_json: Path, episode_id: str):
     return result
 
 
-def _load_rectification_audit(path: Path, dataset_root: Path):
+def _load_rectification_audit(
+    path: Path,
+    dataset_root: Path,
+    *,
+    allow_provisional_pre_rectified: bool = False,
+):
     if not path.is_file():
         raise FileNotFoundError(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != AUDIT_SCHEMA:
         raise ValueError(f"{path}: unsupported rectification audit schema")
-    if payload.get("result") != "pass":
-        raise ValueError(f"{path}: rectification audit did not pass")
-    mode = payload.get("selected_mode")
-    if mode not in {"verified_pre_rectified", "apply_calibration"}:
-        raise ValueError(f"{path}: invalid selected rectification mode")
     if Path(payload.get("dataset_root", "")).resolve() != dataset_root:
         raise ValueError(f"{path}: dataset root does not match")
     if int(payload.get("representative_pair_count", 0)) < 1:
         raise ValueError(f"{path}: no representative stereo pairs were audited")
-    return payload, sha256_file(path)
+    audit_result = payload.get("result")
+    mode = payload.get("selected_mode")
+    if audit_result == "pass":
+        if mode not in {"verified_pre_rectified", "apply_calibration"}:
+            raise ValueError(f"{path}: invalid selected rectification mode")
+        decision_status = "audit_verified"
+    elif allow_provisional_pre_rectified:
+        mode = "verified_pre_rectified"
+        decision_status = "provisional_user_assumption"
+    else:
+        raise ValueError(f"{path}: rectification audit did not pass")
+    return payload, {
+        "mode": mode,
+        "status": decision_status,
+        "source_audit_result": audit_result,
+        "audit_sha256": sha256_file(path),
+    }
 
 
 def _episode_rows(shard: Path):
@@ -170,7 +186,7 @@ def _video_record(
     }
 
 
-def collect_records(args, rectification_mode, audit_sha256):
+def collect_records(args, rectification_decision):
     dataset_root = args.dataset_root.resolve()
     source_root = args.source_root.resolve()
     records = []
@@ -243,8 +259,14 @@ def collect_records(args, rectification_mode, audit_sha256):
                     "videos": videos,
                     "calibration": calibration,
                     "rectification": {
-                        "mode": rectification_mode,
-                        "audit_sha256": audit_sha256,
+                        "mode": rectification_decision["mode"],
+                        "status": rectification_decision["status"],
+                        "source_audit_result": rectification_decision[
+                            "source_audit_result"
+                        ],
+                        "audit_sha256": rectification_decision[
+                            "audit_sha256"
+                        ],
                     },
                 }
             )
@@ -284,7 +306,7 @@ def assign_splits(records, seed):
             record["split"] = "test"
 
 
-def write_outputs(args, records, inventory, audit_sha256):
+def write_outputs(args, records, inventory, rectification_decision):
     preprocessing = {
         "source_size_hw": list(SOURCE_HW),
         "resize_size_hw": list(RESIZE_HW),
@@ -306,7 +328,10 @@ def write_outputs(args, records, inventory, audit_sha256):
         "read_granularity": "episode_time_order",
         "model_input_granularity": "four_frame_sample",
         "preprocessing": preprocessing,
-        "rectification_audit_sha256": audit_sha256,
+        "rectification": rectification_decision,
+        "rectification_audit_sha256": rectification_decision[
+            "audit_sha256"
+        ],
     }
     contract_sha256 = _sha256_json(contract)
     for record in records:
@@ -374,6 +399,14 @@ def build_parser():
         default="/data/umi_vio_data_260714/",
     )
     parser.add_argument("--rectification-audit", type=Path, required=True)
+    parser.add_argument(
+        "--allow-provisional-pre-rectified",
+        action="store_true",
+        help=(
+            "temporarily assume encoded videos are pre-rectified while "
+            "preserving the failed source audit and provisional status"
+        ),
+    )
     parser.add_argument("--split-seed", type=int, default=1234)
     parser.add_argument("--output-manifest", type=Path, required=True)
     parser.add_argument("--output-summary", type=Path, required=True)
@@ -388,14 +421,16 @@ def main():
         raise FileNotFoundError("dataset and source roots must exist")
     args.dataset_root = dataset_root
     args.source_root = source_root
-    audit, audit_sha256 = _load_rectification_audit(
-        args.rectification_audit.expanduser().resolve(), dataset_root
+    _, rectification_decision = _load_rectification_audit(
+        args.rectification_audit.expanduser().resolve(),
+        dataset_root,
+        allow_provisional_pre_rectified=(
+            args.allow_provisional_pre_rectified
+        ),
     )
-    records, inventory = collect_records(
-        args, audit["selected_mode"], audit_sha256
-    )
+    records, inventory = collect_records(args, rectification_decision)
     assign_splits(records, args.split_seed)
-    summary = write_outputs(args, records, inventory, audit_sha256)
+    summary = write_outputs(args, records, inventory, rectification_decision)
     print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
 
 
