@@ -11,6 +11,19 @@ import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
 from torch.utils import data
+from torch.utils.data import default_collate
+
+from .lerobot_data import (
+    EpisodeSequentialDistributedSampler,
+    LeRobotStereoDataset,
+    fixed_episode_subset_indices,
+)
+from .profiling import profile_region
+
+
+def _profiled_collate(batch):
+    with profile_region("stereo/data/collate"):
+        return default_collate(batch)
 
 
 class StereoManifestDataset(data.Dataset):
@@ -152,6 +165,10 @@ class StereoManifestDataset(data.Dataset):
         return len(self.records)
 
     def __getitem__(self, index):
+        with profile_region("stereo/data/getitem"):
+            return self._getitem_impl(index)
+
+    def _getitem_impl(self, index):
         record = self.records[index]
         rgb_path = self._resolve_cache_path(
             self.rgb_root, record["rgb_relative_path"]
@@ -159,67 +176,70 @@ class StereoManifestDataset(data.Dataset):
         gt_path = self._resolve_cache_path(
             self.gt_root, record["gt_relative_path"]
         )
-        rgb_cache = self._load_npz(rgb_path)
-        gt_cache = self._load_npz(gt_path)
+        with profile_region("stereo/data/rgb_npz_read_decompress"):
+            rgb_cache = self._load_npz(rgb_path)
+        with profile_region("stereo/data/gt_npz_read_decompress"):
+            gt_cache = self._load_npz(gt_path)
 
-        if set(rgb_cache) != {"rgb"}:
-            raise ValueError(f"{rgb_path}: expected only the rgb array")
-        rgb = rgb_cache["rgb"]
-        if rgb.shape != self.RGB_SHAPE or rgb.dtype != np.uint8:
-            raise ValueError(
-                f"{rgb_path}: expected uint8 {self.RGB_SHAPE}, "
-                f"got {rgb.dtype} {rgb.shape}"
+        with profile_region("stereo/data/numpy_processing_and_tensor_conversion"):
+            if set(rgb_cache) != {"rgb"}:
+                raise ValueError(f"{rgb_path}: expected only the rgb array")
+            rgb = rgb_cache["rgb"]
+            if rgb.shape != self.RGB_SHAPE or rgb.dtype != np.uint8:
+                raise ValueError(
+                    f"{rgb_path}: expected uint8 {self.RGB_SHAPE}, "
+                    f"got {rgb.dtype} {rgb.shape}"
+                )
+
+            missing = self.REQUIRED_GT_KEYS - set(gt_cache)
+            if missing:
+                raise ValueError(f"{gt_path}: missing GT arrays {sorted(missing)}")
+            disparity = gt_cache["disparity_left"].astype(np.float32)
+            lr_error = gt_cache["lr_error_px"].astype(np.float32)
+            base_valid = gt_cache["base_valid_mask"].astype(np.bool_)
+            if (
+                disparity.shape != self.GT_SHAPE
+                or lr_error.shape != self.GT_SHAPE
+                or base_valid.shape != self.GT_SHAPE
+            ):
+                raise ValueError(f"{gt_path}: unexpected dense GT shape")
+
+            fx = gt_cache["fx"].astype(np.float32)
+            baseline_m = gt_cache["baseline_m"].astype(np.float32)
+            if fx.shape != (3,) or baseline_m.shape != (3,):
+                raise ValueError(f"{gt_path}: expected fx/baseline_m shape [3]")
+            if not np.isfinite(fx).all() or not np.isfinite(baseline_m).all():
+                raise ValueError(f"{gt_path}: non-finite calibration")
+            if (fx <= 0).any() or (baseline_m <= 0).any():
+                raise ValueError(f"{gt_path}: non-positive calibration")
+
+            content = self._content_mask(record)[None, None]
+            lr_threshold = np.maximum(
+                self.lr_error_abs_threshold_px,
+                self.lr_error_relative_threshold * disparity,
+            )
+            valid = (
+                content
+                & base_valid
+                & np.isfinite(disparity)
+                & np.isfinite(lr_error)
+                & (disparity >= self.disparity_min_px)
+                & (disparity <= self.disparity_max_px)
+                & (lr_error <= lr_threshold)
             )
 
-        missing = self.REQUIRED_GT_KEYS - set(gt_cache)
-        if missing:
-            raise ValueError(f"{gt_path}: missing GT arrays {sorted(missing)}")
-        disparity = gt_cache["disparity_left"].astype(np.float32)
-        lr_error = gt_cache["lr_error_px"].astype(np.float32)
-        base_valid = gt_cache["base_valid_mask"].astype(np.bool_)
-        if (
-            disparity.shape != self.GT_SHAPE
-            or lr_error.shape != self.GT_SHAPE
-            or base_valid.shape != self.GT_SHAPE
-        ):
-            raise ValueError(f"{gt_path}: unexpected dense GT shape")
-
-        fx = gt_cache["fx"].astype(np.float32)
-        baseline_m = gt_cache["baseline_m"].astype(np.float32)
-        if fx.shape != (3,) or baseline_m.shape != (3,):
-            raise ValueError(f"{gt_path}: expected fx/baseline_m shape [3]")
-        if not np.isfinite(fx).all() or not np.isfinite(baseline_m).all():
-            raise ValueError(f"{gt_path}: non-finite calibration")
-        if (fx <= 0).any() or (baseline_m <= 0).any():
-            raise ValueError(f"{gt_path}: non-positive calibration")
-
-        content = self._content_mask(record)[None, None]
-        lr_threshold = np.maximum(
-            self.lr_error_abs_threshold_px,
-            self.lr_error_relative_threshold * disparity,
-        )
-        valid = (
-            content
-            & base_valid
-            & np.isfinite(disparity)
-            & np.isfinite(lr_error)
-            & (disparity >= self.disparity_min_px)
-            & (disparity <= self.disparity_max_px)
-            & (lr_error <= lr_threshold)
-        )
-
-        disparity = np.transpose(disparity, (1, 0, 2, 3))[:, None]
-        valid = np.transpose(valid, (1, 0, 2, 3))[:, None]
-        video = torch.from_numpy(rgb.copy()).float().div_(255.0).sub_(0.5)
-        return {
-            "video": video,
-            "disparity": torch.from_numpy(disparity.copy()),
-            "valid_mask": torch.from_numpy(valid.copy()),
-            "fx": torch.from_numpy(fx.copy()),
-            "baseline_m": torch.from_numpy(baseline_m.copy()),
-            "sample_id": record["sample_id"],
-            "episode_id": record.get("episode_id", ""),
-        }
+            disparity = np.transpose(disparity, (1, 0, 2, 3))[:, None]
+            valid = np.transpose(valid, (1, 0, 2, 3))[:, None]
+            video = torch.from_numpy(rgb.copy()).float().div_(255.0).sub_(0.5)
+            return {
+                "video": video,
+                "disparity": torch.from_numpy(disparity.copy()),
+                "valid_mask": torch.from_numpy(valid.copy()),
+                "fx": torch.from_numpy(fx.copy()),
+                "baseline_m": torch.from_numpy(baseline_m.copy()),
+                "sample_id": record["sample_id"],
+                "episode_id": record.get("episode_id", ""),
+            }
 
 
 class StereoDataModule(pl.LightningDataModule):
@@ -227,8 +247,53 @@ class StereoDataModule(pl.LightningDataModule):
         super().__init__()
         self.args = args
         self.shuffle = shuffle
+        self._profile_preloaded_train_dataset = None
 
-    def _dataset(self, train: bool):
+    def profile_preload_train_dataset(self) -> int:
+        if self._profile_preloaded_train_dataset is not None:
+            raise RuntimeError("training dataset is already preloaded")
+        dataset = self._dataset(True)
+        self._profile_preloaded_train_dataset = [
+            dataset[index] for index in range(len(dataset))
+        ]
+        return len(self._profile_preloaded_train_dataset)
+
+    def _dataset(self, train: bool, split: str | None = None):
+        if train and self._profile_preloaded_train_dataset is not None:
+            return self._profile_preloaded_train_dataset
+        backend = getattr(self.args, "stereo_data_backend", "manifest_v3")
+        if backend == "lerobot_online":
+            if self.args.train_epoch_repeats != 1:
+                raise ValueError(
+                    "LeRobot online training requires train_epoch_repeats=1"
+                )
+            resolved_split = split or ("train" if train else "val")
+            dataset = LeRobotStereoDataset(
+                self.args.lerobot_episode_manifest,
+                self.args.lerobot_dataset_root,
+                split=resolved_split,
+                expected_rectification_audit_sha256=(
+                    self.args.lerobot_rectification_audit_sha256
+                ),
+                video_cache_capacity=self.args.lerobot_video_cache_capacity,
+                maximum_timestamp_error_s=(
+                    self.args.lerobot_maximum_timestamp_error_s
+                ),
+            )
+            if resolved_split == "val":
+                limit = int(self.args.lerobot_val_sample_limit)
+                if limit < 1:
+                    raise ValueError("LeRobot validation sample limit must be positive")
+                indices = fixed_episode_subset_indices(
+                    dataset,
+                    limit,
+                    seed=int(getattr(self.args, "seed", 1234)),
+                )
+                dataset = data.Subset(dataset, indices)
+            return dataset
+        if backend != "manifest_v3":
+            raise ValueError(f"unsupported stereo data backend: {backend}")
+
         manifest = (
             self.args.stereo_train_manifest
             if train
@@ -238,7 +303,7 @@ class StereoDataModule(pl.LightningDataModule):
             if train:
                 raise ValueError("--stereo_train_manifest is required")
             return None
-        return StereoManifestDataset(
+        dataset = StereoManifestDataset(
             manifest,
             self.args.stereo_rgb_root,
             self.args.stereo_gt_root,
@@ -251,12 +316,22 @@ class StereoDataModule(pl.LightningDataModule):
                 self.args.stereo_lr_error_relative_threshold
             ),
         )
+        repeats = int(getattr(self.args, "train_epoch_repeats", 1))
+        if train and repeats != 1:
+            dataset = data.ConcatDataset([dataset] * repeats)
+        return dataset
 
-    def _dataloader(self, train: bool):
-        dataset = self._dataset(train)
+    def _dataloader(self, train: bool, split: str | None = None):
+        dataset = self._dataset(train, split=split)
         if dataset is None:
             return None
-        if dist.is_initialized():
+        if isinstance(dataset, LeRobotStereoDataset):
+            sampler = EpisodeSequentialDistributedSampler(
+                dataset,
+                shuffle=train and self.shuffle,
+                seed=int(getattr(self.args, "seed", 1234)),
+            )
+        elif dist.is_initialized():
             sampler = data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=dist.get_world_size(),
@@ -265,11 +340,21 @@ class StereoDataModule(pl.LightningDataModule):
             )
         else:
             sampler = None
+        pin_memory = bool(getattr(self.args, "pin_memory", False))
+        if hasattr(self.args, "profile_pin_memory"):
+            pin_memory = bool(self.args.profile_pin_memory)
+        persistent_workers = bool(
+            getattr(self.args, "persistent_workers", False)
+        )
+        if persistent_workers and self.args.num_workers == 0:
+            raise ValueError("persistent_workers requires num_workers > 0")
         return data.DataLoader(
             dataset,
             batch_size=self.args.batch_size,
             num_workers=self.args.num_workers,
-            pin_memory=False,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            collate_fn=_profiled_collate,
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,
             drop_last=train,
@@ -282,6 +367,8 @@ class StereoDataModule(pl.LightningDataModule):
         return self._dataloader(False)
 
     def test_dataloader(self):
+        if getattr(self.args, "stereo_data_backend", "manifest_v3") == "lerobot_online":
+            return self._dataloader(False, split="test")
         return self.val_dataloader()
 
     @staticmethod
@@ -291,7 +378,17 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--resolution", type=int, default=256)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=8)
+        parser.add_argument("--pin_memory", type=int, choices=(0, 1), default=1)
+        parser.add_argument(
+            "--persistent_workers", type=int, choices=(0, 1), default=1
+        )
+        parser.add_argument("--train_epoch_repeats", type=int, default=1)
         parser.add_argument("--image_channels", type=int, default=3)
+        parser.add_argument(
+            "--stereo_data_backend",
+            choices=("manifest_v3", "lerobot_online"),
+            default="manifest_v3",
+        )
         parser.add_argument("--stereo_train_manifest", type=str, default=None)
         parser.add_argument("--stereo_val_manifest", type=str, default=None)
         parser.add_argument("--stereo_rgb_root", type=str, default=None)
@@ -304,4 +401,16 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument(
             "--stereo_lr_error_relative_threshold", type=float, default=None
         )
+        parser.add_argument("--lerobot_episode_manifest", type=str, default=None)
+        parser.add_argument("--lerobot_dataset_root", type=str, default=None)
+        parser.add_argument(
+            "--lerobot_rectification_audit_sha256", type=str, default=None
+        )
+        parser.add_argument(
+            "--lerobot_video_cache_capacity", type=int, default=12
+        )
+        parser.add_argument(
+            "--lerobot_maximum_timestamp_error_s", type=float, default=0.05
+        )
+        parser.add_argument("--lerobot_val_sample_limit", type=int, default=512)
         return parser

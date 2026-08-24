@@ -4,6 +4,7 @@ from argparse import Namespace
 import torch
 
 from stereo_tokenizer import StereoVAE
+from stereo_tokenizer.modules.attention import PEG
 
 
 class StereoVAEIntegrationTest(unittest.TestCase):
@@ -27,6 +28,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             temporal_depth=1,
             causal_in_peg=True,
             causal_in_temporal_transformer=False,
+            peg_backend="conv3d_contiguous",
             dim_head=8,
             heads=4,
             attn_dropout=0.0,
@@ -108,6 +110,30 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertIsNone(output.fusion)
         self.assertEqual(output.latent.shape, (1, 3, 48, 1, 4, 4))
         self.assertEqual(output.rgb.shape, (1, 3, 3, 4, 32, 32))
+
+    def test_constructor_applies_selected_peg_backend_to_reduced_model(self) -> None:
+        args = self._args()
+        args.peg_backend = "conv2d_t1_slice"
+
+        model = StereoVAE(args)
+        peg_modules = [module for module in model.modules() if isinstance(module, PEG)]
+
+        self.assertTrue(peg_modules)
+        self.assertTrue(
+            all(module._backend == "conv2d_t1_slice" for module in peg_modules)
+        )
+        self.assertFalse(
+            any(
+                isinstance(module, PEG)
+                for module in model.encoder.enc_temporal_transformer.modules()
+            )
+        )
+        self.assertFalse(
+            any(
+                isinstance(module, PEG)
+                for module in model.decoder.dec_temporal_transformer.modules()
+            )
+        )
 
     def test_eval_default_uses_posterior_mean(self) -> None:
         model = StereoVAE(self._args()).eval()
@@ -266,6 +292,28 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertEqual(output.eye_mode, "stereo")
         self.assertEqual(output.temporal_mode, "single_frame")
         self.assertEqual(output.source_num_frames, 1)
+
+    def test_online_t4_targets_remain_aligned_when_single_frame_is_selected(self):
+        args = self._args()
+        args.single_frame_source_index = 2
+        model = StereoVAE(args)
+        batch = self._batch()
+        for frame_index in range(4):
+            batch["video"][..., frame_index, :, :] = float(frame_index)
+            batch["disparity"][..., frame_index, :, :] = float(frame_index + 10)
+            batch["valid_mask"][..., frame_index, :, :] = frame_index == 2
+
+        selected = model._prepare_temporal_batch(
+            batch, temporal_mode="single_frame"
+        )
+
+        torch.testing.assert_close(
+            selected["video"], torch.full_like(selected["video"], 2.0)
+        )
+        torch.testing.assert_close(
+            selected["disparity"], torch.full_like(selected["disparity"], 12.0)
+        )
+        self.assertTrue(selected["valid_mask"].all())
 
     def test_single_core_loss_backpropagates_only_single_temporal_path(self) -> None:
         model = StereoVAE(self._args()).train()

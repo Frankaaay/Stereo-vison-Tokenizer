@@ -20,12 +20,13 @@ from .modules import (
     StereoLossBreakdown,
     StereoReconstructionKLLoss,
 )
-from .modules.attention import Transformer
+from .modules.attention import PEG, Transformer
 from .modules.discriminator import NLayerDiscriminator, NLayerDiscriminator3D
 from .modules.vae import (
     DiagonalGaussianDistribution,
     StructuredDiagonalGaussianPosterior,
 )
+from .profiling import profile_region
 
 
 EyeMode = Literal["mono", "stereo"]
@@ -166,6 +167,14 @@ class StereoVAE(pl.LightningModule):
             # 与 Encoder 保持同一配置语义；默认 False 不启用 causal mask。
             causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
+        self.peg_backend = getattr(args, "peg_backend", "conv3d_contiguous")
+        peg_count = 0
+        for module in self.modules():
+            if isinstance(module, PEG):
+                module.set_backend(self.peg_backend)
+                peg_count += 1
+        if peg_count == 0:
+            raise RuntimeError("StereoVAE contains no PEG modules")
         self.posterior_projection = nn.Sequential(
             Rearrange("b c t h w -> b t h w c"),
             nn.Linear(args.embedding_dim, 2 * args.latent_channels),
@@ -200,6 +209,9 @@ class StereoVAE(pl.LightningModule):
             self.perceptual_model.requires_grad_(False)
         else:
             self.perceptual_model = None
+        self._profile_lpips_gt_cache_enabled = False
+        self._profile_lpips_gt_cache_key = None
+        self._profile_lpips_gt_features = None
 
         self.image_discriminator = None
         self.video_discriminator = None
@@ -239,6 +251,7 @@ class StereoVAE(pl.LightningModule):
         self.four_frame_updates = 0
         self.single_frame_updates = 0
         self.batch_updates = 0
+        self.last_temporal_mode: Optional[TemporalMode] = None
         self.save_hyperparameters("args")
 
     def train(self, mode: bool = True):
@@ -473,6 +486,10 @@ class StereoVAE(pl.LightningModule):
         selected["valid_mask"] = valid_mask[..., index : index + 1, :, :]
         return selected
 
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        with profile_region("stereo/transfer/cpu_to_gpu"):
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
     def encode(
         self,
         video: torch.Tensor,
@@ -481,24 +498,28 @@ class StereoVAE(pl.LightningModule):
         temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
     ) -> StereoEncodeOutput:
-        self._validate_video(
-            video,
-            eye_mode=eye_mode,
-            temporal_mode=temporal_mode,
-        )
-        encoded = self.encoder.forward_stereo(
-            video,
-            eye_mode=eye_mode,
-            temporal_mode=temporal_mode,
-        )
-        parameters = self.posterior_projection(encoded.features)
+        with profile_region("stereo/encoder/input_validation"):
+            self._validate_video(
+                video,
+                eye_mode=eye_mode,
+                temporal_mode=temporal_mode,
+            )
+        with profile_region("stereo/encoder/total"):
+            encoded = self.encoder.forward_stereo(
+                video,
+                eye_mode=eye_mode,
+                temporal_mode=temporal_mode,
+            )
+        with profile_region("stereo/encoder/posterior_projection"):
+            parameters = self.posterior_projection(encoded.features)
         posterior = StructuredDiagonalGaussianPosterior(
             distribution=DiagonalGaussianDistribution(parameters),
             batch_size=encoded.batch_size,
             views=encoded.views,
         )
         should_sample = self.training if sample_posterior is None else sample_posterior
-        latent = posterior.sample() if should_sample else posterior.mode()
+        with profile_region("stereo/encoder/posterior_sample"):
+            latent = posterior.sample() if should_sample else posterior.mode()
         return StereoEncodeOutput(
             latent=latent,
             posterior=posterior,
@@ -523,10 +544,13 @@ class StereoVAE(pl.LightningModule):
         if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
             raise ValueError("latent must contain 48 channels and one temporal slot")
         flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
-        return self.decoder.forward_stereo(
-            self.latent_projection(flattened),
-            temporal_mode=temporal_mode,
-        )
+        with profile_region("stereo/decoder/latent_projection"):
+            projected = self.latent_projection(flattened)
+        with profile_region("stereo/decoder/total"):
+            return self.decoder.forward_stereo(
+                projected,
+                temporal_mode=temporal_mode,
+            )
 
     def forward(
         self,
@@ -588,18 +612,19 @@ class StereoVAE(pl.LightningModule):
         )
         normalized_target = disparity_target / scale
         effective_kl_weight = self._effective_kl_weight()
-        loss = self.core_objective(
-            rgb_prediction=model_output.rgb,
-            rgb_target=rgb_target,
-            normalized_disparity_prediction=model_output.normalized_disparity,
-            normalized_disparity_target=normalized_target,
-            pixel_disparity_prediction=model_output.disparity,
-            pixel_disparity_target=disparity_target,
-            valid_mask=valid_mask,
-            posterior=model_output.posterior,
-            gradient_scale_px=self.geometry_gradient_scale_px,
-            kl_weight_override=effective_kl_weight,
-        )
+        with profile_region("stereo/loss/core_total"):
+            loss = self.core_objective(
+                rgb_prediction=model_output.rgb,
+                rgb_target=rgb_target,
+                normalized_disparity_prediction=model_output.normalized_disparity,
+                normalized_disparity_target=normalized_target,
+                pixel_disparity_prediction=model_output.disparity,
+                pixel_disparity_target=disparity_target,
+                valid_mask=valid_mask,
+                posterior=model_output.posterior,
+                gradient_scale_px=self.geometry_gradient_scale_px,
+                kl_weight_override=effective_kl_weight,
+            )
         return _StereoCoreLossOutput(
             model=model_output,
             loss=loss,
@@ -607,20 +632,58 @@ class StereoVAE(pl.LightningModule):
             effective_kl_weight=effective_kl_weight,
         )
 
+    def set_profile_lpips_gt_cache(self, enabled: bool) -> None:
+        self._profile_lpips_gt_cache_enabled = enabled
+        self._profile_lpips_gt_cache_key = None
+        self._profile_lpips_gt_features = None
+
     def _perceptual_loss(
-        self, prediction: torch.Tensor, target: torch.Tensor
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        sample_ids=None,
     ) -> torch.Tensor:
         if self.perceptual_model is None:
             return prediction.new_zeros(())
         prediction_frames = self._flatten_view_frames(prediction)
         target_frames = self._flatten_view_frames(target)
-        return (
-            self.perceptual_model(
-                prediction_frames * 2.0,
-                target_frames * 2.0,
-            ).mean()
-            * self.perceptual_weight
-        )
+        with profile_region("stereo/loss/lpips_vgg"):
+            if self._profile_lpips_gt_cache_enabled:
+                cache_key = tuple(sample_ids or ())
+                if not cache_key:
+                    raise RuntimeError("LPIPS GT cache requires sample IDs")
+                with profile_region("stereo/loss/lpips_prediction_features"):
+                    prediction_features = self.perceptual_model.normalized_features(
+                        prediction_frames * 2.0
+                    )
+                if self._profile_lpips_gt_features is None:
+                    with profile_region("stereo/loss/lpips_target_features"):
+                        target_features = (
+                            self.perceptual_model.normalized_features(
+                                target_frames * 2.0
+                            )
+                        )
+                    self._profile_lpips_gt_cache_key = cache_key
+                    self._profile_lpips_gt_features = tuple(
+                        feature.detach() for feature in target_features
+                    )
+                elif cache_key != self._profile_lpips_gt_cache_key:
+                    raise RuntimeError("LPIPS GT cache sample order changed")
+                with profile_region("stereo/loss/lpips_distance"):
+                    return (
+                        self.perceptual_model.distance_from_normalized_features(
+                            prediction_features,
+                            self._profile_lpips_gt_features,
+                        ).mean()
+                        * self.perceptual_weight
+                    )
+            return (
+                self.perceptual_model(
+                    prediction_frames * 2.0,
+                    target_frames * 2.0,
+                ).mean()
+                * self.perceptual_weight
+            )
 
     @staticmethod
     def _feature_matching_loss(fake_features, real_features):
@@ -778,13 +841,18 @@ class StereoVAE(pl.LightningModule):
             prog_bar=False,
             logger=True,
             on_step=prefix.startswith("train/"),
-            on_epoch=True,
+            on_epoch=not prefix.startswith("train/"),
             sync_dist=True,
         )
 
     def training_step(self, batch, batch_idx):
+        with profile_region("stereo/step/training_step"):
+            return self._profiled_training_step(batch, batch_idx)
+
+    def _profiled_training_step(self, batch, batch_idx):
         source_batch = self._unwrap_batch(batch)
         temporal_mode = self._temporal_mode_for_update(self.generator_updates)
+        self.last_temporal_mode = temporal_mode
         batch = self._prepare_temporal_batch(
             source_batch,
             temporal_mode=temporal_mode,
@@ -796,7 +864,11 @@ class StereoVAE(pl.LightningModule):
             sample_posterior=True,
         )
         rgb_target = batch["video"][:, :, 0]
-        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        perceptual = self._perceptual_loss(
+            result.model.rgb,
+            rgb_target,
+            sample_ids=batch.get("sample_id"),
+        )
         gan_active = self._gan_is_active()
         adversarial, feature_matching, image_gan, video_gan = (
             self._generator_adversarial_loss(
@@ -812,25 +884,30 @@ class StereoVAE(pl.LightningModule):
         optimizers = self._as_sequence(self.optimizers())
         schedulers = self._as_sequence(self.lr_schedulers())
         generator_optimizer = optimizers[0]
-        self.manual_backward(generator_loss / self.grad_accumulates)
+        with profile_region("stereo/update/backward"):
+            self.manual_backward(generator_loss / self.grad_accumulates)
 
         self.batch_updates += 1
         self._micro_step += 1
         should_step = self._micro_step % self.grad_accumulates == 0
         if should_step:
             if self.grad_clip_val is not None:
-                self.clip_gradients(
-                    generator_optimizer,
-                    gradient_clip_val=self.grad_clip_val,
-                )
-            generator_optimizer.step()
-            generator_optimizer.zero_grad()
+                with profile_region("stereo/update/gradient_clipping"):
+                    self.clip_gradients(
+                        generator_optimizer,
+                        gradient_clip_val=self.grad_clip_val,
+                    )
+            with profile_region("stereo/update/adam_step"):
+                generator_optimizer.step()
+            with profile_region("stereo/update/zero_grad"):
+                generator_optimizer.zero_grad()
             if temporal_mode == "four_frame":
                 self.four_frame_updates += 1
             else:
                 self.single_frame_updates += 1
             self.generator_updates += 1
-            schedulers[0].step_update(self.generator_updates)
+            with profile_region("stereo/update/scheduler"):
+                schedulers[0].step_update(self.generator_updates)
             self._micro_step = 0
 
         discriminator_total = result.model.rgb.new_zeros(())
@@ -867,11 +944,12 @@ class StereoVAE(pl.LightningModule):
 
         mode_name = "four" if temporal_mode == "four_frame" else "single"
         prefix = f"train/{mode_name}"
-        self._log_loss_breakdown(
-            prefix,
-            result,
-            total_loss=generator_loss,
-        )
+        with profile_region("stereo/logging/loss_breakdown"):
+            self._log_loss_breakdown(
+                prefix,
+                result,
+                total_loss=generator_loss,
+            )
         mode_metrics = {
             f"{prefix}/perceptual_loss": perceptual,
             f"{prefix}/adversarial_loss": adversarial,
@@ -898,13 +976,14 @@ class StereoVAE(pl.LightningModule):
         if temporal_mode == "four_frame":
             mode_metrics[f"{prefix}/g_video_loss"] = video_gan
             mode_metrics[f"{prefix}/d_video_loss"] = discriminator_video
-        self.log_dict(
-            mode_metrics,
-            logger=True,
-            on_step=True,
-            on_epoch=True,
-            sync_dist=True,
-        )
+        with profile_region("stereo/logging/train_metrics"):
+            self.log_dict(
+                mode_metrics,
+                logger=True,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=True,
+            )
         return {"loss": generator_loss.detach()}
 
     def validation_step(self, batch, batch_idx):
@@ -1129,6 +1208,11 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--causal_in_peg", action="store_true")
         # 保留原版配置接口；默认不启用 causal，视频四帧均已观测时使用双向注意力。
         parser.add_argument("--causal_in_temporal_transformer", action="store_true")
+        parser.add_argument(
+            "--peg_backend",
+            choices=("conv3d_contiguous", "conv2d_t1_slice"),
+            default="conv3d_contiguous",
+        )
         parser.add_argument("--dim_head", type=int, default=64)
         parser.add_argument("--heads", type=int, default=8)
         parser.add_argument("--attn_dropout", type=float, default=0.0)
@@ -1330,14 +1414,16 @@ class StereoEncoder(nn.Module):
                 f"expected stereo frame size {self.image_size}, got {(height, width)}"
             )
 
-        frame_tokens = self.to_patch_emb_first_frame(frames[:, :, None])
+        with profile_region("stereo/encoder/patch_embedding"):
+            frame_tokens = self.to_patch_emb_first_frame(frames[:, :, None])
         grid_height, grid_width = frame_tokens.shape[2:4]
         tokens = rearrange(frame_tokens, "n 1 h w d -> n (h w) d")
-        tokens = self.enc_spatial_transformer(
-            tokens,
-            video_shape=(count, 1, grid_height, grid_width),
-            is_spatial=True,
-        )
+        with profile_region("stereo/encoder/spatial_transformer"):
+            tokens = self.enc_spatial_transformer(
+                tokens,
+                video_shape=(count, 1, grid_height, grid_width),
+                is_spatial=True,
+            )
         if tokens.shape[1] != grid_height * grid_width:
             raise RuntimeError(
                 "structured Stereo Encoder must preserve the spatial token grid"
@@ -1409,14 +1495,16 @@ class StereoEncoder(nn.Module):
         left = frame_features[:, :, 0]
         fusion_output: Optional[StereoFusionOutput]
         if eye_mode == "stereo":
-            fusion_output = self.stereo_fusion(left, frame_features[:, :, 1])
+            with profile_region("stereo/encoder/stereo_fusion"):
+                fusion_output = self.stereo_fusion(left, frame_features[:, :, 1])
             fused = fusion_output.features
         else:
             fusion_output = None
             fused = left
 
         if temporal_mode == "single_frame":
-            projected = self.single_frame_projection(fused[:, :, 0])
+            with profile_region("stereo/encoder/single_frame_projection"):
+                projected = self.single_frame_projection(fused[:, :, 0])
         else:
             # 每个 View、每个空间位置各自形成长度为 4 的序列，不跨 View/空间混合。
             temporal_tokens = rearrange(
@@ -1424,16 +1512,17 @@ class StereoEncoder(nn.Module):
                 "b v t h w d -> (b v h w) t d",
             )
             temporal_tokens = temporal_tokens + self.enc_temporal_position
-            temporal_tokens = self.enc_temporal_transformer(
-                temporal_tokens,
-                video_shape=(
-                    batch * views * grid_height * grid_width,
-                    time,
-                    1,
-                    1,
-                ),
-                is_spatial=False,
-            )
+            with profile_region("stereo/encoder/temporal_transformer"):
+                temporal_tokens = self.enc_temporal_transformer(
+                    temporal_tokens,
+                    video_shape=(
+                        batch * views * grid_height * grid_width,
+                        time,
+                        1,
+                        1,
+                    ),
+                    is_spatial=False,
+                )
             temporal_features = rearrange(
                 temporal_tokens,
                 "(b v h w) t d -> b v h w (t d)",
@@ -1444,7 +1533,8 @@ class StereoEncoder(nn.Module):
             )
 
             # Temporal Sampler 只负责在帧间注意力之后执行 4D -> D 压缩。
-            projected = self.stereo_temporal_projection(temporal_features)
+            with profile_region("stereo/encoder/four_frame_projection"):
+                projected = self.stereo_temporal_projection(temporal_features)
         features = rearrange(projected, "b v h w d -> (b v) d 1 h w")
         return _StereoEncoderOutput(
             features=features,
@@ -1598,26 +1688,29 @@ class StereoDecoder(nn.Module):
 
         output_time = temporal_mode_num_frames(temporal_mode)
         if temporal_mode == "single_frame":
-            expanded = self.single_frame_expansion(tokens[:, 0])[:, None]
+            with profile_region("stereo/decoder/single_frame_expansion"):
+                expanded = self.single_frame_expansion(tokens[:, 0])[:, None]
             expanded = rearrange(expanded, "n t h w d -> (n h w) t d")
         else:
             # D -> 4D 后恢复四个帧级 feature，时间 Attention 在空间解码之前执行。
-            expanded = self.stereo_temporal_expansion(tokens[:, 0])
+            with profile_region("stereo/decoder/four_frame_expansion"):
+                expanded = self.stereo_temporal_expansion(tokens[:, 0])
             expanded = expanded.reshape(
                 batch_views, height, width, self.stereo_num_frames, dim
             )
             expanded = rearrange(expanded, "n h w t d -> (n h w) t d")
             expanded = expanded + self.dec_temporal_position
-            expanded = self.dec_temporal_transformer(
-                expanded,
-                video_shape=(
-                    batch_views * height * width,
-                    self.stereo_num_frames,
-                    1,
-                    1,
-                ),
-                is_spatial=False,
-            )
+            with profile_region("stereo/decoder/temporal_transformer"):
+                expanded = self.dec_temporal_transformer(
+                    expanded,
+                    video_shape=(
+                        batch_views * height * width,
+                        self.stereo_num_frames,
+                        1,
+                        1,
+                    ),
+                    is_spatial=False,
+                )
 
         # Spatial Decoder 把每帧视为独立样本，PEG 只能看到 T=1。
         frame_tokens = rearrange(
@@ -1627,11 +1720,12 @@ class StereoDecoder(nn.Module):
             h=height,
             w=width,
         )
-        frame_tokens = self.dec_spatial_transformer(
-            frame_tokens,
-            video_shape=(batch_views * output_time, 1, height, width),
-            is_spatial=True,
-        )
+        with profile_region("stereo/decoder/spatial_transformer"):
+            frame_tokens = self.dec_spatial_transformer(
+                frame_tokens,
+                video_shape=(batch_views * output_time, 1, height, width),
+                is_spatial=True,
+            )
         return rearrange(
             frame_tokens,
             "(n t) (h w) d -> n t h w d",
@@ -1691,16 +1785,18 @@ class StereoDecoder(nn.Module):
                 f"decoder must produce {expected_time} frame-level features"
             )
 
-        rgb = self._unpatch_stereo(
-            self.stereo_rgb_head(features),
-            output_channels=3,
-            temporal_mode=temporal_mode,
-        )
-        raw_disparity = self._unpatch_stereo(
-            self.stereo_disparity_head(features),
-            output_channels=1,
-            temporal_mode=temporal_mode,
-        )
+        with profile_region("stereo/decoder/rgb_head"):
+            rgb = self._unpatch_stereo(
+                self.stereo_rgb_head(features),
+                output_channels=3,
+                temporal_mode=temporal_mode,
+            )
+        with profile_region("stereo/decoder/disparity_head"):
+            raw_disparity = self._unpatch_stereo(
+                self.stereo_disparity_head(features),
+                output_channels=1,
+                temporal_mode=temporal_mode,
+            )
         batch = tokens.shape[0] // self.stereo_num_views
         rgb = rearrange(rgb, "(b v) c t h w -> b v c t h w", b=batch, v=self.stereo_num_views)
         raw_disparity = rearrange(
