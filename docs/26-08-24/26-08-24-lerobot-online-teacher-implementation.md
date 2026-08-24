@@ -369,3 +369,57 @@ No item below has run yet. Each needs user approval before execution.
   model, 408-sample selection, 32/16/12 iteration order, batch sizes, and eight
   GPU ranks are unchanged. Initial ETA remains 5-15 minutes for the comparison
   plus about 2 minutes for result aggregation and artifact validation.
+
+## Completed 408-sample teacher comparison
+
+The retry completed successfully on H200-2 and wrote `summary.json` plus all 24
+rank/configuration NPZ artifacts under
+`/data/home/frank/experiments/foundation_teacher_compare_h200_2_verified_408_20260824_retry1`.
+The tmux and matching worker processes exited. A later status snapshot showed a
+different high-utilization GPU workload, so no further GPU action was taken.
+
+| Iterations | Samples/s | Seconds/sample | Teacher seconds/pair | Peak allocated/reserved |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 9.996 | 0.1000 | 0.05338 | 15.99/23.98 GB |
+| 16 | 12.312 | 0.0812 | 0.04131 | 15.99/23.98 GB |
+| 12 | 14.167 | 0.0706 | 0.03390 | 15.99/23.98 GB |
+
+Relative to 32 iterations, 16 iterations achieved disparity-difference
+P50/P95/P99 of 0.0207/0.2726/1.1152 px and valid-mask IoU 0.9518. Its valid
+ratios changed by -0.00055/-0.00206/-0.00167 for head/left/right. Twelve
+iterations achieved 0.0315/0.4146/1.6782 px and IoU 0.9340. All configurations
+had finite-disparity ratio 1.0.
+
+The pre-agreed 16-versus-32 numeric gate therefore failed only the mask-IoU
+threshold of 0.98; its disparity P50/P95 thresholds passed. Without changing
+that gate or adding a manual waiver, the fail-closed training choice is 32
+iterations. This avoids another teacher-forward experiment. Choosing 16 instead
+would be a new project decision and should first use the existing NPZ artifacts
+for per-view mask-disagreement review; no forward rerun is necessary.
+
+## Minimum remaining experiments before full-data training
+
+1. One-GPU integrated online-teacher plus StereoVAE smoke, cache disabled and
+   32 iterations: three optimizer updates covering decode, teacher, VAE
+   forward/backward, optimizer, finite loss components, and peak memory.
+2. Eight-GPU fixed-global-batch-192 comparison on the target H200-1 full-data
+   path: BS4/GA6, BS8/GA3, and BS12/GA2, with identical ordering and five warmup
+   plus ten measured optimizer updates per arm. Record end-to-end samples/s,
+   update time, decode/teacher/VAE/backward/optimizer breakdown, CPU wait, and
+   allocated/reserved memory. Reject OOM or unstable/nonfinite arms.
+3. One final winning-recipe end-to-end acceptance run: 50 optimizer updates,
+   cache disabled, fixed 512-sample validation once, metric-depth/disparity/RGB
+   metrics, loss-component health, checkpoint write, and strict checkpoint
+   evaluation load. This run also freezes the explicit loss weights, LR/min-LR,
+   optimizer/KL warmups, workers, and media/checkpoint intervals; a separate
+   loss grid is only needed if this run shows imbalance or non-convergence.
+4. After those experiments, a read-only launch preflight for exact clean SHA,
+   H200-1 runtime/checkpoint/manifest hashes, resolved config, GPU ownership,
+   and an absent output path. Use measured end-to-end throughput to convert the
+   intended ten-hour budget into `max_steps`; no code-level graceful-stop
+   implementation is added.
+
+Manifest regeneration, rectification audit/remap, another decoder audit, strict
+FoundationStereo load, another 32/16/12 forward comparison, H200-2-local full
+manifest generation, and offline GT-cache generation are not required before
+this H200-1 full-data launch under the accepted scope.
