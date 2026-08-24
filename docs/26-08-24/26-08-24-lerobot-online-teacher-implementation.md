@@ -277,3 +277,9 @@ No item below has run yet. Each needs user approval before execution.
   Dash/Jupyter/scikit-learn dependency closure to the training environment.
   Local Python compilation, `git diff --check`, and 23/23 source tests pass;
   server strict construction remains pending asset sync and code deployment.
+- H200-2 strict CPU construction with CUDA hidden confirmed that the Open3D
+  blocker is removed and local DINOv2 constructs successfully. It then stopped
+  at PyTorch 2.6+'s `torch.load(weights_only=True)` default because the verified
+  FoundationStereo training payload contains NumPy scalar metadata. The loader
+  now explicitly uses `weights_only=False` only after the frozen checkpoint
+  SHA256 has matched, and still applies `load_state_dict(strict=True)`.

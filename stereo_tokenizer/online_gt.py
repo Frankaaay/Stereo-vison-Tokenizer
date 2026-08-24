@@ -118,7 +118,13 @@ class FoundationStereoOnlineTeacher:
         finally:
             timm.create_model = original_create_model
             torch.hub.load = original_hub_load
-        payload = torch.load(self.checkpoint, map_location="cpu")
+        # The full FoundationStereo training payload contains NumPy metadata.
+        # Its bytes are trusted only after the frozen SHA256 check in __init__.
+        payload = torch.load(
+            self.checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
         model.load_state_dict(payload["model"], strict=True)
         model.requires_grad_(False)
         model.to(self.device)
