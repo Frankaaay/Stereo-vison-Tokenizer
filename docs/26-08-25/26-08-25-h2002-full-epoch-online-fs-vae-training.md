@@ -254,3 +254,15 @@
   used about 13.4 GiB on GPU 0 and 15.8 GiB each on GPUs 5 and 7; all were left
   untouched. The depth-case job may share those GPUs under the user's explicit
   authorization.
+- Implementation commit `4b8652d91611db79697146a05232d9b41679eaf4`
+  passed 27 local source/boundary tests and 14/14 H200-2 entrypoint tests. The
+  node cleanly fast-forwarded to that exact SHA.
+- The depth-case run started in tmux `stereo-depth-cases6-h2002-260825` with
+  fresh output
+  `/data/home/frank/experiments/stereo_merged_fs_vae_depth_cases6_h2002_20260825_v1`.
+  It uses eight ranks, BS24, BF16, `--max_batches 1`, both temporal modes, and
+  six cases. Startup health at `2026-08-25T20:02:51+08:00` showed the tmux and
+  torchrun launcher present, the correct SHA recorded, and no immediate
+  traceback/OOM; it was still in distributed initialization. Estimated total
+  time is 6--9 minutes including initialization, one metric batch, six teacher
+  passes, 12 PNG writes, aggregation, and artifact validation.
