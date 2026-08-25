@@ -1,7 +1,9 @@
 import argparse
+import hashlib
 import json
 import os
 import statistics
+import subprocess
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -17,7 +19,10 @@ from torch.profiler import ProfilerActivity
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
-from stereo_tokenizer.online_gt import OnlineFoundationGTCallback
+from stereo_tokenizer.online_gt import (
+    OnlineFoundationGTCallback,
+    validate_tensorrt_engine_assets,
+)
 from stereo_tokenizer.profiling import set_profiling_enabled
 
 
@@ -251,6 +256,11 @@ def build_parser():
     parser.add_argument("--torch_profile_warmup", type=int, default=2)
     parser.add_argument("--torch_profile_active", type=int, default=4)
     parser.add_argument("--online_gt_enabled", type=int, choices=(0, 1), default=0)
+    parser.add_argument(
+        "--foundation_stereo_backend",
+        choices=("pytorch", "tensorrt"),
+        default="pytorch",
+    )
     parser.add_argument("--foundation_stereo_repo", type=str, default=None)
     parser.add_argument("--foundation_stereo_checkpoint", type=str, default=None)
     parser.add_argument(
@@ -264,6 +274,16 @@ def build_parser():
     )
     parser.add_argument(
         "--foundation_stereo_pair_microbatch", type=int, default=48
+    )
+    parser.add_argument("--foundation_stereo_engine", type=str, default=None)
+    parser.add_argument(
+        "--foundation_stereo_engine_sha256", type=str, default=None
+    )
+    parser.add_argument(
+        "--foundation_stereo_engine_manifest", type=str, default=None
+    )
+    parser.add_argument(
+        "--foundation_stereo_engine_manifest_sha256", type=str, default=None
     )
     parser.add_argument(
         "--online_gt_cache_enabled", type=int, choices=(0, 1), default=0
@@ -321,12 +341,34 @@ def validate_runtime_args(args):
             "lerobot_rectification_audit_sha256": (
                 args.lerobot_rectification_audit_sha256
             ),
-            "foundation_stereo_repo": args.foundation_stereo_repo,
-            "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
             "foundation_stereo_checkpoint_sha256": (
                 args.foundation_stereo_checkpoint_sha256
             ),
         }
+        if args.foundation_stereo_backend == "pytorch":
+            required.update(
+                {
+                    "foundation_stereo_repo": args.foundation_stereo_repo,
+                    "foundation_stereo_checkpoint": (
+                        args.foundation_stereo_checkpoint
+                    ),
+                }
+            )
+        else:
+            required.update(
+                {
+                    "foundation_stereo_engine": args.foundation_stereo_engine,
+                    "foundation_stereo_engine_sha256": (
+                        args.foundation_stereo_engine_sha256
+                    ),
+                    "foundation_stereo_engine_manifest": (
+                        args.foundation_stereo_engine_manifest
+                    ),
+                    "foundation_stereo_engine_manifest_sha256": (
+                        args.foundation_stereo_engine_manifest_sha256
+                    ),
+                }
+            )
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ValueError(
@@ -342,6 +384,31 @@ def validate_runtime_args(args):
             raise ValueError("online GT cache requires --online_gt_cache_root")
         if args.foundation_stereo_pair_microbatch < 1:
             raise ValueError("FoundationStereo pair microbatch must be positive")
+        engine_values = (
+            args.foundation_stereo_engine,
+            args.foundation_stereo_engine_sha256,
+            args.foundation_stereo_engine_manifest,
+            args.foundation_stereo_engine_manifest_sha256,
+        )
+        if args.foundation_stereo_backend == "pytorch":
+            if any(value is not None for value in engine_values):
+                raise ValueError(
+                    "PyTorch FoundationStereo forbids TensorRT engine arguments"
+                )
+        else:
+            if args.foundation_stereo_valid_iters != 32:
+                raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
+            if args.foundation_stereo_pair_microbatch > 48:
+                raise ValueError(
+                    "TensorRT pair microbatch exceeds the frozen max batch 48"
+                )
+            validate_tensorrt_engine_assets(
+                args.foundation_stereo_engine,
+                args.foundation_stereo_engine_sha256,
+                args.foundation_stereo_engine_manifest,
+                args.foundation_stereo_engine_manifest_sha256,
+                args.foundation_stereo_checkpoint_sha256,
+            )
         if args.online_val_check_interval_steps < 1:
             raise ValueError("online validation interval must be positive")
         if args.lerobot_val_sample_limit != 512:
@@ -387,6 +454,85 @@ def validate_runtime_args(args):
             )
     if args.train_epoch_repeats < 1:
         raise ValueError("--train_epoch_repeats must be positive")
+
+
+def _jsonable(value):
+    if isinstance(value, Path):
+        return str(value.expanduser().resolve())
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _write_immutable_json(path, payload):
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") != serialized:
+            raise ValueError(f"refusing to overwrite mismatched run metadata {path}")
+        return serialized
+    path.write_text(serialized, encoding="utf-8")
+    return serialized
+
+
+def write_online_gt_run_metadata(args):
+    """Persist resolved backend provenance before an online-teacher run."""
+    if not args.online_gt_enabled or int(os.environ.get("RANK", "0")) != 0:
+        return
+    output_root = Path(args.default_root_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    resolved = {key: _jsonable(value) for key, value in vars(args).items()}
+    resolved_serialized = _write_immutable_json(
+        output_root / "resolved_config.json", resolved
+    )
+    code_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    online_gt = {
+        "backend": args.foundation_stereo_backend,
+        "checkpoint_sha256": args.foundation_stereo_checkpoint_sha256,
+        "valid_iters": args.foundation_stereo_valid_iters,
+        "pair_microbatch": args.foundation_stereo_pair_microbatch,
+        "bidirectional": True,
+        "lr_consistency": True,
+    }
+    if args.foundation_stereo_backend == "pytorch":
+        online_gt.update(
+            {
+                "repo": str(Path(args.foundation_stereo_repo).resolve()),
+                "checkpoint": str(
+                    Path(args.foundation_stereo_checkpoint).resolve()
+                ),
+            }
+        )
+    else:
+        online_gt.update(
+            {
+                "engine": str(Path(args.foundation_stereo_engine).resolve()),
+                "engine_sha256": args.foundation_stereo_engine_sha256,
+                "engine_manifest": str(
+                    Path(args.foundation_stereo_engine_manifest).resolve()
+                ),
+                "engine_manifest_sha256": (
+                    args.foundation_stereo_engine_manifest_sha256
+                ),
+            }
+        )
+    run_manifest = {
+        "schema": "stereo-vae-online-gt-run-v1",
+        "code_sha": code_sha,
+        "resolved_config_sha256": hashlib.sha256(
+            resolved_serialized.encode("utf-8")
+        ).hexdigest(),
+        "online_gt": online_gt,
+    }
+    _write_immutable_json(output_root / "run_manifest.json", run_manifest)
+    print(json.dumps({"online_gt_provenance": online_gt}, sort_keys=True))
 
 
 def build_callbacks(args, has_validation):
@@ -439,6 +585,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     validate_runtime_args(args)
+    write_online_gt_run_metadata(args)
     pl.seed_everything(args.seed)
 
     data = StereoDataModule(args)

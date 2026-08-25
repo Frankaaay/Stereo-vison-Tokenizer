@@ -34,9 +34,37 @@ elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
   : "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
   : "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
   : "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
-  : "${FOUNDATION_STEREO_REPO:?set the FoundationStereo repository}"
-  : "${FOUNDATION_STEREO_CHECKPOINT:?set the ViT-L checkpoint}"
   : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
+  FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
+  FOUNDATION_BACKEND_ARGS=()
+  if [[ "${FOUNDATION_STEREO_BACKEND}" == "pytorch" ]]; then
+    : "${FOUNDATION_STEREO_REPO:?set the FoundationStereo repository}"
+    : "${FOUNDATION_STEREO_CHECKPOINT:?set the ViT-L checkpoint}"
+    FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-16}"
+    FOUNDATION_BACKEND_ARGS+=(
+      --foundation_stereo_repo "${FOUNDATION_STEREO_REPO}"
+      --foundation_stereo_checkpoint "${FOUNDATION_STEREO_CHECKPOINT}"
+    )
+  elif [[ "${FOUNDATION_STEREO_BACKEND}" == "tensorrt" ]]; then
+    : "${FOUNDATION_STEREO_ENGINE:?set the TensorRT engine path}"
+    : "${FOUNDATION_STEREO_ENGINE_SHA256:?set the TensorRT engine SHA256}"
+    : "${FOUNDATION_STEREO_ENGINE_MANIFEST:?set the engine manifest path}"
+    : "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256:?set the engine manifest SHA256}"
+    FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-32}"
+    if [[ "${FOUNDATION_STEREO_VALID_ITERS}" != "32" ]]; then
+      echo "TensorRT FoundationStereo is frozen to 32 iterations" >&2
+      exit 2
+    fi
+    FOUNDATION_BACKEND_ARGS+=(
+      --foundation_stereo_engine "${FOUNDATION_STEREO_ENGINE}"
+      --foundation_stereo_engine_sha256 "${FOUNDATION_STEREO_ENGINE_SHA256}"
+      --foundation_stereo_engine_manifest "${FOUNDATION_STEREO_ENGINE_MANIFEST}"
+      --foundation_stereo_engine_manifest_sha256 "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256}"
+    )
+  else
+    echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
+    exit 2
+  fi
   DATA_ARGS+=(
     --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
     --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
@@ -51,14 +79,14 @@ elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
   fi
   ONLINE_GT_ARGS+=(
     --online_gt_enabled 1
-    --foundation_stereo_repo "${FOUNDATION_STEREO_REPO}"
-    --foundation_stereo_checkpoint "${FOUNDATION_STEREO_CHECKPOINT}"
+    --foundation_stereo_backend "${FOUNDATION_STEREO_BACKEND}"
     --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
-    --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS:-16}"
+    --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
     --foundation_stereo_pair_microbatch "${FOUNDATION_STEREO_PAIR_MICROBATCH:-48}"
     --online_gt_cache_enabled "${ONLINE_GT_CACHE_ENABLED}"
     --online_gt_cache_root "${ONLINE_GT_CACHE_ROOT:-}"
     --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
+    "${FOUNDATION_BACKEND_ARGS[@]}"
   )
 else
   echo "unsupported STEREO_DATA_BACKEND=${STEREO_DATA_BACKEND}" >&2

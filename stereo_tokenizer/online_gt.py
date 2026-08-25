@@ -18,7 +18,9 @@ from pytorch_lightning.callbacks import Callback
 from .profiling import profile_region
 
 
-CACHE_SCHEMA = "stereo-online-foundation-gt-v1"
+CACHE_SCHEMA = "stereo-online-foundation-gt-v2"
+TENSORRT_ENGINE_MANIFEST_SCHEMA = "foundation-stereo-tensorrt-engine-v1"
+TENSORRT_BINDING_ROLES = ("left", "right", "disparity")
 
 
 class _UnavailableOpen3D(types.ModuleType):
@@ -39,6 +41,335 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_sha256(value, field):
+    if not isinstance(value, str) or len(value) != 64:
+        raise ValueError(f"{field} must be a full SHA256")
+    try:
+        int(value, 16)
+    except ValueError as error:
+        raise ValueError(f"{field} must be hexadecimal") from error
+
+
+def _require_git_sha(value, field):
+    if not isinstance(value, str) or len(value) != 40:
+        raise ValueError(f"{field} must be a full Git SHA")
+    try:
+        int(value, 16)
+    except ValueError as error:
+        raise ValueError(f"{field} must be hexadecimal") from error
+
+
+def validate_tensorrt_engine_assets(
+    engine,
+    engine_sha256,
+    manifest,
+    manifest_sha256,
+    checkpoint_sha256,
+):
+    """Validate immutable TensorRT assets without importing TensorRT."""
+    engine = Path(engine).expanduser().resolve()
+    manifest = Path(manifest).expanduser().resolve()
+    for value, field in (
+        (engine_sha256, "TensorRT engine SHA256"),
+        (manifest_sha256, "TensorRT engine manifest SHA256"),
+        (checkpoint_sha256, "FoundationStereo checkpoint SHA256"),
+    ):
+        _require_sha256(value, field)
+    if not engine.is_file():
+        raise FileNotFoundError(engine)
+    if not manifest.is_file():
+        raise FileNotFoundError(manifest)
+    if sha256_file(engine) != engine_sha256:
+        raise ValueError("TensorRT engine SHA256 mismatch")
+    if sha256_file(manifest) != manifest_sha256:
+        raise ValueError("TensorRT engine manifest SHA256 mismatch")
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid TensorRT engine manifest JSON") from error
+    if payload.get("schema") != TENSORRT_ENGINE_MANIFEST_SCHEMA:
+        raise ValueError("unsupported TensorRT engine manifest schema")
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("TensorRT manifest artifacts must be an object")
+    _require_git_sha(
+        artifacts.get("foundation_stereo_repo_sha"),
+        "manifest FoundationStereo repo SHA",
+    )
+    for key in (
+        "checkpoint_sha256",
+        "config_sha256",
+        "onnx_sha256",
+        "engine_sha256",
+    ):
+        _require_sha256(artifacts.get(key), f"manifest {key}")
+    if artifacts["checkpoint_sha256"] != checkpoint_sha256:
+        raise ValueError("TensorRT manifest checkpoint SHA256 mismatch")
+    if artifacts["engine_sha256"] != engine_sha256:
+        raise ValueError("TensorRT manifest engine SHA256 mismatch")
+
+    build = payload.get("build")
+    expected_build = {
+        "height": 256,
+        "width": 256,
+        "valid_iters": 32,
+        "opset": 16,
+        "precision": "fp16",
+        "xformers_disabled": True,
+        "input_layout": "NCHW",
+        "input_range": [0.0, 255.0],
+        "output_semantics": "left_positive_disparity_px",
+    }
+    if not isinstance(build, dict):
+        raise ValueError("TensorRT manifest build must be an object")
+    for key, expected in expected_build.items():
+        if build.get(key) != expected:
+            raise ValueError(
+                f"TensorRT manifest build.{key} must be {expected!r}"
+            )
+    profile = build.get("batch_profile")
+    if profile != {"min": 1, "opt": 48, "max": 48}:
+        raise ValueError("TensorRT manifest batch profile must be 1/48/48")
+
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, dict) or set(bindings) != set(
+        TENSORRT_BINDING_ROLES
+    ):
+        raise ValueError("TensorRT manifest must declare left/right/disparity")
+    expected_bindings = {
+        "left": ("input", [-1, 3, 256, 256]),
+        "right": ("input", [-1, 3, 256, 256]),
+        "disparity": ("output", [-1, 1, 256, 256]),
+    }
+    names = set()
+    for role, (mode, shape) in expected_bindings.items():
+        binding = bindings[role]
+        if not isinstance(binding, dict):
+            raise ValueError(f"TensorRT manifest binding {role} must be an object")
+        name = binding.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"TensorRT manifest binding {role} needs a name")
+        names.add(name)
+        if binding.get("mode") != mode:
+            raise ValueError(f"TensorRT manifest binding {role} mode mismatch")
+        if binding.get("dtype") not in {"float16", "float32"}:
+            raise ValueError(f"TensorRT manifest binding {role} dtype is unsupported")
+        if binding.get("shape") != shape:
+            raise ValueError(f"TensorRT manifest binding {role} shape mismatch")
+    if len(names) != len(TENSORRT_BINDING_ROLES):
+        raise ValueError("TensorRT manifest binding names must be unique")
+
+    environment = payload.get("environment")
+    for key in ("tensorrt", "cuda", "driver", "gpu"):
+        if not isinstance(environment, dict) or not environment.get(key):
+            raise ValueError(f"TensorRT manifest environment.{key} is required")
+    commands = payload.get("commands")
+    for key in ("onnx_export", "trtexec_build"):
+        if not isinstance(commands, dict) or not commands.get(key):
+            raise ValueError(f"TensorRT manifest commands.{key} is required")
+    return payload
+
+
+class FoundationStereoTensorRTRunner:
+    """TensorRT v10 runner using direct PyTorch CUDA tensor bindings."""
+
+    def __init__(
+        self,
+        engine,
+        engine_sha256,
+        manifest,
+        manifest_sha256,
+        checkpoint_sha256,
+        *,
+        device,
+    ):
+        self.engine_path = Path(engine).expanduser().resolve()
+        self.manifest_path = Path(manifest).expanduser().resolve()
+        self.device = torch.device(device)
+        if self.device.type != "cuda":
+            raise ValueError("TensorRT FoundationStereo requires a CUDA device")
+        current_device = torch.cuda.current_device()
+        device_index = (
+            current_device if self.device.index is None else self.device.index
+        )
+        if device_index != current_device:
+            raise RuntimeError(
+                "TensorRT runner must be created on the current rank CUDA device"
+            )
+        self.device = torch.device("cuda", device_index)
+        self.manifest = validate_tensorrt_engine_assets(
+            self.engine_path,
+            engine_sha256,
+            self.manifest_path,
+            manifest_sha256,
+            checkpoint_sha256,
+        )
+        try:
+            import tensorrt as trt
+        except ImportError as error:
+            raise RuntimeError(
+                "TensorRT backend requires the tensorrt Python package"
+            ) from error
+        for attribute in (
+            "Runtime",
+            "Logger",
+            "TensorIOMode",
+            "TensorLocation",
+            "TensorFormat",
+        ):
+            if not hasattr(trt, attribute):
+                raise RuntimeError("TensorRT v10 Python API is required")
+        runtime_environment = {
+            "tensorrt": str(getattr(trt, "__version__", "")),
+            "cuda": str(torch.version.cuda),
+            "gpu": torch.cuda.get_device_name(self.device),
+        }
+        for key, actual in runtime_environment.items():
+            if self.manifest["environment"][key] != actual:
+                raise ValueError(
+                    f"TensorRT runtime {key} {actual!r} does not match manifest"
+                )
+        self._trt = trt
+        self._logger = trt.Logger(trt.Logger.ERROR)
+        self._runtime = trt.Runtime(self._logger)
+        self._engine = self._runtime.deserialize_cuda_engine(
+            self.engine_path.read_bytes()
+        )
+        if self._engine is None:
+            raise RuntimeError("failed to deserialize TensorRT engine")
+        if not hasattr(self._engine, "num_io_tensors"):
+            raise RuntimeError("TensorRT engine does not expose the v10 IO API")
+        self._context = self._engine.create_execution_context()
+        if self._context is None:
+            raise RuntimeError("failed to create TensorRT execution context")
+        self._bindings = self.manifest["bindings"]
+        self._profile = self.manifest["build"]["batch_profile"]
+        self._validate_engine_contract()
+
+    def _dtype(self, name):
+        dtype = self._engine.get_tensor_dtype(name)
+        if dtype == self._trt.float16:
+            return torch.float16
+        if dtype == self._trt.float32:
+            return torch.float32
+        raise ValueError(f"TensorRT binding {name} has unsupported dtype {dtype}")
+
+    def _validate_engine_contract(self):
+        if getattr(self._engine, "num_optimization_profiles", 0) != 1:
+            raise ValueError("TensorRT engine must contain exactly one profile")
+        actual_names = {
+            self._engine.get_tensor_name(index)
+            for index in range(self._engine.num_io_tensors)
+        }
+        expected_names = {
+            binding["name"] for binding in self._bindings.values()
+        }
+        if actual_names != expected_names:
+            raise ValueError("TensorRT engine IO names do not match manifest")
+        for role, binding in self._bindings.items():
+            name = binding["name"]
+            expected_mode = (
+                self._trt.TensorIOMode.INPUT
+                if binding["mode"] == "input"
+                else self._trt.TensorIOMode.OUTPUT
+            )
+            if self._engine.get_tensor_mode(name) != expected_mode:
+                raise ValueError(f"TensorRT engine binding {role} mode mismatch")
+            if (
+                self._engine.get_tensor_location(name)
+                != self._trt.TensorLocation.DEVICE
+            ):
+                raise ValueError(f"TensorRT engine binding {role} is not device IO")
+            if (
+                self._engine.get_tensor_format(name)
+                != self._trt.TensorFormat.LINEAR
+            ):
+                raise ValueError(f"TensorRT engine binding {role} is not linear")
+            if self._dtype(name) != {
+                "float16": torch.float16,
+                "float32": torch.float32,
+            }[binding["dtype"]]:
+                raise ValueError(f"TensorRT engine binding {role} dtype mismatch")
+            actual_shape = tuple(
+                int(value) for value in self._engine.get_tensor_shape(name)
+            )
+            if actual_shape != tuple(binding["shape"]):
+                raise ValueError(f"TensorRT engine binding {role} shape mismatch")
+            if binding["mode"] == "input":
+                profile_shapes = self._engine.get_tensor_profile_shape(name, 0)
+                expected = tuple(
+                    (batch, 3, 256, 256)
+                    for batch in (
+                        self._profile["min"],
+                        self._profile["opt"],
+                        self._profile["max"],
+                    )
+                )
+                actual = tuple(
+                    tuple(int(value) for value in shape)
+                    for shape in profile_shapes
+                )
+                if actual != expected:
+                    raise ValueError(
+                        f"TensorRT engine binding {role} profile mismatch"
+                    )
+
+    def infer(self, left, right):
+        if left.shape != right.shape:
+            raise ValueError("TensorRT left/right input shapes differ")
+        if left.ndim != 4 or tuple(left.shape[1:]) != (3, 256, 256):
+            raise ValueError("TensorRT inputs must be [N,3,256,256]")
+        if left.device != self.device or right.device != self.device:
+            raise ValueError("TensorRT inputs must be on the configured CUDA device")
+        batch = int(left.shape[0])
+        if not self._profile["min"] <= batch <= self._profile["max"]:
+            raise ValueError("TensorRT input batch is outside the engine profile")
+
+        left_name = self._bindings["left"]["name"]
+        right_name = self._bindings["right"]["name"]
+        output_name = self._bindings["disparity"]["name"]
+        left = left.to(dtype=self._dtype(left_name)).contiguous()
+        right = right.to(dtype=self._dtype(right_name)).contiguous()
+        if not self._context.set_input_shape(left_name, tuple(left.shape)):
+            raise RuntimeError("TensorRT rejected the left input shape")
+        if not self._context.set_input_shape(right_name, tuple(right.shape)):
+            raise RuntimeError("TensorRT rejected the right input shape")
+        missing_shapes = self._context.infer_shapes()
+        if missing_shapes:
+            raise RuntimeError(
+                "TensorRT shape inference is incomplete for "
+                + ", ".join(missing_shapes)
+            )
+        output_shape = tuple(
+            int(value) for value in self._context.get_tensor_shape(output_name)
+        )
+        expected_output_shape = (batch, 1, 256, 256)
+        if output_shape != expected_output_shape:
+            raise RuntimeError(
+                f"TensorRT resolved output shape {output_shape}, "
+                f"expected {expected_output_shape}"
+            )
+        output = torch.empty(
+            output_shape,
+            device=self.device,
+            dtype=self._dtype(output_name),
+        )
+        for name, tensor in (
+            (left_name, left),
+            (right_name, right),
+            (output_name, output),
+        ):
+            if not self._context.set_tensor_address(name, tensor.data_ptr()):
+                raise RuntimeError(f"TensorRT rejected binding address for {name}")
+        stream = torch.cuda.current_stream(self.device)
+        if not self._context.execute_async_v3(stream.cuda_stream):
+            raise RuntimeError("TensorRT FoundationStereo execution failed")
+        left.record_stream(stream)
+        right.record_stream(stream)
+        return output
+
+
 class FoundationStereoOnlineTeacher:
     """Non-checkpointed frozen FoundationStereo inference wrapper."""
 
@@ -51,22 +382,62 @@ class FoundationStereoOnlineTeacher:
         device,
         valid_iters,
         pair_microbatch,
+        backend="pytorch",
+        engine=None,
+        engine_sha256=None,
+        engine_manifest=None,
+        engine_manifest_sha256=None,
     ):
-        self.repo = Path(repo).expanduser().resolve()
-        self.checkpoint = Path(checkpoint).expanduser().resolve()
+        self.backend = str(backend)
+        if self.backend not in {"pytorch", "tensorrt"}:
+            raise ValueError(f"unsupported FoundationStereo backend {self.backend}")
+        self.repo = (
+            Path(repo).expanduser().resolve() if repo is not None else None
+        )
+        self.checkpoint = (
+            Path(checkpoint).expanduser().resolve()
+            if checkpoint is not None
+            else None
+        )
         self.checkpoint_sha256 = checkpoint_sha256
         self.device = torch.device(device)
         self.valid_iters = int(valid_iters)
         self.pair_microbatch = int(pair_microbatch)
-        if self.valid_iters not in {12, 16, 32}:
-            raise ValueError("online FoundationStereo iterations must be 12, 16, or 32")
         if self.pair_microbatch < 1:
             raise ValueError("FoundationStereo pair microbatch must be positive")
-        if not self.repo.is_dir() or not self.checkpoint.is_file():
-            raise FileNotFoundError("FoundationStereo repo/checkpoint is missing")
-        if sha256_file(self.checkpoint) != checkpoint_sha256:
-            raise ValueError("FoundationStereo checkpoint SHA256 mismatch")
-        self.model, self.config = self._load_model()
+        self.model = None
+        self.config = None
+        self.runner = None
+        if self.backend == "pytorch":
+            if self.valid_iters not in {12, 16, 32}:
+                raise ValueError(
+                    "online FoundationStereo iterations must be 12, 16, or 32"
+                )
+            if (
+                self.repo is None
+                or self.checkpoint is None
+                or not self.repo.is_dir()
+                or not self.checkpoint.is_file()
+            ):
+                raise FileNotFoundError("FoundationStereo repo/checkpoint is missing")
+            if sha256_file(self.checkpoint) != checkpoint_sha256:
+                raise ValueError("FoundationStereo checkpoint SHA256 mismatch")
+            self.model, self.config = self._load_model()
+        else:
+            if self.valid_iters != 32:
+                raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
+            if self.pair_microbatch > 48:
+                raise ValueError(
+                    "TensorRT pair microbatch exceeds the frozen max batch 48"
+                )
+            self.runner = FoundationStereoTensorRTRunner(
+                engine,
+                engine_sha256,
+                engine_manifest,
+                engine_manifest_sha256,
+                checkpoint_sha256,
+                device=self.device,
+            )
 
     def _load_model(self):
         try:
@@ -132,6 +503,15 @@ class FoundationStereoOnlineTeacher:
         return model, config
 
     def _infer_microbatch(self, left, right):
+        if self.backend == "tensorrt":
+            with torch.inference_mode():
+                disparity_left = self.runner.infer(left, right)
+                disparity_right = self.runner.infer(
+                    torch.flip(right, dims=[3]),
+                    torch.flip(left, dims=[3]),
+                )
+                disparity_right = torch.flip(disparity_right, dims=[3])
+            return disparity_left.float(), disparity_right.float()
         with torch.inference_mode(), torch.autocast(
             device_type="cuda", dtype=torch.float16
         ):
@@ -238,13 +618,33 @@ class OnlineFoundationGTCallback(Callback):
         )
         if self.cache_enabled and self.cache_root is None:
             raise ValueError("online GT cache requires --online_gt_cache_root")
+        self.backend = args.foundation_stereo_backend
+        cache_provenance = {
+            "backend": self.backend,
+            "checkpoint_sha256": args.foundation_stereo_checkpoint_sha256,
+            "valid_iters": args.foundation_stereo_valid_iters,
+            "engine_sha256": getattr(
+                args, "foundation_stereo_engine_sha256", None
+            ),
+            "engine_manifest_sha256": getattr(
+                args, "foundation_stereo_engine_manifest_sha256", None
+            ),
+        }
+        self.cache_namespace = hashlib.sha256(
+            json.dumps(
+                cache_provenance, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
 
     @property
     def state_key(self):
         return (
             f"{self.__class__.__qualname__}:"
+            f"{self.backend}:"
             f"{self.args.foundation_stereo_checkpoint_sha256}:"
-            f"{self.args.foundation_stereo_valid_iters}"
+            f"{self.args.foundation_stereo_valid_iters}:"
+            f"{getattr(self.args, 'foundation_stereo_engine_sha256', None)}:"
+            f"{getattr(self.args, 'foundation_stereo_engine_manifest_sha256', None)}"
         )
 
     def state_dict(self):
@@ -260,6 +660,17 @@ class OnlineFoundationGTCallback(Callback):
             device=trainer.strategy.root_device,
             valid_iters=self.args.foundation_stereo_valid_iters,
             pair_microbatch=self.args.foundation_stereo_pair_microbatch,
+            backend=self.backend,
+            engine=getattr(self.args, "foundation_stereo_engine", None),
+            engine_sha256=getattr(
+                self.args, "foundation_stereo_engine_sha256", None
+            ),
+            engine_manifest=getattr(
+                self.args, "foundation_stereo_engine_manifest", None
+            ),
+            engine_manifest_sha256=getattr(
+                self.args, "foundation_stereo_engine_manifest_sha256", None
+            ),
         )
 
     def teardown(self, trainer, pl_module, stage=None):
@@ -267,15 +678,28 @@ class OnlineFoundationGTCallback(Callback):
 
     def _cache_path(self, sample_id):
         digest = hashlib.sha256(sample_id.encode("utf-8")).hexdigest()
-        return self.cache_root / digest[:2] / f"{digest}.npz"
+        return (
+            self.cache_root
+            / self.backend
+            / self.cache_namespace
+            / digest[:2]
+            / f"{digest}.npz"
+        )
 
     def _cache_metadata(self, sample_id, contract_sha256):
         return {
             "schema": CACHE_SCHEMA,
             "sample_id": sample_id,
             "contract_sha256": contract_sha256,
+            "backend": self.backend,
             "checkpoint_sha256": self.args.foundation_stereo_checkpoint_sha256,
             "valid_iters": self.args.foundation_stereo_valid_iters,
+            "engine_sha256": getattr(
+                self.args, "foundation_stereo_engine_sha256", None
+            ),
+            "engine_manifest_sha256": getattr(
+                self.args, "foundation_stereo_engine_manifest_sha256", None
+            ),
             "bidirectional": True,
             "lr_consistency": True,
         }

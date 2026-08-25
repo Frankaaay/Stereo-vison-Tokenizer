@@ -213,6 +213,56 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("use_distributed_sampler=False", train)
         self.assertNotIn("max_time=", train)
 
+    def test_tensorrt_backend_is_explicit_and_frozen_to_32_iterations(self):
+        launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
+            encoding="utf-8"
+        )
+        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        online_gt = (ROOT / "stereo_tokenizer/online_gt.py").read_text(
+            encoding="utf-8"
+        )
+        for token in (
+            "FOUNDATION_STEREO_BACKEND",
+            "FOUNDATION_STEREO_ENGINE_SHA256",
+            "FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256",
+            'FOUNDATION_STEREO_VALID_ITERS}" != "32"',
+        ):
+            self.assertIn(token, launcher)
+        for argument in (
+            "--foundation_stereo_backend",
+            "--foundation_stereo_engine",
+            "--foundation_stereo_engine_sha256",
+            "--foundation_stereo_engine_manifest",
+            "--foundation_stereo_engine_manifest_sha256",
+        ):
+            self.assertIn(argument, train)
+        self.assertIn("execute_async_v3", online_gt)
+        self.assertIn("torch.cuda.current_stream", online_gt)
+        self.assertIn("set_tensor_address", online_gt)
+
+    def test_tensorrt_comparison_does_not_change_iteration_ablation(self):
+        comparison = (
+            ROOT / "scripts/stereo/compare_foundation_backends.py"
+        ).read_text(encoding="utf-8")
+        original = (
+            ROOT / "scripts/stereo/compare_online_foundation_teacher.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('choices=("equivalence", "tensorrt_benchmark")', comparison)
+        self.assertIn("equivalence comparison is limited to 32-64 samples", comparison)
+        self.assertIn("backend pilot is frozen to the approved 408 selection", comparison)
+        self.assertIn('valid_iters=32', comparison)
+        self.assertIn("args.valid_iters != [32, 16, 12]", original)
+
+    def test_tensorrt_manifest_writer_is_fail_closed(self):
+        source = (
+            ROOT / "scripts/stereo/write_foundation_tensorrt_manifest.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("refusing to overwrite", source)
+        self.assertIn("expected_profile", source)
+        self.assertIn('"valid_iters": 32', source)
+        self.assertIn('"precision": "fp16"', source)
+        self.assertIn('"xformers_disabled": True', source)
+
     def test_online_teacher_comparison_freezes_requested_order(self) -> None:
         source = (
             ROOT / "scripts/stereo/compare_online_foundation_teacher.py"
