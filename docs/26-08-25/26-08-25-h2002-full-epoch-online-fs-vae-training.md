@@ -123,3 +123,33 @@
   stopped at update 3007. Before reporting evaluation results, still verify a
   strict load of the update-3000 checkpoint and record the exact evaluation
   recipe/output; do not infer evaluation quality from training loss alone.
+
+## Test-split evaluation implementation and launch plan
+
+- The user requested a full test-split evaluation plus several reconstruction
+  cases. The pre-existing `eval_stereo_vae.py` only accepted `train/val` and
+  assumed cached disparity fields, so it could not evaluate the LeRobot online
+  dataset or its separate 38,810-sample test split.
+- The scoped evaluation extension adds `test`, constructs the same frozen
+  PyTorch FoundationStereo teacher contract used by training, and generates the
+  disparity/valid-mask target once per batch before evaluating both
+  `four_frame` and `single_frame`. Posterior sampling remains disabled and the
+  VAE checkpoint load remains `strict=True`.
+- An eight-process torchrun evaluation assigns complete shards to ranks without
+  padding. Metric accumulators are summed across ranks and a full run fails if
+  either temporal mode's global sample count differs from the exact split size.
+  This avoids the duplicate samples introduced by training's equal-length DDP
+  sampler padding.
+- Metrics remain RGB L1 plus per-view disparity EPE, depth AbsRel, depth RMSE,
+  valid-pixel count, and total sample count. Evaluation precision is explicit;
+  the planned run uses BF16 and per-rank BS24.
+- Six visualization cases are selected deterministically from six distinct test
+  episodes with seed 1234. Each PNG places the four left-eye input frames beside
+  four-frame reconstructions and the frame-0 single-frame reconstruction for
+  all three views. The output directory is fail-closed and will not overwrite
+  an existing result.
+- Planned fresh output root:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_test_eval_step3000_h2002_20260825_v1`.
+  Launch is gated on local source tests, H200-2 strict-load/two-batch smoke, exact
+  pushed SHA, clean server worktree, and a fresh output path. ETA will be based
+  on the smoke throughput rather than the stopped training estimate.

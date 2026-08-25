@@ -36,6 +36,14 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("depth_abs_rel", source)
         self.assertIn("disparity_to_depth(", source)
         self.assertNotIn("calibration / disparity_target", source)
+        self.assertIn('choices=["train", "val", "test"]', source)
+        self.assertIn('choices=["single_frame", "four_frame", "both"]', source)
+        self.assertIn("FoundationStereoOnlineTeacher", source)
+        self.assertIn("_exact_lerobot_rank_indices", source)
+        self.assertIn("dist.all_reduce", source)
+        self.assertIn("metrics[\"sample_count\"] != expected", source)
+        self.assertIn("save_case_visualization", source)
+        self.assertIn("fixed_episode_subset_indices", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):
         source = (
