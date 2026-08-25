@@ -231,3 +231,26 @@
 - ETA: about 14--18 minutes for metric evaluation plus case generation and
   artifact checks. This is based on the observed 15.7--20.6 seconds/local batch,
   22 batches/rank, and the measured multi-minute model/teacher initialization.
+
+### Six-case depth visualization follow-up
+
+- The 4,224-sample replacement completed before the follow-up check and wrote
+  six RGB comparison PNGs, but the original case renderer did not persist
+  teacher/predicted depth maps. The user requested a separate six-case depth
+  comparison and explicitly authorized stacking it on the small unrelated H200-2
+  jobs.
+- The scoped renderer extension writes `depth-case-00.png` through
+  `depth-case-05.png`. For each of the three views it shows teacher GT depth,
+  four-frame predicted depth, four-frame absolute depth error, and a single-frame
+  row containing frame-0 GT/prediction/error/valid mask. GT and predictions use
+  the same per-view robust meter scale; invalid pixels are black, and error maps
+  have a separately annotated meter scale.
+- The follow-up will reuse the same deterministic six test episodes, step-3000
+  checkpoint, BF16, PyTorch FS32/pair-microbatch48, and both temporal modes. It
+  will run only one metric batch before the six cases because the 4,224-sample
+  metrics already exist. Planned fresh output:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_depth_cases6_h2002_20260825_v1`.
+- At the preflight snapshot, no eval process was running. Unrelated processes
+  used about 13.4 GiB on GPU 0 and 15.8 GiB each on GPUs 5 and 7; all were left
+  untouched. The depth-case job may share those GPUs under the user's explicit
+  authorization.

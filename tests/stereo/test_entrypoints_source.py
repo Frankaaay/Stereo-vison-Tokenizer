@@ -43,6 +43,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("dist.all_reduce", source)
         self.assertIn("metrics[\"sample_count\"] != expected", source)
         self.assertIn("save_case_visualization", source)
+        self.assertIn("save_depth_case_visualization", source)
+        self.assertIn('depth_filename = f"depth-case-{slot:02d}.png"', source)
+        self.assertIn('"depth_file": depth_filename', source)
         self.assertIn("fixed_episode_subset_indices", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):

@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from PIL import Image, ImageDraw
@@ -364,6 +365,144 @@ def _rgb_image(tensor):
     return Image.fromarray(array, mode="RGB")
 
 
+def _heatmap_image(tensor, valid, value_min, value_max):
+    values = tensor.detach().float().cpu().numpy()
+    mask = valid.detach().bool().cpu().numpy()
+    scale = max(float(value_max) - float(value_min), 1e-6)
+    normalized = np.clip((values - float(value_min)) / scale, 0.0, 1.0)
+    anchors = np.asarray(
+        [
+            [48, 18, 59],
+            [45, 100, 190],
+            [35, 185, 155],
+            [235, 215, 65],
+            [180, 25, 35],
+        ],
+        dtype=np.float32,
+    )
+    position = normalized * (len(anchors) - 1)
+    lower = np.floor(position).astype(np.int64)
+    upper = np.minimum(lower + 1, len(anchors) - 1)
+    fraction = (position - lower)[..., None]
+    rgb = anchors[lower] * (1.0 - fraction) + anchors[upper] * fraction
+    rgb[~mask] = 0
+    return Image.fromarray(rgb.astype(np.uint8), mode="RGB")
+
+
+def _robust_range(tensor, valid, low=0.02, high=0.98):
+    values = tensor.detach().float()[valid]
+    if values.numel() == 0:
+        raise ValueError("depth visualization has no valid pixels")
+    value_min = float(torch.quantile(values, low).item())
+    value_max = float(torch.quantile(values, high).item())
+    if value_max <= value_min:
+        value_max = value_min + 1e-6
+    return value_min, value_max
+
+
+def save_depth_case_visualization(output_path, batch, outputs, source_index):
+    four = outputs.get("four_frame")
+    single = outputs.get("single_frame")
+    if four is None or single is None:
+        raise ValueError("depth comparison requires both temporal modes")
+
+    target = disparity_to_depth(
+        batch["disparity"],
+        batch["fx"],
+        batch["baseline_m"],
+        valid_mask=batch["valid_mask"],
+    )
+    four_depth = disparity_to_depth(
+        four.disparity,
+        batch["fx"],
+        batch["baseline_m"],
+        valid_mask=batch["valid_mask"],
+    )
+    single_batch = batch_for_temporal_mode(batch, "single_frame", source_index)
+    single_depth = disparity_to_depth(
+        single.disparity,
+        single_batch["fx"],
+        single_batch["baseline_m"],
+        valid_mask=single_batch["valid_mask"],
+    )
+
+    cell = 192
+    label_width = 205
+    header_height = 85
+    columns = 4
+    rows = len(VIEW_NAMES) * 4
+    canvas = Image.new(
+        "RGB",
+        (label_width + columns * cell, header_height + rows * cell),
+        "white",
+    )
+    draw = ImageDraw.Draw(canvas)
+    draw.text((12, 10), f"sample: {batch['sample_id'][0]}", fill="black")
+    draw.text((12, 30), "depth in meters; black = invalid", fill="black")
+    for column, label in enumerate(("t0", "t1", "t2", "t3")):
+        draw.text((label_width + column * cell + 8, 62), label, fill="black")
+
+    for view_index, view_name in enumerate(VIEW_NAMES):
+        valid = batch["valid_mask"][0, view_index, 0]
+        gt = target.depth[0, view_index, 0]
+        pred_four = four_depth.depth[0, view_index, 0]
+        single_valid = single_batch["valid_mask"][0, view_index, 0, 0]
+        gt_single = target.depth[0, view_index, 0, source_index]
+        pred_single = single_depth.depth[0, view_index, 0, 0]
+        depth_min, depth_max = _robust_range(gt, valid)
+        four_error = (pred_four - gt).abs()
+        single_error = (pred_single - gt_single).abs()
+        combined_errors = torch.cat(
+            (four_error[valid], single_error[single_valid])
+        )
+        error_max = max(float(torch.quantile(combined_errors.float(), 0.98)), 1e-3)
+
+        first_row = view_index * 4
+        labels = (
+            f"{view_name} GT [{depth_min:.2f},{depth_max:.2f}]m",
+            f"{view_name} four prediction",
+            f"{view_name} four abs error [0,{error_max:.2f}]m",
+            f"{view_name} single: GT / pred / error / mask",
+        )
+        for offset, label in enumerate(labels):
+            draw.text(
+                (8, header_height + (first_row + offset) * cell + 8),
+                label,
+                fill="black",
+            )
+
+        for frame_index in range(4):
+            x = label_width + frame_index * cell
+            gt_image = _heatmap_image(
+                gt[frame_index], valid[frame_index], depth_min, depth_max
+            ).resize((cell, cell))
+            pred_image = _heatmap_image(
+                pred_four[frame_index], valid[frame_index], depth_min, depth_max
+            ).resize((cell, cell))
+            error_image = _heatmap_image(
+                four_error[frame_index], valid[frame_index], 0.0, error_max
+            ).resize((cell, cell))
+            canvas.paste(gt_image, (x, header_height + first_row * cell))
+            canvas.paste(pred_image, (x, header_height + (first_row + 1) * cell))
+            canvas.paste(error_image, (x, header_height + (first_row + 2) * cell))
+
+        single_row_y = header_height + (first_row + 3) * cell
+        single_images = (
+            _heatmap_image(gt_single, single_valid, depth_min, depth_max),
+            _heatmap_image(pred_single, single_valid, depth_min, depth_max),
+            _heatmap_image(single_error, single_valid, 0.0, error_max),
+            Image.fromarray(
+                single_valid.detach().byte().mul(255).cpu().numpy(), mode="L"
+            ).convert("RGB"),
+        )
+        for column, image in enumerate(single_images):
+            canvas.paste(
+                image.resize((cell, cell)),
+                (label_width + column * cell, single_row_y),
+            )
+    canvas.save(output_path)
+
+
 def save_case_visualization(
     output_path,
     sample_id,
@@ -630,12 +769,20 @@ def main():
                     tensor_batch["video"],
                     outputs,
                 )
+                depth_filename = f"depth-case-{slot:02d}.png"
+                save_depth_case_visualization(
+                    args.visualization_dir / depth_filename,
+                    tensor_batch,
+                    outputs,
+                    args.single_frame_source_index,
+                )
                 local_records.append(
                     {
                         "slot": slot,
                         "sample_id": tensor_batch["sample_id"][0],
                         "episode_id": tensor_batch["episode_id"][0],
                         "file": filename,
+                        "depth_file": depth_filename,
                     }
                 )
         if world_size > 1:
