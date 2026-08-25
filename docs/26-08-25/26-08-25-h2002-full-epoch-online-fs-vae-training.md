@@ -206,3 +206,28 @@
   cross-rank aggregation, exact 38,810-sample count verification, `metrics.json`,
   and exit-marker checks. Do not poll continuously; refresh only on a later
   user-requested status snapshot.
+
+### User-cancelled full test and 4,224-sample replacement
+
+- At `2026-08-25T19:27:46+08:00`, the user requested a shorter evaluation. The
+  full 38,810-sample run was at 10/202 local batches on rank 0. `Ctrl-C` was
+  sent to `stereo-test-eval-h2002-260825`; by 19:28:07 there were zero eval
+  processes, the tmux session had exited, and training/eval GPU memory was
+  released. Its `exit_code=1` and SIGINT traceback mean user cancellation, not
+  model failure. No partial `metrics.json` was accepted.
+- The replacement run uses `--max_batches 22`. With eight ranks and BS24 this
+  evaluates 22 x 8 x 24 = 4,224 samples for each temporal mode. It preserves
+  BF16, the step-3000 checkpoint, online FS32/pair-microbatch48 targets,
+  posterior mean, stereo mode, exact same rank-local prefixes, and six fixed
+  visualization cases.
+- Replacement tmux: `stereo-test-eval-4224-h2002-260825`. Fresh output:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_test_eval_step3000_h2002_subset4224_20260825_v1`.
+  It started at approximately `2026-08-25T19:28:30+08:00` using server code SHA
+  `d331025d2134f5ed480d4193b0e45ad1f32c2c97`.
+- Startup health check at 19:28:44 found the tmux/torchrun launcher present, the
+  recorded SHA correct, and no immediate traceback/OOM. It was still in process
+  startup and had not reached the first batch. The unrelated small process on
+  GPU 0 was left untouched.
+- ETA: about 14--18 minutes for metric evaluation plus case generation and
+  artifact checks. This is based on the observed 15.7--20.6 seconds/local batch,
+  22 batches/rank, and the measured multi-minute model/teacher initialization.
