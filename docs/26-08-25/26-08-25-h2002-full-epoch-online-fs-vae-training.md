@@ -153,3 +153,27 @@
   Launch is gated on local source tests, H200-2 strict-load/two-batch smoke, exact
   pushed SHA, clean server worktree, and a fresh output path. ETA will be based
   on the smoke throughput rather than the stopped training estimate.
+
+### Evaluation deployment and smoke status
+
+- Evaluation implementation commit:
+  `d331025d2134f5ed480d4193b0e45ad1f32c2c97`. Local compile/source-boundary
+  checks passed 27/27. H200-2 fast-forwarded cleanly to this SHA; the eval
+  entrypoint-specific server tests passed 14/14. The broader server source test
+  retains the known unrelated failure from 28 legacy
+  `OmniTokenizer/__pycache__/*.pyc` files; they were not deleted.
+- Smoke v1 stopped at argument parsing before model/data/GPU work because the
+  launch command omitted nine parser-required loss-contract arguments. It is an
+  operator launch omission rather than a model/evaluation failure. Its log is
+  retained at
+  `/data/home/frank/experiments/stereo_merged_fs_vae_test_eval_step3000_h2002_smoke_20260825_v1/run.log`.
+- Smoke v2 uses the complete frozen loss contract, eight GPUs, BS24/rank, BF16,
+  two batches/rank, both temporal modes, and six visualization cases. Output:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_test_eval_step3000_h2002_smoke_20260825_v2`.
+  At the `2026-08-25T19:13:05+08:00` one-shot health snapshot, torchrun plus
+  eight eval ranks were alive with no traceback/OOM, still in distributed model
+  and FoundationStereo initialization; no first batch or metrics artifact yet.
+  GPU memory was about 0.5--1.0 GiB for the new ranks, while the pre-existing
+  small jobs on GPUs 0 and 6 remained untouched. The initial 1--2 minute smoke
+  estimate was therefore too short; do not launch the full test run until this
+  smoke exits successfully and its PNG/JSON artifacts are verified.
