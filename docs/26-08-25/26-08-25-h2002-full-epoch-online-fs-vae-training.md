@@ -81,7 +81,34 @@
   all ranks entered distributed initialization, and the log has no traceback or
   OOM. No optimizer update existed at the snapshot.
 
-## ETA and remaining checks
+## User-requested stop and evaluation handoff
+
+- At `2026-08-25T18:57:08+08:00`, the user requested that training stop so the
+  model could be evaluated. `Ctrl-C` was sent to tmux session
+  `stereo-full-epoch-h2002-260825`; Lightning reported `Detected
+  KeyboardInterrupt, attempting graceful shutdown`.
+- The final completed in-memory update shown by the log was 3007/3619 (83%).
+  The post-stop check found zero `train_stereo_vae.py` processes and zero
+  training memory allocated on all eight GPUs. The tmux session was retained
+  for audit history; no unrelated process was stopped or modified.
+- The evaluation checkpoint is the last complete periodic save at update 3000:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_full_epoch_h2002_20260825_v1/stereo-vae/pinjyeja/checkpoints/last.ckpt`.
+  It is 729,458,227 bytes and matches the adjacent
+  `epoch=0-step=3000.ckpt` size. Updates 3001--3007 were not checkpointed and
+  must not be described as part of the evaluation model.
+- Offline WandB run:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_full_epoch_h2002_20260825_v1/wandb/offline-run-20260825_010449-pinjyeja`.
+  The extracted validation total loss changed from 0.705995 to 0.434044 for
+  four-frame mode and from 0.693977 to 0.424743 for single-frame mode between
+  updates 500 and 3000 (reductions of 38.52% and 38.80%). At update 3000,
+  four-frame validation total loss was 0.009301 higher than single-frame
+  validation total loss (2.19% relative to single-frame).
+- The loss history is finite and continues decreasing through the six fixed
+  validation points. The dominant final weighted validation contribution is
+  LPIPS/perceptual loss; this observation is descriptive and is not yet an
+  evaluation-quality conclusion.
+
+## Original ETA and remaining checks
 
 - Initial estimate at launch: 17--22 hours for the training body, followed by
   about 15--30 minutes for final checkpoint and artifact validation. This uses
@@ -92,3 +119,7 @@
 - Completion gates: finite losses, correct single/four counters, no DDP/OOM
   failure, validation records, checkpoint cadence, final `last.ckpt`, offline
   WandB media artifacts, and strict checkpoint load.
+- The one-epoch completion gate is intentionally not met because the user
+  stopped at update 3007. Before reporting evaluation results, still verify a
+  strict load of the update-3000 checkpoint and record the exact evaluation
+  recipe/output; do not infer evaluation quality from training loss alone.
