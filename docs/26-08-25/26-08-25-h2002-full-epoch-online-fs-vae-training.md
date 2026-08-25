@@ -177,3 +177,32 @@
   small jobs on GPUs 0 and 6 remained untouched. The initial 1--2 minute smoke
   estimate was therefore too short; do not launch the full test run until this
   smoke exits successfully and its PNG/JSON artifacts are verified.
+
+### Formal test evaluation launch
+
+- Smoke v2 completed successfully at `2026-08-25T19:17:43+08:00`. It evaluated
+  exactly 384 samples (two BS24 batches on each of eight ranks) for both modes,
+  wrote finite metrics, exited without OOM/traceback, and produced six PNGs plus
+  `cases.json`. Rank-0 progress measured 41 seconds for two batches, or about
+  20.6 seconds/local batch after initialization.
+- The full 38,810-sample test evaluation started at
+  `2026-08-25T19:21:52+08:00` in tmux session
+  `stereo-test-eval-h2002-260825`. Server code remains the tested evaluation SHA
+  `d331025d2134f5ed480d4193b0e45ad1f32c2c97`; the later docs-only commit is not
+  synced into the live run.
+- Formal output:
+  `/data/home/frank/experiments/stereo_merged_fs_vae_test_eval_step3000_h2002_20260825_v1`.
+  The run uses eight GPUs, BS24/rank, BF16, PyTorch FoundationStereo at 32
+  iterations/pair-microbatch 48, posterior mean, stereo eye mode, both temporal
+  modes, frame-0 single source, exact non-padding shard assignment, and six
+  deterministic test cases.
+- Startup health check at `2026-08-25T19:22:07+08:00`: tmux and torchrun
+  processes are present, the recorded code SHA matches, and the log has no
+  immediate traceback/OOM. The process was still in distributed startup and had
+  not allocated model GPU memory at this early snapshot.
+- ETA estimated at launch: about 75--85 minutes for the evaluation body, based
+  on 202 local batches/rank and the smoke's 20.6 seconds/batch plus observed
+  initialization overhead. Allow another 2--5 minutes for six case PNGs,
+  cross-rank aggregation, exact 38,810-sample count verification, `metrics.json`,
+  and exit-marker checks. Do not poll continuously; refresh only on a later
+  user-requested status snapshot.
