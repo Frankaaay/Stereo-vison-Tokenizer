@@ -374,4 +374,24 @@ GPU smoke 完成前不进入 400-step overfit。
 - 项目 wrapper 原调用为 `self.model(image)`。最小修复改为显式
   `self.model(image, export_feat_layers=[])`，不修改冻结 DA3 source；新增定向测试以 fake
   model 强制要求该 keyword，并断言实际收到空列表。提交前本地 `py_compile` 与
-  `git diff --check` 已通过；H200-2 tensor suite 在推送同步后执行。
+  `git diff --check` 已通过。
+
+### DA3 wrapper 修复验证与 H200-2 smoke v4（进行中）
+
+- 修复提交：`0dce1d384d4e7a0d1177e1b23140cf4d8317e905`；本地、H200-1、H200-2
+  已同步到相同 clean SHA。
+- H200-2 定向测试：
+  `test_da3_teacher_passes_empty_export_feature_layers` 为 `1 passed`；完整
+  `tests/stereo` 套件为 `116 passed, 4 warnings in 5.85s`。
+- v4 launch preflight：代码 clean at `0dce1d3`；冻结 manifest/cache/teacher hashes
+  与 v1--v3 合同一致；PyAV `16.0.1` 和 WandB `0.23.1` 均从 task-private overlay
+  导入；v4 output 不存在；8 张 H200 均为 0 MiB，且无匹配训练进程。
+- 参数保持原 2-rank、BS24/device、global 48、GA1、4-step 精确合同。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v4`
+- tmux：`stereo-hy-fourmode-smoke4-v4-260826`
+- launcher SHA256：`6f493364ee23044902330059dad0522abf5d5338897fda8e9e80ddab1c1418be`
+- 日志：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v4/run.log`
+- 11:28:56 +08:00 的唯一启动健康检查：tmux、launcher、rank 0/1 进程均存在；日志已到
+  DDP 初始化，GPU 0/1 已建立 CUDA context；无 traceback，尚无首个 step/heartbeat。
+- ETA（11:28 +08:00 初估）：仍没有真实 step 吞吐，训练主体估计约 5--20 分钟；
+  checkpoint、exit code 与结果完整性核验再预留约 5 分钟。本轮不继续轮询。
