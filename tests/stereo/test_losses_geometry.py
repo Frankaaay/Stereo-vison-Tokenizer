@@ -4,6 +4,7 @@ import torch
 
 from stereo_tokenizer.modules.stereo_geometry import disparity_to_depth
 from stereo_tokenizer.modules.relative_depth import (
+    center_relative_log_depth,
     relative_prediction_from_raw,
     relative_target_from_da3,
     relative_target_from_foundation_stereo,
@@ -81,12 +82,35 @@ class StereoLossTest(unittest.TestCase):
         torch.testing.assert_close(result.loss, torch.tensor(1.5))
         torch.testing.assert_close(result.valid_count, torch.tensor((2, 4, 6)))
 
-    def test_empty_view_fails_closed(self) -> None:
-        prediction = torch.zeros(1, 3, 1, 1, 2, 2)
+    def test_empty_views_are_ignored_with_sample_equal_weight(self) -> None:
+        prediction = torch.zeros(2, 3, 1, 1, 2, 2)
+        target = torch.empty_like(prediction)
+        target[0, 0] = 1.0
+        target[0, 1] = 2.0
+        target[0, 2] = 100.0
+        target[1, 0] = 100.0
+        target[1, 1] = 100.0
+        target[1, 2] = 3.0
+        valid = torch.ones_like(prediction, dtype=torch.bool)
+        valid[0, 2] = False
+        valid[1, :2] = False
+        result = masked_smooth_l1_relative_depth_loss(
+            prediction, target, valid, beta=1.0
+        )
+        torch.testing.assert_close(result.loss, torch.tensor(1.75))
+        torch.testing.assert_close(
+            result.per_view, torch.tensor((0.5, 1.5, 2.5))
+        )
+        torch.testing.assert_close(
+            result.supervised_sample_count, torch.tensor((1, 1, 1))
+        )
+
+    def test_sample_with_all_views_empty_fails_closed(self) -> None:
+        prediction = torch.zeros(2, 3, 1, 1, 2, 2)
         target = torch.zeros_like(prediction)
         valid = torch.ones_like(prediction, dtype=torch.bool)
-        valid[:, 2] = False
-        with self.assertRaisesRegex(ValueError, r"empty \[B,V\]"):
+        valid[1] = False
+        with self.assertRaisesRegex(ValueError, r"empty \[B\].*\[1\]"):
             masked_smooth_l1_relative_depth_loss(
                 prediction, target, valid, beta=1.0
             )
@@ -129,6 +153,19 @@ class StereoLossTest(unittest.TestCase):
             prediction, target, valid, beta=1.0
         )
         torch.testing.assert_close(result.loss, torch.tensor(0.25))
+
+    def test_gradient_loss_ignores_empty_sample_view(self) -> None:
+        prediction = torch.zeros(1, 3, 1, 1, 2, 2)
+        target = torch.ones_like(prediction)
+        valid = torch.ones_like(prediction, dtype=torch.bool)
+        valid[:, 2] = False
+        result = masked_relative_gradient_loss(
+            prediction, target, valid, beta=1.0
+        )
+        self.assertTrue(torch.isfinite(result.loss))
+        torch.testing.assert_close(
+            result.supervised_sample_count, torch.tensor((1, 1, 0))
+        )
 
     def test_four_frames_do_not_receive_four_times_single_frame_weight(self) -> None:
         single_prediction = torch.tensor(
@@ -186,6 +223,29 @@ class GeometryTest(unittest.TestCase):
 
 
 class RelativeDepthTargetTest(unittest.TestCase):
+    def test_center_ignores_empty_view(self) -> None:
+        log_depth = torch.tensor((1.0, 3.0, 100.0)).reshape(
+            1, 3, 1, 1, 1, 1
+        )
+        valid = torch.ones_like(log_depth, dtype=torch.bool)
+        valid[:, 2] = False
+        relative, center = center_relative_log_depth(
+            log_depth, valid, require_all_finite=True
+        )
+        torch.testing.assert_close(center.flatten(), torch.tensor((2.0,)))
+        torch.testing.assert_close(
+            relative.flatten(), torch.tensor((-1.0, 1.0, 98.0))
+        )
+
+    def test_center_rejects_sample_with_all_views_empty(self) -> None:
+        log_depth = torch.zeros(2, 3, 1, 1, 1, 1)
+        valid = torch.ones_like(log_depth, dtype=torch.bool)
+        valid[1] = False
+        with self.assertRaisesRegex(ValueError, r"empty \[B\].*\[1\]"):
+            center_relative_log_depth(
+                log_depth, valid, require_all_finite=True
+            )
+
     def test_da3_target_is_invariant_to_positive_scale(self) -> None:
         depth = torch.tensor(
             [[[[[[1.0, 2.0], [4.0, 8.0]]]]]], dtype=torch.float32

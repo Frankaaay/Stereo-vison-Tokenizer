@@ -395,3 +395,21 @@ GPU smoke 完成前不进入 400-step overfit。
   DDP 初始化，GPU 0/1 已建立 CUDA context；无 traceback，尚无首个 step/heartbeat。
 - ETA（11:28 +08:00 初估）：仍没有真实 step 吞吐，训练主体估计约 5--20 分钟；
   checkpoint、exit code 与结果完整性核验再预留约 5 分钟。本轮不继续轮询。
+
+### H200-2 smoke v4 失败与空 teacher view 合同修复
+
+- v4 实际运行：11:28:45--11:30:01 +08:00，约 76 秒，exit code 1；tmux/训练
+  进程均退出，8 张 GPU 恢复为 0 MiB。日志进度曾显示 3/4，但没有
+  `step_timings.json` 或 checkpoint，因此不能视为有效完成 3 steps。
+- v4 已越过 PyAV 与 DA3 wrapper 修复，首个根因发生在 stereo relative-depth target
+  构造：FoundationStereo 的 disparity、LR consistency、范围和 padding mask 合并后，
+  `[B,V]=[12,2]`（view 2 为 `righthand`）没有任何有效像素；旧合同要求每个
+  sample/view 都非空，因此 `center_relative_log_depth()` fail closed。
+- 修复合同：保留完整样本、RGB/KL 和固定 batch/DDP 形状；单个空 teacher view 不进入
+  relative-depth center、depth loss 或 gradient loss。每个样本先在其有效 views 内等权，
+  再在 batch 内等权；若一个样本的所有 views 均为空则仍 fail closed。所有 views 有效时
+  数值公式不变。
+- 增加每个 view 的受监督样本数与空监督样本数日志，并补测试覆盖：单个空 view、跨样本
+  等权、gradient 空 view、整样本全空失败、center 排除空 view。
+- 提交前本地 `py_compile` 与 `git diff --check` 已通过；H200-2 tensor suite 在推送同步后
+  执行，通过前不启动 v5。

@@ -52,10 +52,15 @@ def center_relative_log_depth(
 
     reduction_dims = (2, 3, 4, 5)
     valid_count = valid_mask.sum(dim=reduction_dims)
-    if torch.any(valid_count == 0):
-        empty = torch.nonzero(valid_count == 0, as_tuple=False)
+    supervised_view = valid_count > 0
+    supervised_views_per_sample = supervised_view.sum(dim=1)
+    if torch.any(supervised_views_per_sample == 0):
+        empty = torch.nonzero(
+            supervised_views_per_sample == 0, as_tuple=False
+        ).flatten()
         raise ValueError(
-            "every sample/view must contain valid depth; empty [B,V] entries: "
+            "every sample must contain valid depth in at least one view; "
+            "empty [B] entries: "
             f"{empty.detach().cpu().tolist()}"
         )
     safe_log_depth = torch.where(
@@ -63,8 +68,13 @@ def center_relative_log_depth(
         log_depth.float(),
         torch.zeros((), device=log_depth.device, dtype=torch.float32),
     )
-    view_center = safe_log_depth.sum(dim=reduction_dims) / valid_count.float()
-    sample_center = view_center.mean(dim=1).reshape(-1, 1, 1, 1, 1, 1)
+    view_center = safe_log_depth.sum(dim=reduction_dims) / valid_count.clamp_min(
+        1
+    ).float()
+    sample_center = (
+        view_center.masked_fill(~supervised_view, 0).sum(dim=1)
+        / supervised_views_per_sample.float()
+    ).reshape(-1, 1, 1, 1, 1, 1)
     relative = log_depth.float() - sample_center
     return relative, sample_center
 

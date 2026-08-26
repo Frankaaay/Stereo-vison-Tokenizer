@@ -947,6 +947,7 @@ class StereoVAE(pl.LightningModule):
         total_loss: Optional[torch.Tensor] = None,
     ) -> None:
         view_count = result.model.raw_relative_log_depth.shape[1]
+        batch_size = result.model.raw_relative_log_depth.shape[0]
         pixels_per_view = (
             result.model.raw_relative_log_depth.numel() // view_count
         )
@@ -972,6 +973,16 @@ class StereoVAE(pl.LightningModule):
             metrics[f"{prefix}/valid_ratio_view_{view}"] = (
                 result.loss.relative_depth_valid_count[view].float()
                 / pixels_per_view
+            )
+            supervised_samples = (
+                result.loss.relative_depth_supervised_sample_count[view].float()
+            )
+            metrics[f"{prefix}/supervised_samples_view_{view}"] = (
+                supervised_samples
+            )
+            metrics[f"{prefix}/empty_supervision_samples_view_{view}"] = (
+                supervised_samples.new_tensor(float(batch_size))
+                - supervised_samples
             )
             if result.model.fusion is not None:
                 confidence = result.model.fusion.confidence[:, view]
