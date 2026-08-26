@@ -312,3 +312,29 @@ H200-1 cache exporter identical rerun                 # passed
 OpenCV 4.11.0 不完全相同。推荐保留 unified runtime，并在新的 Frank task-private
 overlay 中只补齐经验证的 WandB 依赖；该环境写入与新的 retry output path 需用户确认。
 GPU smoke 完成前不进入 400-step overfit。
+
+### H200-2 两 rank BS24 smoke v2（进行中）
+
+- 用户已确认建立 Frank task-private overlay 并重试；没有修改 unified runtime。
+- overlay：`/data/home/frank/runtime/stereo-tokenizer-wandb-overlay-v1`，固定
+  `wandb==0.23.1`。实际导入路径为该 overlay；Torch 仍为 `2.7.1+cu126`、Lightning
+  `2.5.6`、OpenCV `4.11.0`，均来自 unified runtime。
+- overlay 启用后的完整 CPU/tensor suite：`115 passed, 4 warnings in 5.76s`；warnings
+  均为依赖 deprecation。
+- launch preflight（2026-08-26 11:07 +08:00）：代码 clean，分支
+  `merged-fs-vae-single-four-profiling`，实验代码 SHA
+  `bcb41c00f692564bf786755181222b07b8e611e7`；LeRobot manifest、H200-2 mono
+  manifest/summary、DA3-BASE 和 FoundationStereo checkpoint SHA256 均与冻结合同一致；
+  48 条 mono cache 全部存在；8 张 H200 均为 0 MiB，且无匹配训练进程；v2 output 不存在。
+- 节点/GPU：H200-2，GPU 0/1；BF16；2 ranks；BS24/device；global 48；GA1；目标
+  4 updates；其余 teacher、loss、mode schedule 和 validation/checkpoint 参数保持 v1
+  精确合同不变。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v2`
+- tmux：`stereo-hy-fourmode-smoke4-v2-260826`
+- 日志：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v2/run.log`
+- 11:07:27 +08:00 的唯一启动健康检查：tmux、launcher、rank 0/1 进程均存在；日志已到
+  `Initializing distributed`，GPU 0/1 各建立 4 MiB CUDA context；无 traceback，尚无首个
+  step/heartbeat。
+- ETA（11:07 +08:00 初估）：尚无真实 step 吞吐，按 4-step 小任务规模和双 teacher/DDP
+  初始化开销给出宽区间，训练主体预计约 5--20 分钟；checkpoint、exit code 与结果完整性
+  核验再预留约 5 分钟。得到后续真实状态快照时再刷新，不在本轮轮询等待。
