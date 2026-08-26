@@ -413,3 +413,32 @@ GPU smoke 完成前不进入 400-step overfit。
   等权、gradient 空 view、整样本全空失败、center 排除空 view。
 - 提交前本地 `py_compile` 与 `git diff --check` 已通过；H200-2 tensor suite 在推送同步后
   执行，通过前不启动 v5。
+
+### H200-2 smoke v5（成功）
+
+- 空 teacher view 修复提交：`6ea0b9aeac3e95c54cec12900f46989b57a9d7ad`；H200-2
+  定向 `test_losses_geometry.py` 为 `19 passed`，完整 `tests/stereo` 为
+  `120 passed, 4 warnings in 5.86s`。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v5`
+- tmux：`stereo-hy-fourmode-smoke4-v5-260826`
+- launcher SHA256：`ac49d36876fff62b09fd493a898d7629e6037f5b0851c97df455b3486434b9bb`
+- 运行：11:43:19 启动；训练 4/4、validation 4/4 后正常退出，exit code 0；
+  `val/mixed/total_loss=1.620`，日志 traceback 数为 0。
+- `step_timings.json` 含四种 mode 各 1 个真实 update：stereo/four-frame
+  `24.010 s`，mono/single-frame `1.018 s`，mono/four-frame `0.580 s`，
+  stereo/single-frame `5.806 s`；四步均值 `7.853 s`。这是一轮 smoke，每 mode 只有
+  一个样本点，不作为稳定吞吐结论。
+- rank 0 峰值 allocated：stereo/four-frame `115,971,233,280 B`，mono/four-frame
+  `37,068,145,664 B`，stereo/single-frame `27,092,542,976 B`，mono/single-frame
+  `10,204,180,992 B`；rank 1 数值一致。峰值 reserved 约 `127.8 GB`。
+- 已产生且可读取 `best-epoch=0-step=4.ckpt`、`epoch=0-step=4.ckpt` 与 `last.ckpt`。
+  `last.ckpt` 为 `global_step=4`；四种 mode 各 1 update、各 48 global samples，
+  four/single-frame updates 为 2/2，BS24/device、GA1、seed 1234、world size 2。
+- run manifest SHA256：`7f21c34119e05029d9b44ab3b4d6fc1ac82d75d19125731f9b3edcb247b5a8f5`；
+  resolved config SHA256：`aacd4deeea5679db8ac9c6d748cf2e5f6e74ae1e0c7147f0d4c5ce10d67b774d`。
+- 用户将监控要求更新为：任务已经成功结束时无需继续等满 5 分钟；v5 完成后 GPU 0/1
+  均已释放。
+- v5 checkpoint 的 strict resume 必须保持 world size 2 和 BS24，不能直接切到 8 卡。
+  如果下一项要验证 8 卡，应另做 fresh smoke，并先把运行合同从硬编码 BS24/最多 2 ranks
+  改为 global batch 48；推荐 8 ranks x BS6、GA1，使固定 48+48 子集在每个 mode 内按
+  rank 无重复分配。该 8 卡合同尚未实现或启动。
