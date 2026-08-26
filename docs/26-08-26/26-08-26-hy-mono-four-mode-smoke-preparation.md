@@ -292,5 +292,23 @@ H200-1 cache exporter identical rerun                 # passed
 
 ## 当前 blocker
 
-数据准备、代码同步和 CPU/tensor blocker 均已解除。下一门是 H200-2 两 rank BS24
-GPU smoke 的实时 launch preflight；GPU smoke 完成前不进入 400-step overfit。
+数据准备、代码同步和 CPU/tensor blocker 均已解除。
+
+### H200-2 两 rank BS24 smoke 首次启动结果
+
+- 提交：`54f4758440b41e1156a82bced540ab3171531ce3`；两台 H200 均 clean 且同 SHA。
+- 节点：H200-2；GPU 0/1；BF16；BS24/device；global 48；GA1；目标 4 updates。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v1`
+- session：`stereo-hy-fourmode-smoke4-260826`
+- 状态：启动失败，exit code 1；未创建 DDP rank，GPU 始终 0 MiB。
+- 首个根因：Frank unified runtime 中没有 `wandb>=0.12.10`，Lightning 在构造
+  `WandbLogger` 时抛出 `ModuleNotFoundError`。`WANDB_MODE=offline` 只控制联网模式，
+  不能替代缺失 Python package。
+- 未采取：没有设置 `DISABLE_WANDB=1`，没有修改 unified runtime，也没有改用其他
+  runtime 重试。
+
+现有 Frank-owned `/data/home/frank/.conda/envs/omnitokenizer-e2` 可 import WandB 0.23.1，
+但其 Torch 为 2.7.1+cu128、OpenCV 4.10.0，与 unified runtime 的 Torch 2.7.1+cu126、
+OpenCV 4.11.0 不完全相同。推荐保留 unified runtime，并在新的 Frank task-private
+overlay 中只补齐经验证的 WandB 依赖；该环境写入与新的 retry output path 需用户确认。
+GPU smoke 完成前不进入 400-step overfit。
