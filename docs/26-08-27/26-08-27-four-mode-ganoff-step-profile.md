@@ -123,3 +123,28 @@ NCCL error, or NaN. No measured step throughput existed yet. Initial ETA at
 roughly 0.2--2.0 second GAN-on step range: 4--10 minutes for both test bodies,
 and 7--15 minutes including validation, output finalization, result aggregation,
 and the memory-safety decision for focused tracing.
+
+### H200-2 launch result
+
+The launcher exited 1 before the first GAN-off update; GAN-on was not started.
+No `step_timings.json` was produced, so this attempt contains no performance
+measurements. The first root-cause exception on every rank was:
+
+```text
+ValueError: LAS2-H source repository is dirty
+```
+
+Read-only follow-up confirmed that the pinned source still had the required
+HEAD `8c97bd4c4da3712c2ac60003a23201dfdb5935f4`, but its worktree contained the
+untracked path `checkpoints`. The source is owned by `hezhou`, so it was left
+untouched. At result inspection time, Hezhou-owned LAS2-H processes had also
+occupied GPUs 0--3 with roughly 17--32 GiB each. This attempt is classified as
+an environment/preflight failure, not an OOM, DDP, GAN, or model failure.
+
+Failure artifacts:
+
+- Launcher exit: `launcher_exit_code.txt` (`1`)
+- GAN-off exit: `ganoff_seed1234/exit_code.txt` (`1`)
+- Resolved config: `ganoff_seed1234/resolved_config.json`
+- Run manifest: `ganoff_seed1234/run_manifest.json`
+- Root-cause log: `ganoff_seed1234/run.log`
