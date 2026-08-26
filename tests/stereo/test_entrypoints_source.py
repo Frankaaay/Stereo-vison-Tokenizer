@@ -74,40 +74,6 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--use_vae", source)
 
-    def test_step_profiler_preserves_the_accepted_training_contract(self):
-        source = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
-        self.assertIn("set_profiling_enabled(True)", source)
-        self.assertIn("max_steps=args.profile_updates", source)
-        self.assertIn("if args.max_steps != 5000", source)
-        self.assertIn("if args.batch_size != 8", source)
-        self.assertIn("selected8 profiling freezes num_workers=0", source)
-        self.assertIn("ProfilerActivity.CPU", source)
-        self.assertIn("ProfilerActivity.CUDA", source)
-        self.assertIn("record_shapes=True", source)
-        self.assertIn("profile_memory=True", source)
-        self.assertIn("with_stack=False", source)
-        self.assertNotIn("torch.compile", source)
-        self.assertNotIn("fused=True", source)
-
-    def test_step_profiler_recipe_keeps_one_gpu_batch_eight_and_bf16(self):
-        source = (
-            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
-        ).read_text(encoding="utf-8")
-        for argument in (
-            "--devices 1",
-            "--batch_size 8",
-            '--num_workers "${PROFILE_NUM_WORKERS}"',
-            "--bf16",
-            "--max_steps 5000",
-            "--profile_updates 40",
-            "--profile_wait 15",
-            "--profile_warmup 5",
-            "--profile_active 10",
-            "--perceptual_weight 1.0",
-        ):
-            self.assertIn(argument, source)
-        self.assertIn("TORCH_HOME:-/home/frank/.cache/torch", source)
-        self.assertIn("vgg16-397923af.pth", source)
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--fp16", source)
 
@@ -157,14 +123,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         attention = (
             ROOT / "stereo_tokenizer" / "modules" / "attention.py"
         ).read_text(encoding="utf-8")
-        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
         self.assertIn(
             'self._backend = "conv3d_contiguous"', attention
         )
-        self.assertIn('"conv3d_channels_last_3d"', attention)
         self.assertIn('"conv2d_t1_slice"', attention)
-        self.assertIn("expected at least one spatial PEG module", profile)
-        self.assertIn("wall_windows_by_temporal_mode", profile)
         launcher = (
             ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
         ).read_text(encoding="utf-8")
@@ -311,45 +273,6 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("automatic_numeric_pass", source)
         self.assertIn("if not args.allow_pending_visual_review:", source)
         self.assertIn('"visual_sample_ids": sorted(visual_sample_ids)', source)
-
-    def test_followup_profile_switches_are_explicit_and_disabled_by_default(self):
-        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
-        launcher = (
-            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
-        ).read_text(encoding="utf-8")
-        data = (ROOT / "stereo_tokenizer" / "data.py").read_text(
-            encoding="utf-8"
-        )
-        model = (ROOT / "stereo_tokenizer" / "model.py").read_text(
-            encoding="utf-8"
-        )
-        for argument in (
-            "--profile_preload_data",
-            "--profile_pin_memory",
-            "--profile_lpips_gt_cache",
-        ):
-            self.assertIn(argument, profile)
-        for value in (
-            "PROFILE_PRELOAD_DATA:-0",
-            "PROFILE_PIN_MEMORY:-0",
-            "PROFILE_LPIPS_GT_CACHE:-0",
-        ):
-            self.assertIn(value, launcher)
-        self.assertIn("profile_preload_train_dataset", data)
-        self.assertIn("LPIPS GT cache sample order changed", model)
-
-    def test_full_dataset_profile_is_fail_closed(self):
-        profile = (ROOT / "profile_stereo_step.py").read_text(encoding="utf-8")
-        launcher = (
-            ROOT / "scripts" / "stereo" / "profile_stereo_step.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn('choices=("selected8", "full3407")', profile)
-        self.assertIn("full3407 profiling freezes num_workers=8", profile)
-        self.assertIn("full3407 profiling forbids data preload", profile)
-        self.assertIn("expected exactly {expected_samples} samples", profile)
-        self.assertIn("PROFILE_DATASET_MODE:-selected8", launcher)
-        self.assertIn("PROFILE_NUM_WORKERS:-0", launcher)
-
 
 if __name__ == "__main__":
     unittest.main()

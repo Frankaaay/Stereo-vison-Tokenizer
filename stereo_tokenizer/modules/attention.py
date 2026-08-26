@@ -234,16 +234,12 @@ class PEG(nn.Module):
         """Select the PEG convolution backend."""
         supported = {
             "conv3d_contiguous",
-            "conv3d_channels_last_3d",
             "conv2d_t1_slice",
         }
         if backend not in supported:
             raise ValueError(f"unsupported PEG profiling backend: {backend}")
         self._backend = backend
-        if backend == "conv3d_channels_last_3d":
-            self.dsconv.to(memory_format=torch.channels_last_3d)
-        else:
-            self.dsconv.to(memory_format=torch.contiguous_format)
+        self.dsconv.to(memory_format=torch.contiguous_format)
 
     @beartype
     def forward(self, x, shape: Tuple[int, int, int, int] = None):
@@ -281,8 +277,6 @@ class PEG(nn.Module):
             ).unsqueeze(2)
         else:
             x = F.pad(x, (1, 1, 1, 1, *frame_padding), value=0.)
-            if self._backend == "conv3d_channels_last_3d":
-                x = x.contiguous(memory_format=torch.channels_last_3d)
             x = self.dsconv(x)
 
         x = rearrange(x, 'b d ... -> b ... d') # B C T H W -> B T H W C

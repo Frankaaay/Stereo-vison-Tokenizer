@@ -475,20 +475,8 @@ class StereoDataModule(pl.LightningDataModule):
         super().__init__()
         self.args = args
         self.shuffle = shuffle
-        self._profile_preloaded_train_dataset = None
-
-    def profile_preload_train_dataset(self) -> int:
-        if self._profile_preloaded_train_dataset is not None:
-            raise RuntimeError("training dataset is already preloaded")
-        dataset = self._dataset(True)
-        self._profile_preloaded_train_dataset = [
-            dataset[index] for index in range(len(dataset))
-        ]
-        return len(self._profile_preloaded_train_dataset)
 
     def _stereo_dataset(self, train: bool, split: str | None = None):
-        if train and self._profile_preloaded_train_dataset is not None:
-            return self._profile_preloaded_train_dataset
         backend = getattr(self.args, "stereo_data_backend", "manifest_v3")
         if backend == "lerobot_online":
             if self.args.train_epoch_repeats != 1:
@@ -585,8 +573,6 @@ class StereoDataModule(pl.LightningDataModule):
         if dataset is None:
             return None
         pin_memory = bool(getattr(self.args, "pin_memory", False))
-        if hasattr(self.args, "profile_pin_memory"):
-            pin_memory = bool(self.args.profile_pin_memory)
         persistent_workers = bool(
             getattr(self.args, "persistent_workers", False)
         )

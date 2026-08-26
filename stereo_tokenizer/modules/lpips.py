@@ -87,10 +87,6 @@ class LPIPS(nn.Module):
         feats1 = tuple(normalize_tensor(output) for output in outs1)
         return self.distance_from_normalized_features(feats0, feats1)
 
-    def normalized_features(self, input):
-        outputs = self.net(self.scaling_layer(input))
-        return tuple(normalize_tensor(output) for output in outputs)
-
     def distance_from_normalized_features(self, input_features, target_features):
         if len(input_features) != len(self.chns) or len(
             target_features
