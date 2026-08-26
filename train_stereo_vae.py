@@ -546,9 +546,12 @@ def validate_runtime_args(args):
         raise ValueError("--devices must be positive")
     if args.num_nodes < 1:
         raise ValueError("--num_nodes must be positive")
-    if args.four_mode_mixed_training and args.devices * args.num_nodes > 2:
+    if (
+        args.four_mode_mixed_training
+        and args.devices * args.num_nodes not in {1, 2, 8}
+    ):
         raise ValueError(
-            "the fixed 48-sample four-mode smoke supports at most two DDP ranks"
+            "the fixed 48-sample four-mode smoke supports 1, 2, or 8 DDP ranks"
         )
     if args.four_mode_mixed_training and args.mixed_stereo_sample_limit != 48:
         raise ValueError("the fixed four-mode smoke requires 48 stereo samples")

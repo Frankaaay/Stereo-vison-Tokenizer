@@ -75,6 +75,41 @@ class MixedModeScheduleTest(unittest.TestCase):
                 self.assertEqual(len({index for _, index in batch}), 24)
         self.assertEqual(schedules[0], schedules[1])
 
+    def test_fixed_48_sample_eight_rank_bs24_repeats_rank_local_shard(self) -> None:
+        rank_source_indices = []
+        schedules = []
+        for rank in range(8):
+            batches = list(
+                MixedModeBatchSampler(
+                    {"mono": 48, "stereo": 48},
+                    batch_size=24,
+                    seed=1234,
+                    updates_per_epoch=4,
+                    num_replicas=8,
+                    rank=rank,
+                )
+            )
+            schedules.append([batch[0][0] for batch in batches])
+            rank_indices = set(range(rank, 48, 8))
+            rank_source_indices.append(rank_indices)
+            self.assertEqual(len(rank_indices), 6)
+            for batch in batches:
+                indices = [index for _, index in batch]
+                self.assertEqual(set(indices), rank_indices)
+                self.assertEqual(
+                    {index: indices.count(index) for index in rank_indices},
+                    {index: 4 for index in rank_indices},
+                )
+        self.assertTrue(all(schedule == schedules[0] for schedule in schedules))
+        self.assertEqual(set().union(*rank_source_indices), set(range(48)))
+        for left in range(8):
+            for right in range(left + 1, 8):
+                self.assertTrue(
+                    rank_source_indices[left].isdisjoint(
+                        rank_source_indices[right]
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

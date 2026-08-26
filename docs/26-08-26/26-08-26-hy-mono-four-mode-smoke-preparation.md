@@ -442,3 +442,19 @@ GPU smoke 完成前不进入 400-step overfit。
   如果下一项要验证 8 卡，应另做 fresh smoke，并先把运行合同从硬编码 BS24/最多 2 ranks
   改为 global batch 48；推荐 8 ranks x BS6、GA1，使固定 48+48 子集在每个 mode 内按
   rank 无重复分配。该 8 卡合同尚未实现或启动。
+
+### 用户指定的 8 卡 BS24 fresh smoke 合同
+
+- 用户随后明确指定下一项改为 H200-2 8 GPU、BS24/device、GA1；global batch 为 192，
+  从 step 0 fresh 启动，不使用 v5 的 world-size-2 checkpoint resume。
+- 当前固定 mono/stereo source 各 48 条。8 ranks 下每 rank 每种 source 得到 6 个互斥
+  indices；BS24 local batch 会把本 rank 的 6 条确定性循环 4 次。不同 ranks 仍互斥且
+  合集覆盖 48 条，但 global batch 内每个 source sample 出现 4 次。因此该实验只解释为
+  8 卡 DDP、显存和执行稳定性 smoke，不与 v5 的无重复 global-batch-48 吞吐或优化效果
+  直接比较。
+- runtime 合同保留 BS24/device、GA1 和固定 48+48 source，仅把允许的 fresh-smoke world
+  size 冻结为 1、2 或 8；其他 world size 仍 fail closed。新增 8-rank sampler 测试要求：
+  每 rank 6 个唯一 source indices、每个 local batch 各重复 4 次、rank 间互斥、8 ranks
+  合集为 48，且所有 ranks 的 mode schedule 一致。
+- 提交前本地 `py_compile`/`git diff --check` 后推送；H200-2 定向与完整 suite 通过、8 卡
+  实时空闲且独立 output 不存在后才启动。
