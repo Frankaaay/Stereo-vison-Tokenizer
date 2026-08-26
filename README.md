@@ -1,163 +1,660 @@
-# OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation
+# StereoVAE：单目/双目四模式视觉编码器
 
-> **Structured mono/stereo VAE development branch.** The public tokenizer in
-> this branch is no longer the upstream image/video VQGAN. Its model contract
-> accepts mono `[B,1,1,3,T,256,256]` or stereo
-> `[B,3,2,3,T,256,256]`, with `T=1|4`, and produces
-> `[B,V,48,1,16,16]` latents. The Decoder returns left/reference RGB plus
-> `raw_relative_log_depth`; it does not return metric depth or disparity.
-> Legacy image-mode and VQ codebook paths are not supported. The upstream
-> model-zoo checkpoints and LM/DiT/Latte entrypoints below are retained as
-> historical repository context and are not strict-load compatible with this
-> Stereo model.
+本分支实现一个从零训练的结构化 VAE，训练模式为：
 
-## Stereo OmniTokenizer
+- `mono/single_frame`
+- `mono/four_frame`
+- `stereo/single_frame`
+- `stereo/four_frame`
 
-The implementation lives in the original repository path:
+单目输入为 `[B,1,1,3,T,256,256]`，双目输入为
+`[B,3,2,3,T,256,256]`，其中 `T=1` 或 `T=4`。编码器输出
+`[B,V,48,1,16,16]` latent；解码器输出参考左目 RGB 和
+`raw_relative_log_depth`。模型不直接输出 metric depth，也不加载本仓库之外的
+VAE 预训练权重。
 
-- `stereo_tokenizer/model.py`: shared per-frame Spatial Encoder,
-  StereoFusion, explicit single/four temporal branches, shared VAE posterior,
-  dynamic `V=1|3` Decoder branches, RGB/relative-log-depth heads, and explicit
-  batch metadata routing.
-- `stereo_tokenizer/modules/relative_depth.py`: common DA3/FoundationStereo
-  target conversion and per-sample view-equal centering.
-- `stereo_tokenizer/mode_sampling.py`: deterministic four-mode update schedule
-  and fixed-batch sampler primitives.
-- `stereo_tokenizer/modules/stereo_*.py`: fusion and masked loss primitives.
-- `stereo_tokenizer/data.py`: LeRobot stereo loader plus the Hy mono smoke
-  loader used by four-mode training.
-- `train_stereo_vae.py`, `eval_stereo_vae.py`, and
-  `scripts/stereo/train_stereo_vae.sh`: training/evaluation entrypoints with
-  online stereo GT generation.
+本 README 面向一台全新的 Linux GPU 服务器，覆盖：
 
-The tokenizer intentionally does not implement downstream DiT
-patchify/unpatchify. See `doc/Stereo Tokenizer Plan.md` for the frozen tensor,
-data, supervision, and validation contracts. H200 smoke/overfit execution is a
-separate gated step; the repository does not contain datasets, caches,
-checkpoints, or run outputs.
+1. 系统与 Python 环境；
+2. LAS2-H 与 DA3-BASE 两套在线 GT teacher；
+3. LeRobot 双目数据的 rectification audit 与 manifest；
+4. Hy `cam_high` 单目 smoke cache；
+5. 环境检查、单元测试、四模式 smoke、恢复训练和评估。
 
-The codec API requires both intrinsic encoding modes explicitly:
+> 当前四模式数据链路固定为 **48 条 Hy mono + 48 条 LeRobot stereo**，只支持
+> 1、2 或 8 个 DDP rank，且固定 `BS=24/GPU, GA=1`。它适用于接口 smoke、显存验证、
+> checkpoint/resume 和小数据过拟合，不应当被描述为正式全量四模式训练。
 
-```python
-encoded = model.encode(
-    video,
-    eye_mode="stereo",
-    temporal_mode="single_frame",  # or "four_frame"
-    sample_posterior=False,
-)
+## 1. 当前执行链路
+
+| 数据 | 输入 | 在线 GT | 训练目标 |
+| --- | --- | --- | --- |
+| LeRobot stereo | 三组同步且校正后的左右目 MP4 | LAS2-H，双向推理与 LR consistency | pixel disparity → centered relative log-depth |
+| Hy mono | `cam_high` 的 1/4 帧 RGB cache | DA3-BASE | native relative depth → centered relative log-depth |
+
+两套 GT 都在训练 callback 中在线生成。`ONLINE_GT_CACHE_ENABLED=1` 只开启增量
+teacher cache；它不是必须提前离线生成的数据集。缓存只能在 teacher、权重、预处理、
+阈值和 source-frame 配置完全相同时复用。
+
+主要入口：
+
+- `scripts/stereo/train_stereo_vae.sh`：统一训练 launcher；
+- `train_stereo_vae.py`：参数校验、teacher provenance、Lightning Trainer；
+- `eval_stereo_vae.py`：严格 checkpoint 加载与 stereo 评估；
+- `scripts/data/audit_lerobot_stereo_rectification.py`：双目校正审计；
+- `scripts/data/build_lerobot_stereo_manifest.py`：episode 级 90/5/5 manifest；
+- `scripts/data/build_hy_mono_smoke_cache.py`：Hy Lance → 48 条 immutable RGB cache。
+
+## 2. 已验证的软件/硬件基线
+
+推荐使用与当前 H200 smoke 一致的组合：
+
+- Linux x86_64；
+- NVIDIA driver 能运行 CUDA 12.6 wheel；
+- Python 3.12；
+- PyTorch `2.7.1+cu126`；
+- torchvision `0.22.1+cu126`；
+- PyTorch Lightning `2.5.6`；
+- NumPy `1.26.2`；
+- OpenCV `4.11.0`；
+- PyAV `16.0.1`；
+- WandB `0.23.1`（可用 `DISABLE_WANDB=1` 完全关闭）。
+
+四模式 `BS24` 的已测最重模式是 `stereo/four_frame`，单 rank 峰值 allocated 约
+116 GB、reserved 约 128–133 GB，因此推荐 141 GB H200。显存更小的 GPU 不能直接沿用
+这条冻结 recipe；本分支会拒绝把四模式 batch size 改成其他值。
+
+先安装系统工具。以下命令以自带 Python 3.12 的 Ubuntu 24.04 为例；其他发行版请用
+对应包管理器提供 Python 3.12，不要回退到未验证的 Python 版本：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git git-lfs ffmpeg libgl1 libglib2.0-0 python3.12 python3.12-venv
+nvidia-smi
 ```
 
-`single_frame` requires `T=1` and skips every four-frame temporal module.
-`four_frame` requires `T=4` and uses the bidirectional temporal attention from
-PR #3 before its `4D→D` sampler. The raw latent is accompanied by `eye_mode`,
-`temporal_mode`, and `source_num_frames`; current/history/prediction roles are
-owned by the downstream Memory system rather than this tokenizer.
+## 3. 目录规划与代码检出
 
-Official pytorch implementation of the following paper:
-<p align="left"> 
-<a href="https://arxiv.org/abs/2406.09399">OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation</a>.
-<br>
-<br>
-<a href="https://www.wangjunke.info/">Junke Wang</a><sup>1,2</sup>, <a href="https://enjoyyi.github.io/">Yi Jiang</a><sup>3</sup>, <a href="https://shallowyuan.github.io/">Zehuan Yuan</a><sup>3</sup>, <a href="./">Binyue Peng</a><sup>3</sup>, <a href="https://zxwu.azurewebsites.net/">Zuxuan Wu</a><sup>1,2</sup>, <a href="https://fvl.fudan.edu.cn/">Yu-Gang Jiang</a><sup>1,2</sup>
-<br>
-<sup>1</sup>Shanghai Key Lab of Intell. Info. Processing, School of CS, Fudan University <br>
-<sup>2</sup>Shanghai Collaborative Innovation Center of Intelligent Visual Computing, <sup>3</sup>Bytedance Inc.
-</p>
+数据、teacher、Python 环境和训练输出都放在仓库外：
 
-<p align="left">
-    <img src=assets/network.png width="852" height="284" />
-</p>
+```bash
+export WORK_ROOT=/data/$USER/stereo-vae
+export PROJECT_ROOT=$WORK_ROOT/Stereo-vison-Tokenizer
+export RUNTIME_ROOT=$WORK_ROOT/runtime
+export EXTERNAL_ROOT=$WORK_ROOT/external
+export ASSET_ROOT=$WORK_ROOT/assets
+export RUN_ROOT=$WORK_ROOT/runs
 
+mkdir -p "$RUNTIME_ROOT" "$EXTERNAL_ROOT" "$ASSET_ROOT" "$RUN_ROOT"
+git lfs install
+git clone --branch hezhou-las2-h \
+  https://github.com/Frankaaay/Stereo-vison-Tokenizer.git \
+  "$PROJECT_ROOT"
+cd "$PROJECT_ROOT"
 
-We introduce OmniTokenizer, a joint image-video tokenizer which features the following properties:
-- 🚀 **One model** and **one weight** for joint image and video tokenization;
-- 🥇 **State-of-the-art reconstruction performance** on both image and video datasets;
-- ⚡ High adaptability to **high resolution** and **long** video inputs;
-- 🔥 Equipped with it, both **language model** and **diffusion model** could achieve competitive visual generation results.
-
-Please refer to our [project page](https://www.wangjunke.info/OmniTokenizer/) for the reconstruction and generation results by OmniTokenizer.
-
-## Setup
-
-Please setup the environment using the following commands:
-
-```
-pip3 install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu118
-pip3 install -r requirements.txt
+git status --short --branch
+git rev-parse HEAD
 ```
 
-Then download the datasets from the official websites. You can download the [annotation.zip](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/annotations.zip) processed by us and put them under ```./annotations```.
+运行前应记录实际 branch、完整 SHA 和 clean 状态。若要复现某次实验，应再
+`git checkout <FULL_COMMIT_SHA>`，不要依赖分支名推断代码版本。
 
-## Upstream Model Zoo for VQVAE and VAE (incompatible with Stereo-only class)
+## 4. 创建训练环境
 
-We release both VQVAE and VAE version of OmniTokenizer, that are pretrained on a wide range of image and video datasets:
+根目录的 `requirements.txt` 是宽泛依赖集合，不是当前分支已验证的完整锁文件；其中的
+旧 Lightning pin 不能用于这条 Python 3.12 recipe。请按下面的显式版本安装。
 
- |  Type | Training Data  | FID | FVD | ckpt | 
- | ---------- | ---------- | ---------- | ----------- | ----------- | 
- | VQVAE | ImageNet | 1.28[^1] | - | [imagenet_only.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_only.ckpt) |
- | VQVAE | CelebAHQ | 1.85 | - | [celebahq.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/celebahq.ckpt) | 
- | VQVAE | FFHQ |2.58 | - | [ffhq.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/ffhq.ckpt) | 
- | VQVAE | ImageNet + UCF | 1.11 | 42.35 | [imagenet_ucf.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_ucf.ckpt) | 
- | VQVAE | ImageNet + K600 | 1.23 | 25.97 | [imagenet_k600.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_k600.ckpt) | 
- | VQVAE | ImageNet + MiT | 1.26 | 19.87 | [imagenet_mit.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_mit.ckpt) | 
- | VQVAE | ImageNet + Sthv2 | 1.21 | 20.30 | [imagenet_sthv2.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_sthv2.ckpt) | 
- | VQVAE | CelebAHQ + UCF | 1.93 | 45.59 | [celebahq_ucf.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/celebahq_ucf.ckpt) | 
- | VQVAE | CelebAHQ + K600 | 1.82 | 89.13 | [celebahq_k600.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/celebahq_k600.ckpt) | 
- | VQVAE | FFHQ + UCF | 1.91 | 57.93 | [ffhq_ucf.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/ffhq_ucf.ckpt) | 
- | VQVAE | FFHQ + K600 | 2.69 | 87.58 | [ffhq_k600.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/ffhq_k600.ckpt) | 
- | VAE | ImageNet + UCF | 0.69 | 23.44 | [imagenet_ucf_vae.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_ucf_vae.ckpt) | 
- | VAE | ImageNet + K600 | 0.78 | 13.02 | [imagenet_k600_vae.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_k600_vae.ckpt) |
+```bash
+python3.12 -m venv "$RUNTIME_ROOT/train"
+source "$RUNTIME_ROOT/train/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
 
-[^1] We train this model w/o *scaled_dot_product_attention*, please comment line 446-460 in ```OmniTokenizer/modules/attention.py``` to reproduce this result.
+python -m pip install \
+  torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu126
 
+python -m pip install \
+  numpy==1.26.2 \
+  pytorch-lightning==2.5.6 \
+  opencv-python==4.11.0.86 \
+  av==16.0.1 \
+  wandb==0.23.1 \
+  pyarrow==23.0.0 \
+  einops timm beartype imageio pillow requests tqdm scipy \
+  pandas joblib open3d trimesh thop transformations \
+  huggingface_hub safetensors omegaconf pytest
+```
 
-These links and reported metrics describe the upstream implementation. They
-must not be used as pretrained weights for this branch: Stereo training starts
-from scratch and evaluation uses strict checkpoint loading through
-`vqgan_eval.py`.
+### 4.1 安装 LAS2-H source
 
-## Stereo Tokenizer Training
+本分支直接从 LAS2 repository 导入 `core.models`，不把它安装进本仓库：
 
-The four-mode contract is mono/stereo × single/four, with one homogeneous mode
-per batch, per-device batch size 24, gradient accumulation 1, and a seeded
-1:1:1:1 shuffled update schedule. RGB reconstruction, KL warmup, LPIPS, and the
-existing optional GAN/feature-matching structure are retained; only the former
-disparity and disparity-gradient slots become relative log-depth SmoothL1 and
-spatial-gradient SmoothL1.
+```bash
+export LAS2_H_REPO=$EXTERNAL_ROOT/LiteAnyStereo
+git clone https://github.com/TomTomTommi/LiteAnyStereo.git "$LAS2_H_REPO"
+git -C "$LAS2_H_REPO" checkout 8c97bd4c4da3712c2ac60003a23201dfdb5935f4
+git -C "$LAS2_H_REPO" status --short
+```
 
-The model/loss/sampler contracts are implemented. Stereo samples come only
-from the LeRobot route and receive online GT from the selected
-`las2_h`/`pytorch`/`tensorrt` teacher; the optional online cache remains an
-incremental optimization rather than a dataset contract. Mono samples keep
-the Hy loader and online DA3 target callback. Conversion to relative log-depth
-happens at the loss boundary.
+上述 source SHA 是 2026-08-26 核对的官方 `main`。LAS2-H 运行所需的 PyTorch、
+OpenCV、timm、pandas 等依赖已在上一节安装；ONNX、TensorRT demo 依赖不是本分支
+LAS2-H PyTorch teacher 的必需项。
 
+### 4.2 安装 DA3 source
 
-## LM-based Visual Synthesis
+```bash
+export DA3_REPO=$EXTERNAL_ROOT/depth-anything-3
+export DA3_SOURCE_SHA=3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
 
-The upstream LM scripts below target discrete codebook tokens and are not an
-entrypoint for the raw 48-channel Stereo VAE latent.
+git clone https://github.com/ByteDance-Seed/depth-anything-3.git "$DA3_REPO"
+git -C "$DA3_REPO" checkout "$DA3_SOURCE_SHA"
+git -C "$DA3_REPO" status --short
 
-Please refer to ```scripts/lm_train``` and ```scripts/lm_gen``` for the training and evaluation of language model. We provide the checkpoints for ImageNet[[imagenet_class_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/imagenet_class_lm.ckpt)], UCF [[ucf_class_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/ucf_class_lm.ckpt)], and Kinetics-600 [[k600_fp_lm.ckpt](https://huggingface.co/Daniel0724/OmniTokenizer/resolve/main/k600_fp_lm.ckpt)]. 
+# xformers 版本与 torch 2.7.1 对齐；先固定，再安装 DA3 editable package。
+python -m pip install xformers==0.0.31.post1
+python -m pip install -e "$DA3_REPO"
+```
 
-## Diffusion-based Visual Synthesis
+安装 DA3 后必须重新核对 PyTorch 没有被依赖解析器替换：
 
-The upstream diffusion scripts below are historical. Downstream Stereo latent
-normalization and DiT patchify/unpatchify belong to the consuming model and are
-not implemented in this tokenizer.
+```bash
+python - <<'PY'
+import torch
+import torchvision
+import pytorch_lightning as pl
+import av
+import cv2
+from depth_anything_3.api import DepthAnything3
 
-We adopt [DiT](https://github.com/facebookresearch/DiT?tab=readme-ov-file) and [Latte](https://github.com/Vchitect/Latte) for diffusion-based visual generation. Please refer to [diffusion.md](Diffusion/README.md) for the training and evaluation instructions.
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("torchvision", torchvision.__version__)
+print("lightning", pl.__version__)
+print("pyav", av.__version__)
+print("opencv", cv2.__version__)
+print("cuda_available", torch.cuda.is_available())
+assert torch.__version__.startswith("2.7.1")
+assert torchvision.__version__.startswith("0.22.1")
+assert pl.__version__ == "2.5.6"
+assert av.__version__ == "16.0.1"
+assert torch.cuda.is_available()
+PY
+```
 
-## Evaluation
+## 5. 下载并校验两套 GT 权重
 
-Please refer to [evaluation.md](evaluation/README.md) for how to evaluate the reconstruction or generation results.
+### 5.1 LAS2-H stereo disparity teacher
 
-## Acknowledgments
-Our code is partially built upon [VQGAN](https://github.com/CompVis/taming-transformers) and
-[TATS](https://github.com/songweige/TATS). We also appreciate the wonderful tools provided by [pytorch-fid](https://github.com/mseitzer/pytorch-fid) and [common_metrics_on_video_quality](https://github.com/JunyaoHu/common_metrics_on_video_quality).
+官方 source：<https://github.com/TomTomTommi/LiteAnyStereo>
 
+官方权重：<https://huggingface.co/tomtomtommi/LiteAnyStereoV2>
 
+```bash
+export LAS2_H_CHECKPOINT_DIR=$ASSET_ROOT/las2-h
+export LAS2_H_CHECKPOINT_REVISION=17788d91618646fa781a14462e2926a034b9f49d
+
+hf download tomtomtommi/LiteAnyStereoV2 LAS2_H.pth \
+  --revision "$LAS2_H_CHECKPOINT_REVISION" \
+  --local-dir "$LAS2_H_CHECKPOINT_DIR"
+
+export LAS2_H_CHECKPOINT=$LAS2_H_CHECKPOINT_DIR/LAS2_H.pth
+export LAS2_H_CHECKPOINT_SHA256=$(sha256sum "$LAS2_H_CHECKPOINT" | cut -d ' ' -f 1)
+test ${#LAS2_H_CHECKPOINT_SHA256} -eq 64
+printf 'LAS2-H SHA256=%s\n' "$LAS2_H_CHECKPOINT_SHA256"
+```
+
+训练时固定：
+
+- backend：`las2_h`；
+- model：LAS2-H；
+- `max_disp=192`；
+- `valid_iters=4`；
+- 左/右双向推理；
+- LR consistency、disparity range 和 non-padding mask 共同形成 valid mask。
+
+程序会在加载前重新计算 checkpoint SHA256；不匹配时直接失败。
+
+### 5.2 DA3-BASE mono relative-depth teacher
+
+官方 source：<https://github.com/ByteDance-Seed/depth-anything-3>
+
+官方权重：<https://huggingface.co/depth-anything/DA3-BASE>
+
+```bash
+export DA3_CHECKPOINT=$ASSET_ROOT/DA3-BASE
+export DA3_CHECKPOINT_REVISION=f4a6c9b3c95e41c82048423d3493a81ec3fa810e
+
+hf download depth-anything/DA3-BASE \
+  --revision "$DA3_CHECKPOINT_REVISION" \
+  --local-dir "$DA3_CHECKPOINT"
+
+export DA3_CHECKPOINT_SHA256=$(sha256sum "$DA3_CHECKPOINT/model.safetensors" | cut -d ' ' -f 1)
+test ${#DA3_CHECKPOINT_SHA256} -eq 64
+printf 'DA3-BASE model.safetensors SHA256=%s\n' "$DA3_CHECKPOINT_SHA256"
+```
+
+当前验证过的 `model.safetensors` SHA256 是：
+
+```text
+e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5
+```
+
+训练时固定 `process_res=504`、`upper_bound_resize` 和
+`finite(depth) & depth>0 & non_padding` mask。DA3 confidence 只记录和缓存，不应用
+未冻结的 confidence threshold。
+
+## 6. 数据准备
+
+### 6.1 仓库能够和不能够完成的步骤
+
+本仓库不包含以下上游转换器：
+
+- raw MCAP → LeRobot v3 shard；
+- raw Hy 数据 → Lance overlay。
+
+因此，新服务器必须先获得以下两份只读上游数据：
+
+1. 含六路 stereo MP4、episode parquet、`_manifests` 的 LeRobot v3 根目录，以及
+   对应的 source episode JSON/calibration 根目录；
+2. 含 `tables.json` 和 `table_*/table_*.lance` 的 Hy Lance overlay。
+
+从这两个上游产品开始，下面的 audit、manifest、mono cache 和在线 GT 全部可由本仓库
+重建。
+
+### 6.2 LeRobot stereo 预期结构
+
+```text
+$LEROBOT_DATASET_ROOT/
+├── _manifests/m_0000
+├── shard_0000/
+│   ├── meta/episodes/chunk-000/file-000.parquet
+│   └── videos/
+│       ├── observation.images.head_left/...
+│       ├── observation.images.head_right/...
+│       ├── observation.images.left_wrist_left/...
+│       ├── observation.images.left_wrist_right/...
+│       ├── observation.images.right_wrist_left/...
+│       └── observation.images.right_wrist_right/...
+└── shard_0000.failures.json                 # 可选
+
+$LEROBOT_SOURCE_ROOT/<episode>/.../<episode>.json
+```
+
+数据合同固定为 30 FPS、源分辨率 `480x640`、帧 offsets `[0,3,6,9]`、sample
+start stride 12。Student preprocessing 为保持宽高比的
+`480x640 → 192x256 → top/bottom pad 32 → 256x256`。
+
+设置路径；`SOURCE_MANIFEST_PREFIX` 必须与 `_manifests/m_*` 中记录的旧 source 路径
+前缀逐字一致：
+
+```bash
+export LEROBOT_DATASET_ROOT=/data/datasets/umi_lerobot_v3
+export LEROBOT_SOURCE_ROOT=/data/datasets/umi_source_episodes
+export SOURCE_MANIFEST_PREFIX=/data/umi_vio_data_260714/
+export PREPROCESS_ROOT=$WORK_ROOT/preprocessed/lerobot
+mkdir -p "$PREPROCESS_ROOT"
+```
+
+#### A. Rectification audit
+
+audit 输出路径和 visual 目录必须尚不存在：
+
+```bash
+cd "$PROJECT_ROOT"
+python scripts/data/audit_lerobot_stereo_rectification.py \
+  --dataset-root "$LEROBOT_DATASET_ROOT" \
+  --source-root "$LEROBOT_SOURCE_ROOT" \
+  --source-manifest-prefix "$SOURCE_MANIFEST_PREFIX" \
+  --episode-count 96 \
+  --seed 1234 \
+  --output "$PREPROCESS_ROOT/rectification_audit.json" \
+  --visual-root "$PREPROCESS_ROOT/rectification_visuals"
+```
+
+成功条件是 JSON 中 `result="pass"`，并且 `selected_mode` 为
+`verified_pre_rectified` 或 `apply_calibration`。必须人工查看每个视角的 epipolar
+visual；不要用 `--allow-provisional-pre-rectified` 进入正式训练。
+
+```bash
+export LEROBOT_RECTIFICATION_AUDIT_SHA256=$(sha256sum "$PREPROCESS_ROOT/rectification_audit.json" | cut -d ' ' -f 1)
+printf 'rectification audit SHA256=%s\n' "$LEROBOT_RECTIFICATION_AUDIT_SHA256"
+```
+
+#### B. Episode manifest 与 90/5/5 split
+
+```bash
+python scripts/data/build_lerobot_stereo_manifest.py \
+  --dataset-root "$LEROBOT_DATASET_ROOT" \
+  --source-root "$LEROBOT_SOURCE_ROOT" \
+  --source-manifest-prefix "$SOURCE_MANIFEST_PREFIX" \
+  --rectification-audit "$PREPROCESS_ROOT/rectification_audit.json" \
+  --split-seed 1234 \
+  --output-manifest "$PREPROCESS_ROOT/episode_manifest.jsonl" \
+  --output-summary "$PREPROCESS_ROOT/episode_manifest_summary.json"
+
+export LEROBOT_EPISODE_MANIFEST=$PREPROCESS_ROOT/episode_manifest.jsonl
+sha256sum "$LEROBOT_EPISODE_MANIFEST" "$PREPROCESS_ROOT/episode_manifest_summary.json"
+```
+
+split 在 episode 层完成，不会让同一 episode 的窗口跨 train/val/test。manifest 会保存
+视频路径、calibration、rectification audit SHA、预处理合同和 source JSON SHA。
+
+### 6.3 Hy mono smoke cache
+
+Hy exporter 需要 `lance`，建议使用独立 CPU 环境，避免它的 NumPy 依赖改变训练环境：
+
+```bash
+python3.12 -m venv "$RUNTIME_ROOT/hy-export"
+source "$RUNTIME_ROOT/hy-export/bin/activate"
+python -m pip install --upgrade pip
+python -m pip install pylance==8.0.0 pyarrow==23.0.0 numpy==2.5.2 pillow==12.3.0
+
+export HY_LANCE_ROOT=/data/datasets/hy_lance_overlay
+export MONO_SMOKE_CACHE_ROOT=$WORK_ROOT/preprocessed/hy_mono_cam_high_smoke_v1
+
+cd "$PROJECT_ROOT"
+python scripts/data/build_hy_mono_smoke_cache.py \
+  --root "$HY_LANCE_ROOT" \
+  --output-root "$MONO_SMOKE_CACHE_ROOT" \
+  --sample-count 48 \
+  --seed 1234 \
+  --fps 30
+
+export MONO_SMOKE_MANIFEST=$MONO_SMOKE_CACHE_ROOT/manifest.jsonl
+sha256sum "$MONO_SMOKE_MANIFEST" "$MONO_SMOKE_CACHE_ROOT/summary.json"
+```
+
+exporter 从 48 个不同 episode 选择四帧窗口，保存 raw uint8 RGB，不提前写 DA3 target。
+相同输入、seed 和输出目录可幂等重跑；若已有文件内容不同则拒绝覆盖。
+
+完成后切回训练环境：
+
+```bash
+deactivate
+source "$RUNTIME_ROOT/train/bin/activate"
+```
+
+## 7. 运行前检查
+
+### 7.1 代码与 Python
+
+```bash
+cd "$PROJECT_ROOT"
+git status --short --branch
+git rev-parse HEAD
+
+python -m py_compile \
+  train_stereo_vae.py eval_stereo_vae.py \
+  stereo_tokenizer/data.py stereo_tokenizer/online_gt.py
+bash -n scripts/stereo/train_stereo_vae.sh
+python -m pytest -q tests
+```
+
+### 7.2 数据与 teacher
+
+```bash
+test -f "$LEROBOT_EPISODE_MANIFEST"
+test -d "$LEROBOT_DATASET_ROOT"
+test -f "$MONO_SMOKE_MANIFEST"
+test -d "$MONO_SMOKE_CACHE_ROOT"
+test -d "$LAS2_H_REPO"
+test -f "$LAS2_H_CHECKPOINT"
+test -d "$DA3_REPO"
+test -f "$DA3_CHECKPOINT/model.safetensors"
+
+test "$(git -C "$DA3_REPO" rev-parse HEAD)" = "$DA3_SOURCE_SHA"
+test -z "$(git -C "$DA3_REPO" status --porcelain)"
+test "$(sha256sum "$LAS2_H_CHECKPOINT" | cut -d ' ' -f 1)" = "$LAS2_H_CHECKPOINT_SHA256"
+test "$(sha256sum "$DA3_CHECKPOINT/model.safetensors" | cut -d ' ' -f 1)" = "$DA3_CHECKPOINT_SHA256"
+```
+
+### 7.3 GPU
+
+```bash
+nvidia-smi
+```
+
+启动前确认所选 GPU 没有其他进程和显存占用。不要自动 kill 不属于本次任务的进程。
+
+## 8. 四模式最小可运行 smoke
+
+下面是已经验证过的 2 GPU H200 配置。输出目录必须使用一个从未存在过的新路径：
+
+```bash
+source "$RUNTIME_ROOT/train/bin/activate"
+cd "$PROJECT_ROOT"
+
+export CUDA_VISIBLE_DEVICES=0,1
+export OUTPUT_ROOT=$RUN_ROOT/four-mode-smoke-$(date +%Y%m%d-%H%M%S)
+export GPU_COUNT=2
+export GLOBAL_BATCH_SIZE=48
+export PER_DEVICE_BATCH_SIZE=24
+export GRAD_ACCUMULATES=1
+export MAX_STEPS=4
+export MODE_UPDATES_PER_EPOCH=4
+
+export LEARNING_RATE=1e-4
+export MIN_LEARNING_RATE=1e-4
+export WARMUP_STEPS=20
+export KL_WARMUP_STEPS=100
+export RGB_WEIGHT=1.0
+export RELATIVE_DEPTH_WEIGHT=1.0
+export RELATIVE_GRADIENT_WEIGHT=0.1
+export KL_WEIGHT=1e-6
+export PERCEPTUAL_WEIGHT=1.0
+export SINGLE_FRAME_SOURCE_INDEX=0
+
+export FOUR_MODE_MIXED_TRAINING=1
+export MODE_UPDATE_RATIO=1:1:1:1
+export MODE_SCHEDULE_SEED=1234
+export MONO_SMOKE_MANIFEST
+export MONO_SMOKE_CACHE_ROOT
+
+export LEROBOT_EPISODE_MANIFEST
+export LEROBOT_DATASET_ROOT
+export LEROBOT_RECTIFICATION_AUDIT_SHA256
+export LEROBOT_VAL_SAMPLE_LIMIT=512
+
+export FOUNDATION_STEREO_BACKEND=las2_h
+export LAS2_H_REPO
+export LAS2_H_CHECKPOINT
+export LAS2_H_CHECKPOINT_SHA256
+export LAS2_H_VALID_ITERS=4
+export LAS2_H_MAX_DISP=192
+export FOUNDATION_STEREO_PAIR_MICROBATCH=48
+
+export DA3_REPO
+export DA3_SOURCE_SHA
+export DA3_CHECKPOINT
+export DA3_CHECKPOINT_SHA256
+
+export ONLINE_GT_CACHE_ENABLED=0
+export ONLINE_VAL_CHECK_INTERVAL_STEPS=4
+export CHECKPOINT_EVERY_N_STEPS=4
+export NUM_WORKERS=8
+export DISABLE_WANDB=1
+export DISABLE_MEDIA_LOGGING=1
+
+bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
+```
+
+`PERCEPTUAL_WEIGHT=1.0` 会在首次构造模型时下载 torchvision VGG16 权重和项目内
+LPIPS `vgg.pth`。离线服务器应提前在同版本环境中完成一次下载并复制对应缓存；若只验证
+接口，可把 `PERCEPTUAL_WEIGHT=0`，但该结果不能与上面的冻结 loss 配置比较。
+
+成功 smoke 至少应满足：
+
+- shell exit code 为 0；
+- 日志没有 traceback、CUDA OOM 或 NaN/Inf；
+- `resolved_config.json` 与 `run_manifest.json` 存在；
+- checkpoint 目录中存在可读取的 `last.ckpt`；
+- `last.ckpt` 中四种 mode 各完成 1 update；
+- validation 完成四种 mode，`val/mixed/total_loss` 有限。
+
+8 GPU fresh smoke 使用 `GPU_COUNT=8`、`GLOBAL_BATCH_SIZE=192`，其他值不变。固定
+48 条 source 会在每个 local batch 内重复，因此只能验证 8-rank DDP/显存/执行稳定性，
+不能把它解释成 192 个唯一样本的吞吐。
+
+## 9. 开启在线 GT cache
+
+smoke 成功后，小数据 overfit 可使用新的仓库外 cache root：
+
+```bash
+export ONLINE_GT_CACHE_ENABLED=1
+export ONLINE_GT_CACHE_ROOT=$RUN_ROOT/online-gt-cache-v1
+```
+
+LAS2-H 与 DA3 使用各自 provenance namespace。不要把旧 cache 与新的 checkpoint、
+`SINGLE_FRAME_SOURCE_INDEX`、disparity range、LR threshold 或 geometry 配置混用。
+
+## 10. 恢复训练
+
+resume 必须保持原 checkpoint 的代码语义、world size、BS24、GA1、seed、数据、teacher
+权重和四模式 schedule。使用新的 output root，并把 `MAX_STEPS` 设为新的总目标 step：
+
+```bash
+export RESUME_FROM_CHECKPOINT=/absolute/path/to/previous/checkpoints/last.ckpt
+export OUTPUT_ROOT=$RUN_ROOT/four-mode-resume-$(date +%Y%m%d-%H%M%S)
+export MAX_STEPS=8
+export MODE_UPDATES_PER_EPOCH=8
+export CHECKPOINT_EVERY_N_STEPS=4
+export ONLINE_VAL_CHECK_INTERVAL_STEPS=4
+
+bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
+```
+
+程序会严格读取 `stereo_update_counters`，校验 schedule seed、已完成的 mode prefix 和
+下一 mode；缺少这些字段的旧 checkpoint 不允许推断式恢复。
+
+## 11. Stereo-only LAS2-H 训练
+
+若只训练 LeRobot stereo 的 single/four-frame 路径，不需要 Hy cache 或 DA3：
+
+```bash
+export FOUR_MODE_MIXED_TRAINING=0
+export FOUNDATION_STEREO_BACKEND=las2_h
+export GPU_COUNT=8
+export PER_DEVICE_BATCH_SIZE=24
+export GRAD_ACCUMULATES=1
+export GLOBAL_BATCH_SIZE=192
+export MAX_STEPS=<TOTAL_UPDATES>
+export OUTPUT_ROOT=$RUN_ROOT/stereo-only-$(date +%Y%m%d-%H%M%S)
+
+# 其余 LeRobot、LAS2-H、loss、LR、checkpoint 和 logging 变量沿用第 8 节。
+bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
+```
+
+正式长任务启动前应单独冻结 `MAX_STEPS`、LR/warmup、验证频率、checkpoint cadence、
+WandB 模式和 output path；不要把四步 smoke 参数直接当作正式训练计划。
+
+## 12. 严格评估
+
+评估只接受与 checkpoint architecture 完全一致的 CLI 参数，并使用 posterior mean 与
+在线 stereo teacher。以下示例在单 GPU 上对 val split 跑两个 batch，同时评估
+single/four-frame：
+
+```bash
+export STEREO_VAE_CKPT=/absolute/path/to/checkpoints/last.ckpt
+export EVAL_ROOT=$RUN_ROOT/eval-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$EVAL_ROOT"
+
+python eval_stereo_vae.py \
+  --stereo_vae_ckpt "$STEREO_VAE_CKPT" \
+  --eval_split val \
+  --eval_eye_mode stereo \
+  --eval_temporal_mode both \
+  --device cuda \
+  --bf16 \
+  --max_batches 2 \
+  --output_json "$EVAL_ROOT/metrics.json" \
+  --visualization_dir "$EVAL_ROOT/cases" \
+  --num_visualizations 2 \
+  --lerobot_episode_manifest "$LEROBOT_EPISODE_MANIFEST" \
+  --lerobot_dataset_root "$LEROBOT_DATASET_ROOT" \
+  --lerobot_rectification_audit_sha256 "$LEROBOT_RECTIFICATION_AUDIT_SHA256" \
+  --foundation_stereo_backend las2_h \
+  --las2_h_repo "$LAS2_H_REPO" \
+  --las2_h_checkpoint "$LAS2_H_CHECKPOINT" \
+  --las2_h_checkpoint_sha256 "$LAS2_H_CHECKPOINT_SHA256" \
+  --las2_h_valid_iters 4 \
+  --las2_h_max_disp 192 \
+  --foundation_stereo_pair_microbatch 48 \
+  --resolution 256 \
+  --sequence_length 4 \
+  --image_channels 3 \
+  --patch_embed linear \
+  --patch_size 16 \
+  --spatial_depth 4 \
+  --temporal_depth 4 \
+  --embedding_dim 512 \
+  --latent_channels 48 \
+  --enc_block ttww \
+  --dec_block tttt \
+  --twod_window_size 8 \
+  --spatial_pos rope \
+  --causal_in_peg \
+  --peg_backend conv2d_t1_slice \
+  --dim_head 64 \
+  --heads 8 \
+  --initialize_vit \
+  --stereo_num_views 3 \
+  --stereo_num_frames 4 \
+  --single_frame_source_index 0 \
+  --stereo_search_radii 7 7 7 \
+  --stereo_search_direction left \
+  --stereo_disparity_min_px 0.5 \
+  --stereo_disparity_max_px 112.0 \
+  --stereo_lr_error_abs_threshold_px 1.0 \
+  --stereo_lr_error_relative_threshold 0.05 \
+  --rgb_weight 1.0 \
+  --relative_depth_weight 1.0 \
+  --relative_gradient_weight 0.1 \
+  --relative_depth_epsilon 1e-6 \
+  --kl_weight 1e-6 \
+  --perceptual_weight 1.0 \
+  --image_gan_weight 0 \
+  --video_gan_weight 0 \
+  --gan_feat_weight 0 \
+  --recon_loss_type l1 \
+  --smooth_l1_beta 1.0 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --pin_memory 1 \
+  --persistent_workers 1
+```
+
+`metrics.json`、程序 exit code 0、精确 sample count、有限指标和可视化图片共同构成
+评估成功；仅看到进程启动不算完成。完整 split 评估时删除 `--max_batches`。
+
+## 13. 输出与 provenance
+
+每次训练至少保留：
+
+- `resolved_config.json`；
+- `run_manifest.json`，包括代码 SHA、teacher backend、权重 SHA 和 DA3 source SHA；
+- Lightning checkpoint，尤其 `last.ckpt`；
+- console log 与 WandB offline/online run（若启用）；
+- 数据 manifest、summary、rectification audit 及各自 SHA256；
+- 评估 `metrics.json` 和 deterministic case images。
+
+数据集、teacher 权重、online GT cache、checkpoint、日志和 run output 都不得提交进
+Git。更换服务器时复制这些仓库外资产，或按本 README 重新生成，并重新核对所有 SHA。
+
+## 14. 常见故障
+
+- `ModuleNotFoundError: av`：训练环境缺少 `av==16.0.1`；这会在 LeRobot MP4
+  DataLoader worker 中失败。
+- `ModuleNotFoundError: wandb`：安装 `wandb==0.23.1`，或显式
+  `DISABLE_WANDB=1`；`WANDB_MODE=offline` 不能替代缺失的 package。
+- `DA3 source SHA mismatch`：DA3 repo 不在冻结 commit，或 repo 有未提交修改。
+- `DA3 checkpoint SHA256 mismatch` / `LAS2-H checkpoint SHA256 mismatch`：传入的
+  环境变量与实际文件不一致，重新计算 SHA，不要绕过检查。
+- `LeRobot MP4 loading requires PyAV`：PyAV 未安装或当前 shell 没激活训练 venv。
+- `rectification audit did not pass`：检查 source-root、calibration、视频同步和可视化；
+  不要用 provisional flag 掩盖失败。
+- 四模式报 BS/world-size 错误：当前合同只接受 BS24、GA1 和 1/2/8 ranks。
+- CUDA OOM：已验证的 BS24 需要 H200 级大显存；不要把 teardown 的非零 exit code当作
+  根因，应读取日志中的第一个真实 CUDA/算子异常。
 
 ## License
 
-This project is licensed under the MIT license, as found in the LICENSE file.
+本项目使用仓库根目录 `LICENSE` 中的 MIT License。
