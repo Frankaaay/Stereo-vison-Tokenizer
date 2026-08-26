@@ -31,106 +31,85 @@ if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
   fi
 fi
 
-STEREO_DATA_BACKEND="${STEREO_DATA_BACKEND:-manifest_v3}"
-DATA_ARGS=(--stereo_data_backend "${STEREO_DATA_BACKEND}")
+DATA_ARGS=()
 ONLINE_GT_ARGS=()
-if [[ "${STEREO_DATA_BACKEND}" == "manifest_v3" ]]; then
-  : "${STEREO_TRAIN_MANIFEST:?set a Manifest v3 training path}"
-  : "${STEREO_RGB_ROOT:?set the independent RGB cache root}"
-  : "${STEREO_GT_ROOT:?set the FoundationStereo GT root}"
-  DATA_ARGS+=(
-    --stereo_train_manifest "${STEREO_TRAIN_MANIFEST}"
-    --stereo_rgb_root "${STEREO_RGB_ROOT}"
-    --stereo_gt_root "${STEREO_GT_ROOT}"
+: "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
+: "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
+: "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
+FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
+FOUNDATION_BACKEND_ARGS=()
+if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
+  : "${LAS2_H_REPO:?set the LiteAnyStereo repository}"
+  : "${LAS2_H_CHECKPOINT:?set the LAS2-H checkpoint}"
+  : "${LAS2_H_CHECKPOINT_SHA256:?set the LAS2-H checkpoint SHA256}"
+  LAS2_H_VALID_ITERS="${LAS2_H_VALID_ITERS:-4}"
+  LAS2_H_MAX_DISP="${LAS2_H_MAX_DISP:-192}"
+  FOUNDATION_BACKEND_ARGS=(
+    --las2_h_repo "${LAS2_H_REPO}"
+    --las2_h_checkpoint "${LAS2_H_CHECKPOINT}"
+    --las2_h_checkpoint_sha256 "${LAS2_H_CHECKPOINT_SHA256}"
+    --las2_h_valid_iters "${LAS2_H_VALID_ITERS}"
+    --las2_h_max_disp "${LAS2_H_MAX_DISP}"
   )
-elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
-  : "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
-  : "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
-  : "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
-  FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
-  FOUNDATION_BACKEND_ARGS=()
-  if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
-    : "${LAS2_H_REPO:?set the LiteAnyStereo repository}"
-    : "${LAS2_H_CHECKPOINT:?set the LAS2-H checkpoint}"
-    : "${LAS2_H_CHECKPOINT_SHA256:?set the LAS2-H checkpoint SHA256}"
-    LAS2_H_VALID_ITERS="${LAS2_H_VALID_ITERS:-4}"
-    LAS2_H_MAX_DISP="${LAS2_H_MAX_DISP:-192}"
-    FOUNDATION_BACKEND_ARGS=(
-      --las2_h_repo "${LAS2_H_REPO}"
-      --las2_h_checkpoint "${LAS2_H_CHECKPOINT}"
-      --las2_h_checkpoint_sha256 "${LAS2_H_CHECKPOINT_SHA256}"
-      --las2_h_valid_iters "${LAS2_H_VALID_ITERS}"
-      --las2_h_max_disp "${LAS2_H_MAX_DISP}"
-    )
-  elif [[ "${FOUNDATION_STEREO_BACKEND}" == "pytorch" ]]; then
-    : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
-    : "${FOUNDATION_STEREO_REPO:?set the FoundationStereo repository}"
-    : "${FOUNDATION_STEREO_CHECKPOINT:?set the ViT-L checkpoint}"
-    FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-16}"
-    FOUNDATION_BACKEND_ARGS+=(
-      --foundation_stereo_repo "${FOUNDATION_STEREO_REPO}"
-      --foundation_stereo_checkpoint "${FOUNDATION_STEREO_CHECKPOINT}"
-      --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
-      --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
-    )
-  elif [[ "${FOUNDATION_STEREO_BACKEND}" == "tensorrt" ]]; then
-    : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
-    : "${FOUNDATION_STEREO_ENGINE:?set the TensorRT engine path}"
-    : "${FOUNDATION_STEREO_ENGINE_SHA256:?set the TensorRT engine SHA256}"
-    : "${FOUNDATION_STEREO_ENGINE_MANIFEST:?set the engine manifest path}"
-    : "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256:?set the engine manifest SHA256}"
-    FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-32}"
-    if [[ "${FOUNDATION_STEREO_VALID_ITERS}" != "32" ]]; then
-      echo "TensorRT FoundationStereo is frozen to 32 iterations" >&2
-      exit 2
-    fi
-    FOUNDATION_BACKEND_ARGS+=(
-      --foundation_stereo_engine "${FOUNDATION_STEREO_ENGINE}"
-      --foundation_stereo_engine_sha256 "${FOUNDATION_STEREO_ENGINE_SHA256}"
-      --foundation_stereo_engine_manifest "${FOUNDATION_STEREO_ENGINE_MANIFEST}"
-      --foundation_stereo_engine_manifest_sha256 "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256}"
-      --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
-      --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
-    )
-  else
-    echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
+elif [[ "${FOUNDATION_STEREO_BACKEND}" == "pytorch" ]]; then
+  : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
+  : "${FOUNDATION_STEREO_REPO:?set the FoundationStereo repository}"
+  : "${FOUNDATION_STEREO_CHECKPOINT:?set the ViT-L checkpoint}"
+  FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-16}"
+  FOUNDATION_BACKEND_ARGS+=(
+    --foundation_stereo_repo "${FOUNDATION_STEREO_REPO}"
+    --foundation_stereo_checkpoint "${FOUNDATION_STEREO_CHECKPOINT}"
+    --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
+    --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
+  )
+elif [[ "${FOUNDATION_STEREO_BACKEND}" == "tensorrt" ]]; then
+  : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
+  : "${FOUNDATION_STEREO_ENGINE:?set the TensorRT engine path}"
+  : "${FOUNDATION_STEREO_ENGINE_SHA256:?set the TensorRT engine SHA256}"
+  : "${FOUNDATION_STEREO_ENGINE_MANIFEST:?set the engine manifest path}"
+  : "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256:?set the engine manifest SHA256}"
+  FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-32}"
+  if [[ "${FOUNDATION_STEREO_VALID_ITERS}" != "32" ]]; then
+    echo "TensorRT FoundationStereo is frozen to 32 iterations" >&2
     exit 2
   fi
-  DATA_ARGS+=(
-    --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
-    --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
-    --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
-    --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
-    --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
-    --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
-  )
-  ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"
-  if [[ "${ONLINE_GT_CACHE_ENABLED}" == "1" ]]; then
-    : "${ONLINE_GT_CACHE_ROOT:?set a repository-external online GT cache root}"
-  fi
-  ONLINE_GT_ARGS+=(
-    --online_gt_enabled 1
-    --foundation_stereo_backend "${FOUNDATION_STEREO_BACKEND}"
-    --foundation_stereo_pair_microbatch "${FOUNDATION_STEREO_PAIR_MICROBATCH:-48}"
-    "${FOUNDATION_BACKEND_ARGS[@]}"
-    --online_gt_cache_enabled "${ONLINE_GT_CACHE_ENABLED}"
-    --online_gt_cache_root "${ONLINE_GT_CACHE_ROOT:-}"
-    --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
+  FOUNDATION_BACKEND_ARGS+=(
+    --foundation_stereo_engine "${FOUNDATION_STEREO_ENGINE}"
+    --foundation_stereo_engine_sha256 "${FOUNDATION_STEREO_ENGINE_SHA256}"
+    --foundation_stereo_engine_manifest "${FOUNDATION_STEREO_ENGINE_MANIFEST}"
+    --foundation_stereo_engine_manifest_sha256 "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256}"
+    --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
+    --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
   )
 else
-  echo "unsupported STEREO_DATA_BACKEND=${STEREO_DATA_BACKEND}" >&2
+  echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
   exit 2
 fi
-
+DATA_ARGS+=(
+  --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
+  --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
+  --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
+  --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
+  --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
+  --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
+)
+ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"
+if [[ "${ONLINE_GT_CACHE_ENABLED}" == "1" ]]; then
+  : "${ONLINE_GT_CACHE_ROOT:?set a repository-external online GT cache root}"
+fi
+ONLINE_GT_ARGS+=(
+  --online_gt_enabled 1
+  --foundation_stereo_backend "${FOUNDATION_STEREO_BACKEND}"
+  --foundation_stereo_pair_microbatch "${FOUNDATION_STEREO_PAIR_MICROBATCH:-48}"
+  "${FOUNDATION_BACKEND_ARGS[@]}"
+  --online_gt_cache_enabled "${ONLINE_GT_CACHE_ENABLED}"
+  --online_gt_cache_root "${ONLINE_GT_CACHE_ROOT:-}"
+  --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
+)
 EXPECTED_GLOBAL_BATCH_SIZE=$((GPU_COUNT * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
 if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
   echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
   exit 2
-fi
-
-VALIDATION_ARGS=()
-if [[ "${STEREO_DATA_BACKEND}" == "manifest_v3" && -n "${STEREO_VAL_MANIFEST:-}" ]]; then
-  VALIDATION_ARGS+=(--stereo_val_manifest "${STEREO_VAL_MANIFEST}")
 fi
 
 WANDB_ARGS=()
@@ -153,10 +132,6 @@ fi
 
 MIXED_MODE_ARGS=()
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  if [[ "${STEREO_DATA_BACKEND}" != "lerobot_online" ]]; then
-    echo "four-mode smoke requires STEREO_DATA_BACKEND=lerobot_online" >&2
-    exit 2
-  fi
   : "${MONO_SMOKE_MANIFEST:?set the node-local Hy mono manifest}"
   : "${MONO_SMOKE_CACHE_ROOT:?set the node-local Hy mono cache root}"
   : "${DA3_REPO:?set the pinned Depth Anything 3 source repository}"
@@ -208,7 +183,6 @@ python3 train_stereo_vae.py \
   "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
   "${MIXED_MODE_ARGS[@]}" \
-  "${VALIDATION_ARGS[@]}" \
   --resolution 256 \
   --sequence_length 4 \
   --image_channels 3 \

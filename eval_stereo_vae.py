@@ -21,7 +21,10 @@ from stereo_tokenizer.modules.relative_depth import (
     relative_prediction_from_raw,
     relative_target_from_foundation_stereo,
 )
-from stereo_tokenizer.online_gt import FoundationStereoOnlineTeacher
+from stereo_tokenizer.online_gt import (
+    FoundationStereoOnlineTeacher,
+    validate_tensorrt_engine_assets,
+)
 
 
 VIEW_NAMES = ("head", "lefthand", "righthand")
@@ -74,6 +77,11 @@ def build_parser():
     parser.add_argument("--max_batches", type=int, default=None)
     parser.add_argument("--output_json", type=Path, required=True)
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument(
+        "--foundation_stereo_backend",
+        choices=("las2_h", "pytorch", "tensorrt"),
+        default="pytorch",
+    )
     parser.add_argument("--foundation_stereo_repo", type=str, default=None)
     parser.add_argument("--foundation_stereo_checkpoint", type=str, default=None)
     parser.add_argument(
@@ -88,6 +96,21 @@ def build_parser():
     parser.add_argument(
         "--foundation_stereo_pair_microbatch", type=int, default=48
     )
+    parser.add_argument("--foundation_stereo_engine", type=str, default=None)
+    parser.add_argument(
+        "--foundation_stereo_engine_sha256", type=str, default=None
+    )
+    parser.add_argument(
+        "--foundation_stereo_engine_manifest", type=str, default=None
+    )
+    parser.add_argument(
+        "--foundation_stereo_engine_manifest_sha256", type=str, default=None
+    )
+    parser.add_argument("--las2_h_repo", type=str, default=None)
+    parser.add_argument("--las2_h_checkpoint", type=str, default=None)
+    parser.add_argument("--las2_h_checkpoint_sha256", type=str, default=None)
+    parser.add_argument("--las2_h_valid_iters", type=int, default=4)
+    parser.add_argument("--las2_h_max_disp", type=int, default=192)
     parser.add_argument("--visualization_dir", type=Path, default=None)
     parser.add_argument("--num_visualizations", type=int, default=0)
     parser.add_argument(
@@ -125,40 +148,74 @@ def validate_args(args):
         raise ValueError("absolute LR threshold must be non-negative")
     if args.stereo_lr_error_relative_threshold < 0:
         raise ValueError("relative LR threshold must be non-negative")
-    if args.stereo_data_backend == "lerobot_online":
-        required = {
-            "lerobot_episode_manifest": args.lerobot_episode_manifest,
-            "lerobot_dataset_root": args.lerobot_dataset_root,
-            "lerobot_rectification_audit_sha256": (
-                args.lerobot_rectification_audit_sha256
-            ),
-            "foundation_stereo_repo": args.foundation_stereo_repo,
-            "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
-            "foundation_stereo_checkpoint_sha256": (
-                args.foundation_stereo_checkpoint_sha256
-            ),
-        }
-        missing = [name for name, value in required.items() if not value]
-        if missing:
-            raise ValueError(
-                "LeRobot online evaluation requires " + ", ".join(missing)
-            )
-        if len(args.lerobot_rectification_audit_sha256) != 64:
-            raise ValueError("a full rectification audit SHA256 is required")
-        if len(args.foundation_stereo_checkpoint_sha256) != 64:
-            raise ValueError("a full FoundationStereo checkpoint SHA256 is required")
-        if args.foundation_stereo_pair_microbatch < 1:
-            raise ValueError("FoundationStereo pair microbatch must be positive")
-    else:
-        if args.eval_split == "test":
-            raise ValueError("Manifest-v3 evaluation has no separate test manifest")
-        manifest = (
-            args.stereo_train_manifest
-            if args.eval_split == "train"
-            else args.stereo_val_manifest
+    teacher_sha256 = (
+        args.las2_h_checkpoint_sha256
+        if args.foundation_stereo_backend == "las2_h"
+        else args.foundation_stereo_checkpoint_sha256
+    )
+    required = {
+        "lerobot_episode_manifest": args.lerobot_episode_manifest,
+        "lerobot_dataset_root": args.lerobot_dataset_root,
+        "lerobot_rectification_audit_sha256": (
+            args.lerobot_rectification_audit_sha256
+        ),
+        "teacher_checkpoint_sha256": teacher_sha256,
+    }
+    if args.foundation_stereo_backend == "las2_h":
+        required.update(
+            {
+                "las2_h_repo": args.las2_h_repo,
+                "las2_h_checkpoint": args.las2_h_checkpoint,
+            }
         )
-        if manifest is None:
-            raise ValueError(f"no Manifest v3 configured for split {args.eval_split}")
+    elif args.foundation_stereo_backend == "pytorch":
+        required.update(
+            {
+                "foundation_stereo_repo": args.foundation_stereo_repo,
+                "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
+            }
+        )
+    else:
+        required.update(
+            {
+                "foundation_stereo_engine": args.foundation_stereo_engine,
+                "foundation_stereo_engine_sha256": (
+                    args.foundation_stereo_engine_sha256
+                ),
+                "foundation_stereo_engine_manifest": (
+                    args.foundation_stereo_engine_manifest
+                ),
+                "foundation_stereo_engine_manifest_sha256": (
+                    args.foundation_stereo_engine_manifest_sha256
+                ),
+            }
+        )
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError("LeRobot online evaluation requires " + ", ".join(missing))
+    if len(args.lerobot_rectification_audit_sha256) != 64:
+        raise ValueError("a full rectification audit SHA256 is required")
+    if len(teacher_sha256) != 64:
+        raise ValueError("a full online teacher checkpoint SHA256 is required")
+    if args.foundation_stereo_pair_microbatch < 1:
+        raise ValueError("FoundationStereo pair microbatch must be positive")
+    if args.foundation_stereo_backend == "las2_h":
+        if args.las2_h_valid_iters < 1:
+            raise ValueError("LAS2-H valid_iters must be positive")
+        if args.las2_h_max_disp != 192:
+            raise ValueError("LAS2-H max_disp is frozen to 192")
+    elif args.foundation_stereo_backend == "tensorrt":
+        if args.foundation_stereo_valid_iters != 32:
+            raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
+        if args.foundation_stereo_pair_microbatch > 48:
+            raise ValueError("TensorRT pair microbatch exceeds frozen max batch 48")
+        validate_tensorrt_engine_assets(
+            args.foundation_stereo_engine,
+            args.foundation_stereo_engine_sha256,
+            args.foundation_stereo_engine_manifest,
+            args.foundation_stereo_engine_manifest_sha256,
+            args.foundation_stereo_checkpoint_sha256,
+        )
     if args.max_batches is not None and args.max_batches <= 0:
         raise ValueError("--max_batches must be positive")
     if args.num_visualizations < 0:
@@ -230,15 +287,6 @@ def load_model(args, device):
     return model
 
 
-def selected_loader(data, split):
-    if split == "train":
-        return data.train_dataloader()
-    loader = data.test_dataloader() if split == "test" else data.val_dataloader()
-    if loader is None:
-        raise RuntimeError(f"{split} loader is unavailable")
-    return loader
-
-
 def initialize_distributed(args):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -271,13 +319,6 @@ def _exact_lerobot_rank_indices(dataset, rank, world_size):
 
 
 def exact_eval_loader(data_module, args, rank, world_size):
-    if args.stereo_data_backend != "lerobot_online":
-        if world_size > 1:
-            raise ValueError(
-                "distributed exact evaluation is only supported for LeRobot online data"
-            )
-        return selected_loader(data_module, args.eval_split), None
-
     dataset = data_module._dataset(False, split=args.eval_split)
     indices = _exact_lerobot_rank_indices(dataset, rank, world_size)
     subset = torch_data.Subset(dataset, indices)
@@ -295,22 +336,44 @@ def exact_eval_loader(data_module, args, rank, world_size):
 
 
 def build_online_teacher(args, device):
-    if args.stereo_data_backend != "lerobot_online":
-        return None
+    backend = args.foundation_stereo_backend
+    valid_iters = (
+        args.las2_h_valid_iters
+        if backend == "las2_h"
+        else args.foundation_stereo_valid_iters
+    )
+    repo = args.las2_h_repo if backend == "las2_h" else args.foundation_stereo_repo
+    checkpoint = (
+        args.las2_h_checkpoint
+        if backend == "las2_h"
+        else args.foundation_stereo_checkpoint
+    )
+    checkpoint_sha256 = (
+        args.las2_h_checkpoint_sha256
+        if backend == "las2_h"
+        else args.foundation_stereo_checkpoint_sha256
+    )
     return FoundationStereoOnlineTeacher(
-        args.foundation_stereo_repo,
-        args.foundation_stereo_checkpoint,
-        args.foundation_stereo_checkpoint_sha256,
+        repo,
+        checkpoint,
+        checkpoint_sha256,
         device=device,
-        valid_iters=args.foundation_stereo_valid_iters,
+        valid_iters=valid_iters,
         pair_microbatch=args.foundation_stereo_pair_microbatch,
-        backend="pytorch",
+        backend=backend,
+        engine=args.foundation_stereo_engine,
+        engine_sha256=args.foundation_stereo_engine_sha256,
+        engine_manifest=args.foundation_stereo_engine_manifest,
+        engine_manifest_sha256=args.foundation_stereo_engine_manifest_sha256,
+        las2_h_repo=args.las2_h_repo,
+        las2_h_checkpoint=args.las2_h_checkpoint,
+        las2_h_checkpoint_sha256=args.las2_h_checkpoint_sha256,
+        las2_h_valid_iters=args.las2_h_valid_iters,
+        las2_h_max_disp=args.las2_h_max_disp,
     )
 
 
 def attach_online_targets(args, teacher, batch):
-    if teacher is None:
-        return
     disparity, residual, base_valid = teacher.infer(batch["video"])
     threshold = torch.maximum(
         residual.new_tensor(args.stereo_lr_error_abs_threshold_px),
@@ -692,10 +755,7 @@ def main():
         mode: finalize_metrics(accumulator)
         for mode, accumulator in accumulators.items()
     }
-    if (
-        args.stereo_data_backend == "lerobot_online"
-        and args.max_batches is None
-    ):
+    if args.max_batches is None:
         expected = len(lerobot_dataset)
         for mode, metrics in metrics_by_mode.items():
             if metrics["sample_count"] != expected:
@@ -706,8 +766,6 @@ def main():
 
     visualization_records = []
     if args.num_visualizations:
-        if lerobot_dataset is None:
-            raise ValueError("case visualization currently requires LeRobot online data")
         if rank == 0:
             args.visualization_dir.mkdir(parents=True, exist_ok=False)
         if world_size > 1:

@@ -412,8 +412,6 @@ def validate_runtime_args(args):
         missing = [name for name, value in required_mono.items() if not value]
         if missing:
             raise ValueError("four-mode training requires " + ", ".join(missing))
-        if args.stereo_data_backend != "lerobot_online":
-            raise ValueError("four-mode online-teacher smoke requires lerobot_online")
         if not args.online_gt_enabled:
             raise ValueError("four-mode online-teacher smoke requires online GT")
         if args.da3_process_res != 504:
@@ -453,116 +451,106 @@ def validate_runtime_args(args):
         raise ValueError("absolute LR threshold must be non-negative")
     if args.stereo_lr_error_relative_threshold < 0:
         raise ValueError("relative LR threshold must be non-negative")
-    if args.stereo_data_backend == "manifest_v3":
-        if args.stereo_train_manifest is None:
-            raise ValueError("--stereo_train_manifest is required")
-        if args.stereo_rgb_root is None or args.stereo_gt_root is None:
-            raise ValueError("--stereo_rgb_root and --stereo_gt_root are required")
-        if args.online_gt_enabled:
-            raise ValueError("Manifest-v3 training cannot enable online GT")
-    elif args.stereo_data_backend == "lerobot_online":
-        teacher_sha256 = (
-            args.las2_h_checkpoint_sha256
-            if args.foundation_stereo_backend == "las2_h"
-            else args.foundation_stereo_checkpoint_sha256
+    teacher_sha256 = (
+        args.las2_h_checkpoint_sha256
+        if args.foundation_stereo_backend == "las2_h"
+        else args.foundation_stereo_checkpoint_sha256
+    )
+    required = {
+        "lerobot_episode_manifest": args.lerobot_episode_manifest,
+        "lerobot_dataset_root": args.lerobot_dataset_root,
+        "lerobot_rectification_audit_sha256": (
+            args.lerobot_rectification_audit_sha256
+        ),
+        "teacher_checkpoint_sha256": teacher_sha256,
+    }
+    if args.foundation_stereo_backend == "las2_h":
+        required.update(
+            {
+                "las2_h_repo": args.las2_h_repo,
+                "las2_h_checkpoint": args.las2_h_checkpoint,
+                "las2_h_checkpoint_sha256": args.las2_h_checkpoint_sha256,
+            }
         )
-        required = {
-            "lerobot_episode_manifest": args.lerobot_episode_manifest,
-            "lerobot_dataset_root": args.lerobot_dataset_root,
-            "lerobot_rectification_audit_sha256": (
-                args.lerobot_rectification_audit_sha256
-            ),
-            "teacher_checkpoint_sha256": teacher_sha256,
-        }
-        if args.foundation_stereo_backend == "las2_h":
-            required.update(
-                {
-                    "las2_h_repo": args.las2_h_repo,
-                    "las2_h_checkpoint": args.las2_h_checkpoint,
-                    "las2_h_checkpoint_sha256": args.las2_h_checkpoint_sha256,
-                }
-            )
-        elif args.foundation_stereo_backend == "pytorch":
-            required.update(
-                {
-                    "foundation_stereo_repo": args.foundation_stereo_repo,
-                    "foundation_stereo_checkpoint": (
-                        args.foundation_stereo_checkpoint
-                    ),
-                }
-            )
-        else:
-            required.update(
-                {
-                    "foundation_stereo_engine": args.foundation_stereo_engine,
-                    "foundation_stereo_engine_sha256": (
-                        args.foundation_stereo_engine_sha256
-                    ),
-                    "foundation_stereo_engine_manifest": (
-                        args.foundation_stereo_engine_manifest
-                    ),
-                    "foundation_stereo_engine_manifest_sha256": (
-                        args.foundation_stereo_engine_manifest_sha256
-                    ),
-                }
-            )
-        missing = [name for name, value in required.items() if not value]
-        if missing:
+    elif args.foundation_stereo_backend == "pytorch":
+        required.update(
+            {
+                "foundation_stereo_repo": args.foundation_stereo_repo,
+                "foundation_stereo_checkpoint": (
+                    args.foundation_stereo_checkpoint
+                ),
+            }
+        )
+    else:
+        required.update(
+            {
+                "foundation_stereo_engine": args.foundation_stereo_engine,
+                "foundation_stereo_engine_sha256": (
+                    args.foundation_stereo_engine_sha256
+                ),
+                "foundation_stereo_engine_manifest": (
+                    args.foundation_stereo_engine_manifest
+                ),
+                "foundation_stereo_engine_manifest_sha256": (
+                    args.foundation_stereo_engine_manifest_sha256
+                ),
+            }
+        )
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError(
+            "LeRobot online training requires " + ", ".join(missing)
+        )
+    if not args.online_gt_enabled:
+        raise ValueError("LeRobot online training requires --online_gt_enabled=1")
+    if len(args.lerobot_rectification_audit_sha256) != 64:
+        raise ValueError("a full rectification audit SHA256 is required")
+    if len(teacher_sha256) != 64:
+        raise ValueError("a full online teacher checkpoint SHA256 is required")
+    if args.online_gt_cache_enabled and not args.online_gt_cache_root:
+        raise ValueError("online GT cache requires --online_gt_cache_root")
+    if args.foundation_stereo_pair_microbatch < 1:
+        raise ValueError("FoundationStereo pair microbatch must be positive")
+    engine_values = (
+        args.foundation_stereo_engine,
+        args.foundation_stereo_engine_sha256,
+        args.foundation_stereo_engine_manifest,
+        args.foundation_stereo_engine_manifest_sha256,
+    )
+    if args.foundation_stereo_backend == "las2_h":
+        if args.las2_h_valid_iters < 1:
+            raise ValueError("LAS2-H valid_iters must be positive")
+        if args.las2_h_max_disp != 192:
+            raise ValueError("LAS2-H max_disp is frozen to 192")
+        if any(value is not None for value in engine_values):
+            raise ValueError("LAS2-H forbids TensorRT engine arguments")
+    elif args.foundation_stereo_backend == "pytorch":
+        if any(value is not None for value in engine_values):
             raise ValueError(
-                "LeRobot online training requires " + ", ".join(missing)
+                "PyTorch FoundationStereo forbids TensorRT engine arguments"
             )
-        if not args.online_gt_enabled:
-            raise ValueError("LeRobot online training requires --online_gt_enabled=1")
-        if len(args.lerobot_rectification_audit_sha256) != 64:
-            raise ValueError("a full rectification audit SHA256 is required")
-        if len(teacher_sha256) != 64:
-            raise ValueError("a full online teacher checkpoint SHA256 is required")
-        if args.online_gt_cache_enabled and not args.online_gt_cache_root:
-            raise ValueError("online GT cache requires --online_gt_cache_root")
-        if args.foundation_stereo_pair_microbatch < 1:
-            raise ValueError("FoundationStereo pair microbatch must be positive")
-        engine_values = (
+    else:
+        if args.foundation_stereo_valid_iters != 32:
+            raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
+        if args.foundation_stereo_pair_microbatch > 48:
+            raise ValueError(
+                "TensorRT pair microbatch exceeds the frozen max batch 48"
+            )
+        validate_tensorrt_engine_assets(
             args.foundation_stereo_engine,
             args.foundation_stereo_engine_sha256,
             args.foundation_stereo_engine_manifest,
             args.foundation_stereo_engine_manifest_sha256,
+            args.foundation_stereo_checkpoint_sha256,
         )
-        if args.foundation_stereo_backend == "las2_h":
-            if args.las2_h_valid_iters < 1:
-                raise ValueError("LAS2-H valid_iters must be positive")
-            if args.las2_h_max_disp != 192:
-                raise ValueError("LAS2-H max_disp is frozen to 192")
-            if any(value is not None for value in engine_values):
-                raise ValueError("LAS2-H forbids TensorRT engine arguments")
-        elif args.foundation_stereo_backend == "pytorch":
-            if any(value is not None for value in engine_values):
-                raise ValueError(
-                    "PyTorch FoundationStereo forbids TensorRT engine arguments"
-                )
-        else:
-            if args.foundation_stereo_valid_iters != 32:
-                raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
-            if args.foundation_stereo_pair_microbatch > 48:
-                raise ValueError(
-                    "TensorRT pair microbatch exceeds the frozen max batch 48"
-                )
-            validate_tensorrt_engine_assets(
-                args.foundation_stereo_engine,
-                args.foundation_stereo_engine_sha256,
-                args.foundation_stereo_engine_manifest,
-                args.foundation_stereo_engine_manifest_sha256,
-                args.foundation_stereo_checkpoint_sha256,
-            )
-        if args.online_val_check_interval_steps < 1:
-            raise ValueError("online validation interval must be positive")
-        if args.lerobot_val_sample_limit != 512:
-            raise ValueError("online validation sample count is frozen to 512")
-        if args.lerobot_video_cache_capacity < 1:
-            raise ValueError("LeRobot video cache capacity must be positive")
-        if args.lerobot_maximum_timestamp_error_s <= 0:
-            raise ValueError("LeRobot timestamp tolerance must be positive")
-    else:
-        raise ValueError(f"unsupported stereo data backend {args.stereo_data_backend}")
+    if args.online_val_check_interval_steps < 1:
+        raise ValueError("online validation interval must be positive")
+    if args.lerobot_val_sample_limit != 512:
+        raise ValueError("online validation sample count is frozen to 512")
+    if args.lerobot_video_cache_capacity < 1:
+        raise ValueError("LeRobot video cache capacity must be positive")
+    if args.lerobot_maximum_timestamp_error_s <= 0:
+        raise ValueError("LeRobot timestamp tolerance must be positive")
     if args.bf16 and args.fp16:
         raise ValueError("--bf16 and --fp16 are mutually exclusive")
     if args.devices < 1:
@@ -605,8 +593,8 @@ def validate_runtime_args(args):
             raise ValueError(
                 "torch profiler schedule must leave a post-profile update"
             )
-    if args.train_epoch_repeats < 1:
-        raise ValueError("--train_epoch_repeats must be positive")
+    if args.train_epoch_repeats != 1:
+        raise ValueError("LeRobot online training requires train_epoch_repeats=1")
 
 
 def _jsonable(value):
@@ -714,7 +702,7 @@ def write_online_gt_run_metadata(args):
     print(json.dumps({"online_gt_provenance": online_gt}, sort_keys=True))
 
 
-def build_callbacks(args, has_validation):
+def build_callbacks(args):
     callbacks = []
     if args.online_gt_enabled:
         callbacks.append(OnlineFoundationGTCallback(args))
@@ -749,23 +737,19 @@ def build_callbacks(args, has_validation):
         callbacks.append(
             StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
         )
-    if has_validation and (
-        args.four_mode_mixed_training
-        or args.stereo_data_backend == "manifest_v3"
-    ):
-        callbacks.append(
-            ModelCheckpoint(
-                monitor=(
-                    "val/mixed/total_loss"
-                    if args.four_mode_mixed_training
-                    else "val/four/total_loss"
-                ),
-                every_n_epochs=1,
-                save_top_k=3,
-                mode="min",
-                filename="best-{epoch}-{step}",
-            )
+    callbacks.append(
+        ModelCheckpoint(
+            monitor=(
+                "val/mixed/total_loss"
+                if args.four_mode_mixed_training
+                else "val/four/total_loss"
+            ),
+            every_n_epochs=1,
+            save_top_k=3,
+            mode="min",
+            filename="best-{epoch}-{step}",
         )
+    )
     return callbacks
 
 
@@ -793,11 +777,7 @@ def main():
 
     data = StereoDataModule(args)
     model = StereoVAE(args)
-    has_validation = (
-        args.stereo_data_backend == "lerobot_online"
-        or args.stereo_val_manifest is not None
-    )
-    callbacks = build_callbacks(args, has_validation)
+    callbacks = build_callbacks(args)
 
     profiler = None
     if args.torch_profile_output_dir is not None and int(
@@ -845,11 +825,8 @@ def main():
             find_unused_parameters=True,
         )
 
-    val_check_interval = 1.0
-    check_val_every_n_epoch = 1
-    if args.stereo_data_backend == "lerobot_online":
-        val_check_interval = args.online_val_check_interval_steps
-        check_val_every_n_epoch = None
+    val_check_interval = args.online_val_check_interval_steps
+    check_val_every_n_epoch = None
 
     trainer = pl.Trainer(
         accelerator="gpu",
@@ -863,7 +840,7 @@ def main():
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=1,
-        limit_val_batches=1.0 if has_validation else 0,
+        limit_val_batches=1.0,
         num_sanity_val_steps=0,
         check_val_every_n_epoch=check_val_every_n_epoch,
         val_check_interval=val_check_interval,

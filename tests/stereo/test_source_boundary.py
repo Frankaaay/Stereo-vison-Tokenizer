@@ -99,11 +99,13 @@ class SourceBoundaryTest(unittest.TestCase):
             classes,
             {
                 "ModeSubset",
-                "StereoManifestDataset",
                 "HyMonoSmokeDataset",
                 "StereoDataModule",
             },
         )
+        source = DATA_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn("StereoManifestDataset", source)
+        self.assertNotIn("manifest_v3", source)
 
     def test_lpips_pretrained_name_uses_value_comparison(self) -> None:
         tree = ast.parse(LPIPS_SOURCE.read_text(encoding="utf-8"))

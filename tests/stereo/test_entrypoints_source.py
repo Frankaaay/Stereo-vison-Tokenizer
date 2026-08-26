@@ -13,8 +13,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("os.listdir", source)
         self.assertIn("StereoVAE(args)", source)
         self.assertIn("StereoDataModule(args)", source)
-        self.assertIn("limit_val_batches=1.0 if has_validation else 0", source)
-        self.assertIn("check_val_every_n_epoch = 1", source)
+        self.assertIn("limit_val_batches=1.0", source)
+        self.assertIn("check_val_every_n_epoch = None", source)
         self.assertIn("check_val_every_n_epoch=check_val_every_n_epoch", source)
         self.assertIn("max_steps=-1 if args.gan_enabled else args.max_steps", source)
         self.assertIn("max_epochs=-1", source)
@@ -40,6 +40,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn('choices=["train", "val", "test"]', source)
         self.assertIn('choices=["single_frame", "four_frame", "both"]', source)
         self.assertIn("FoundationStereoOnlineTeacher", source)
+        self.assertIn('choices=("las2_h", "pytorch", "tensorrt")', source)
+        self.assertNotIn("stereo_data_backend", source)
+        self.assertNotIn("stereo_train_manifest", source)
+        self.assertNotIn("stereo_val_manifest", source)
         self.assertIn("_exact_lerobot_rank_indices", source)
         self.assertIn("dist.all_reduce", source)
         self.assertIn("metrics[\"sample_count\"] != expected", source)
@@ -104,13 +108,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         ):
             self.assertIn(region, model)
 
-        for region in (
-            "stereo/data/rgb_npz_read_decompress",
-            "stereo/data/gt_npz_read_decompress",
-            "stereo/data/numpy_processing_and_tensor_conversion",
-            "stereo/data/collate",
-        ):
-            self.assertIn(region, data)
+        self.assertIn("stereo/data/collate", data)
+        self.assertNotIn("rgb_npz_read_decompress", data)
+        self.assertNotIn("gt_npz_read_decompress", data)
         for region in (
             "stereo/loss/rgb",
             "stereo/loss/relative_depth",
@@ -174,10 +174,12 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
             encoding="utf-8"
         )
+        self.assertNotIn("STEREO_DATA_BACKEND", launcher)
         self.assertIn(
-            'STEREO_DATA_BACKEND="${STEREO_DATA_BACKEND:-manifest_v3}"',
+            '--lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"',
             launcher,
         )
+        self.assertIn("--online_gt_enabled 1", launcher)
         self.assertIn(
             'ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"',
             launcher,

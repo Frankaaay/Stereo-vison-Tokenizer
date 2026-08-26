@@ -24,13 +24,11 @@ The implementation lives in the original repository path:
 - `stereo_tokenizer/mode_sampling.py`: deterministic four-mode update schedule
   and fixed-batch sampler primitives.
 - `stereo_tokenizer/modules/stereo_*.py`: fusion and masked loss primitives.
-- `stereo_tokenizer/data.py`: Manifest v3 loader for independent RGB and
-  FoundationStereo GT caches.
-- `scripts/data/build_stereo_rgb_cache.py`: independent RGB-cache builder and
-  Manifest v3 finalizer.
+- `stereo_tokenizer/data.py`: LeRobot stereo loader plus the Hy mono smoke
+  loader used by four-mode training.
 - `train_stereo_vae.py`, `eval_stereo_vae.py`, and
-  `scripts/stereo/train_stereo_vae.sh`: Stereo-only
-  training/evaluation entrypoints.
+  `scripts/stereo/train_stereo_vae.sh`: training/evaluation entrypoints with
+  online stereo GT generation.
 
 The tokenizer intentionally does not implement downstream DiT
 patchify/unpatchify. See `doc/Stereo Tokenizer Plan.md` for the frozen tensor,
@@ -127,12 +125,12 @@ existing optional GAN/feature-matching structure are retained; only the former
 disparity and disparity-gradient slots become relative log-depth SmoothL1 and
 spatial-gradient SmoothL1.
 
-The model/loss/sampler contracts are implemented. The production DataModule
-and online-teacher dispatcher are not declared complete until the ego mono
-episode manifest/schema and pinned DA3-BASE source/checkpoint/preprocessing
-provenance are supplied. The existing stereo Manifest v3 and LeRobot paths
-remain native FoundationStereo-disparity sources; conversion to relative
-log-depth happens at the loss boundary without rewriting those caches.
+The model/loss/sampler contracts are implemented. Stereo samples come only
+from the LeRobot route and receive online GT from the selected
+`las2_h`/`pytorch`/`tensorrt` teacher; the optional online cache remains an
+incremental optimization rather than a dataset contract. Mono samples keep
+the Hy loader and online DA3 target callback. Conversion to relative log-depth
+happens at the loss boundary.
 
 
 ## LM-based Visual Synthesis
