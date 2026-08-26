@@ -56,8 +56,8 @@ DA3 native cache schema 更新为 `da3-processed-relative-depth-cache-v2`，meta
 - `python -m py_compile ...`：通过；
 - `python tests/stereo/test_entrypoints_source.py`：15/15；
 - `git diff --check`：通过，仅有既存 CRLF notices；
-- 本地 Python 实时缺少 Torch 和 Lightning，因此新增的十项 tensor/cache tests 尚未
-  执行。按 Git 边界，没有把未提交源码复制进 H200 clone 绕过 commit/push/sync。
+- 本地 Python 实时缺少 Torch 和 Lightning；提交并同步两台 H200 后，已在 H200-2
+  Frank unified runtime 的 CPU 模式执行完整 `tests/stereo`，最终 115/115 通过。
 
 ## H200-2 Lance runtime、schema 与 immutable cache
 
@@ -118,14 +118,9 @@ sample/episode count、RGB bytes 和 skip summary 全部一致，证明 immutabl
 已完成准备：generic geometry 代码与十项定向测试、静态/source 检查、H200-2
 task-private Lance runtime、schema audit、48-window raw RGB cache 与幂等验证。
 
-尚缺：在包含 Torch/Lightning 的目标代码环境执行十项 geometry/cache tests 与相关
-tensor suite；两 rank schedule/resume execution；BS24 四模式 GPU residency smoke；
-small-data overfit 与 strict resume。
-
-下一次 CPU/tensor 测试必须使用与当前 dirty source 一致的合法代码环境。当前未获
-commit/push/server sync 授权，不能通过服务器现场改源码或复制旁路 source tree 绕过。
-任何 GPU forward、BS24 smoke、overfit/resume、训练/评估，以及 commit、push、Git
-sync 仍需用户新授权。
+已完成：十项 geometry/cache tests 与完整 CPU tensor suite；两台 H200 都已通过
+fast-forward-only 同步到精确提交。尚缺：两 rank schedule/resume execution、BS24
+四模式 GPU residency smoke、small-data overfit 与 strict resume。
 
 ## 双节点只读证据
 
@@ -238,9 +233,8 @@ checkpoint/resume 路径，只把固定 source 缩小到 48+48。推荐分两步
    validation mean。随机性来自固定 subset 内的 seeded sample permutation，不在每次
    resume 时重新抽 subset。
 
-GPU 启动前仍需：tensor suite 完成、用户授权 commit/push、目标 H200 clone
-fast-forward 到已推送精确 SHA、GPU/进程检查，以及用户对下述 output path、GPU 数、
-step budget、offline WandB 与 GT-cache 选择的确认。
+GPU 启动前仍需实时复核 GPU/进程、node-local input、frozen assets 与 output 不存在，
+并按用户已确认的下述 smoke 合同执行。
 
 ### 建议的精确 smoke / resume / overfit 合同（仅提案，未获启动授权）
 
@@ -290,11 +284,13 @@ H200-1 cache exporter identical rerun                 # passed
 ```
 
 本地 Python 没有 torch、pytorch_lightning、pytest，因此 tensor/unit suite 尚未运行；
-没有为了测试擅自安装本地依赖。H200 仓库也未同步未提交代码，因此未在服务器运行代码测试。
+没有为了测试擅自安装本地依赖。H200-2 unified runtime 首次完整 suite 为
+113 passed / 2 failed；失败来自旧 source-boundary test 未允许新增 mono dataset classes，
+以及把 `__pycache__/*.pyc` 误判为 legacy source。定向修复后两台服务器同步到
+`e4f29649f08aa4aab9a06cd7e1c3a36b657263b8`，复跑结果为
+`115 passed, 4 warnings in 4.58s`；warnings 均为依赖 deprecation。
 
 ## 当前 blocker
 
-数据准备 blocker 已解除。当前 blocker 是本地缺 Torch/Lightning，且未获
-commit/push/H200 Git sync 授权，无法在合法的同 SHA 环境执行新增 tensor suite；GPU
-smoke/resume/overfit 还缺 GPU 使用、具体 output/cache paths、step budget 与 WandB mode
-的新授权。
+数据准备、代码同步和 CPU/tensor blocker 均已解除。下一门是 H200-2 两 rank BS24
+GPU smoke 的实时 launch preflight；GPU smoke 完成前不进入 400-step overfit。
