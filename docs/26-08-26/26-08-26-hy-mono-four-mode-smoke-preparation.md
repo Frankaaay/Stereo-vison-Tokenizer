@@ -313,7 +313,7 @@ OpenCV 4.11.0 不完全相同。推荐保留 unified runtime，并在新的 Fran
 overlay 中只补齐经验证的 WandB 依赖；该环境写入与新的 retry output path 需用户确认。
 GPU smoke 完成前不进入 400-step overfit。
 
-### H200-2 两 rank BS24 smoke v2（进行中）
+### H200-2 两 rank BS24 smoke v2（失败）
 
 - 用户已确认建立 Frank task-private overlay 并重试；没有修改 unified runtime。
 - overlay：`/data/home/frank/runtime/stereo-tokenizer-wandb-overlay-v1`，固定
@@ -338,3 +338,29 @@ GPU smoke 完成前不进入 400-step overfit。
 - ETA（11:07 +08:00 初估）：尚无真实 step 吞吐，按 4-step 小任务规模和双 teacher/DDP
   初始化开销给出宽区间，训练主体预计约 5--20 分钟；checkpoint、exit code 与结果完整性
   核验再预留约 5 分钟。得到后续真实状态快照时再刷新，不在本轮轮询等待。
+- 实际完成：11:07:59 +08:00，exit code 1；没有完成训练 step，也没有 checkpoint。
+- 首个根因：DataLoader worker 打开 LeRobot MP4 时 `import av` 失败，原始异常为
+  `ModuleNotFoundError: No module named 'av'`，上层 fail-closed 为
+  `RuntimeError: LeRobot MP4 loading requires PyAV in the training runtime`。这不是 CUDA
+  OOM、DDP、teacher 或 geometry 错误；WandB offline run 已正常创建。
+
+### H200-2 两 rank BS24 smoke v3（进行中）
+
+- 用户确认后，在同一 task-private overlay 中固定安装 `av==16.0.1`；版本取自 Frank-owned
+  `/data/home/frank/.conda/envs/omnitokenizer-e2` 的已存在 Python 3.12 环境。unified runtime
+  本体保持不变。
+- 单样本解码：使用冻结 H200-2 LeRobot manifest 首条记录的真实 `head_left` MP4，PyAV
+  成功解码首帧为 `(480, 640, 3) uint8`。PyAV 与 WandB 均从 overlay 导入；Torch
+  `2.7.1+cu126`、Lightning `2.5.6`、OpenCV `4.11.0` 保持不变。
+- overlay 补齐 PyAV 后完整 CPU/tensor suite：`115 passed, 4 warnings in 5.82s`。
+- launch preflight：代码 clean at
+  `9b1c0415dc7659336bed648872c37fb09498c3dc`；冻结 manifest/cache/teacher hashes 均一致；
+  v3 output 不存在；8 张 H200 均为 0 MiB，且无匹配训练进程。
+- 参数继续保持 v1/v2 的精确 2-rank、BS24/device、global 48、GA1、4-step 合同。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v3`
+- tmux：`stereo-hy-fourmode-smoke4-v3-260826`
+- 日志：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_h2002_v3/run.log`
+- 11:16:35 +08:00 的唯一启动健康检查：launcher、rank 0/1 进程和 tmux 均存在；日志已到
+  DDP 初始化，GPU 0/1 已建立 CUDA context；无 traceback，尚无首个 step/heartbeat。
+- ETA（11:16 +08:00 初估）：没有真实 step 吞吐，训练主体仍估计约 5--20 分钟；checkpoint、
+  exit code 与结果完整性核验再预留约 5 分钟。本轮不继续轮询。
