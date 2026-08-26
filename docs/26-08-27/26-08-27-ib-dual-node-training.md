@@ -3,7 +3,9 @@
 ## Status
 
 - Date: 2026-08-27 (Asia/Shanghai).
-- Status: implementation and validation in progress.
+- Status: optional IB implementation and the approved minimal link validation
+  are complete. The four-mode training smoke was removed from tonight's scope
+  by the user after H200 GPU contention was observed.
 - Branch: `IB-test`.
 - Baseline: `80cba3661dc6de4d6967e1edf5a69823dc9d4e5e`.
 - Local worktree: `C:\Project\Stereo-vison-Tokenizer-IB-test`.
@@ -71,7 +73,59 @@ evidence.
 - `git diff --check` passed apart from Git's existing LF-to-CRLF checkout
   warnings.
 
-Server results are pending. Record the pushed commit, server SHA/status,
-runtime and asset hashes, selected GPUs, exact commands,
-output/log/checkpoint paths, NCCL transport evidence, metrics, failures, and ETA
-here after each authorized stage.
+### Pushed implementation and H200 tests
+
+- Implementation commit:
+  `9f9196448ba5c20f1747c8b1d24e7b58e51426b8`
+  (`feat: add optional dual-node IB training`).
+- H200-2 project runtime: Torch `2.7.1+cu126`, CUDA `12.6`, Lightning `2.5.6`.
+- Full H200-2 `tests/stereo` suite: `135 passed, 4 warnings in 6.26s`.
+- The two formal server clones were being changed by concurrent tasks, so the
+  user authorized isolated worktrees at
+  `/data/home/frank/worktrees/Stereo-vison-Tokenizer-IB-test`. Both were clean
+  at the implementation commit for the successful probe.
+
+### Minimal two-node IB collective
+
+The user narrowed the remote GPU scope to proving the IB link only. The final
+probe used physical GPU 7 on each node, one process per node, one scalar
+all-reduce, `bond0` out-of-band bootstrap, and only `mlx5_7:1` for NCCL data
+transport. It did not run the model, load data or teachers, or write a
+checkpoint.
+
+```text
+output root on each node:
+/data/home/frank/experiments/stereo_ib_collective_2node_1gpu_20260827_v2
+master: 214.30.239.40:29642
+world size: 2
+CUDA_VISIBLE_DEVICES: 7
+NCCL_SOCKET_IFNAME: =bond0
+NCCL_IB_HCA: mlx5_7:1
+```
+
+Both node launchers exited `0`. Rank 0 emitted:
+
+```json
+{"ranks":[{"all_reduce_sum":3.0,"hostname":"lacy--214-30-239-40","rank":0,"world_size":2},{"all_reduce_sum":3.0,"hostname":"lacy--214-30-239-42","rank":1,"world_size":2}],"status":"ok"}
+```
+
+The NCCL logs on both nodes report all of the required transport evidence:
+
+- `NET/IB : Using [0]mlx5_7:1/IB [RO]`;
+- `Using network IB`;
+- `GPU Direct RDMA Enabled for HCA 0 'mlx5_7'`;
+- bidirectional send/receive channels `via NET/IB/1/GDRDMA`.
+
+No probe process remained afterward. Physical GPU 7 returned to 4 MiB on
+H200-1 and 0 MiB on H200-2. The nodes have an approximately four-minute clock
+offset and c10d printed hostname reverse-lookup warnings during rendezvous;
+TCP rendezvous nevertheless connected and the collective completed correctly.
+
+An earlier `v1` attempt is not IB evidence: H200-2's formal clone was switched
+by a concurrent task after preflight, so its probe file disappeared before the
+rank entered NCCL. The H200-1 process from that attempt was explicitly stopped;
+no foreign process was signaled. Isolated worktrees removed that race for `v2`.
+
+The result proves the selected two-node `mlx5_7` NCCL/GDRDMA path. It does not
+yet prove multi-rail scaling, 2x2 or 2x8 rank behavior, model memory, four-mode
+training, checkpointing, resume, or full-training throughput.
