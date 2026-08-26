@@ -103,19 +103,16 @@ class StereoVAE(pl.LightningModule):
         self.args = args
         self._validate_configuration(args)
 
-        self.embedding_dim = args.embedding_dim
         self.latent_channels = args.latent_channels
         self.stereo_num_views = args.stereo_num_views
         self.stereo_num_frames = args.stereo_num_frames
         self.stereo_mode = args.stereo_mode
-        self.single_frame_source_index = args.single_frame_source_index
         self.resolution = args.resolution
         self.patch_size = args.patch_size
 
         self.encoder = StereoEncoder(
             image_size=args.resolution,
             image_channel=args.image_channels,
-            norm_type=args.norm_type,
             block=args.enc_block,
             window_size=args.twod_window_size,
             spatial_pos=args.spatial_pos,
@@ -144,7 +141,6 @@ class StereoVAE(pl.LightningModule):
         self.decoder = StereoDecoder(
             image_size=args.resolution,
             image_channel=args.image_channels,
-            norm_type=args.norm_type,
             block=args.dec_block,
             window_size=args.twod_window_size,
             spatial_pos=args.spatial_pos,
@@ -1000,9 +996,9 @@ class StereoVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         with profile_region("stereo/step/training_step"):
-            return self._profiled_training_step(batch, batch_idx)
+            return self._profiled_training_step(batch)
 
-    def _profiled_training_step(self, batch, batch_idx):
+    def _profiled_training_step(self, batch):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
         if bool(getattr(self.args, "four_mode_mixed_training", False)):
@@ -1476,7 +1472,7 @@ class _StereoEncoderOutput:
 
 
 class StereoEncoder(nn.Module):
-    def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
+    def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
@@ -1486,8 +1482,6 @@ class StereoEncoder(nn.Module):
         self.image_size = pair(image_size)
         self.patch_size = pair(patch_size)
         patch_height, patch_width = self.patch_size
-        self.block = block
-
         image_height, image_width = self.image_size
         if image_height % patch_height or image_width % patch_width:
             raise ValueError("image dimensions must be divisible by patch size")
@@ -1746,7 +1740,7 @@ class StereoDecodeOutput:
 
 
 class StereoDecoder(nn.Module):
-    def __init__(self, image_size, patch_embed, norm_type, block='tttt', window_size=4, spatial_pos="rel",
+    def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
                     image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
@@ -1765,8 +1759,6 @@ class StereoDecoder(nn.Module):
         self.image_size = pair(image_size)
         self.patch_size = pair(patch_size)
         patch_height, patch_width = self.patch_size
-        self.block = block
-
         spatial_transformer_kwargs = dict(
             dim=dim,
             dim_head=dim_head,

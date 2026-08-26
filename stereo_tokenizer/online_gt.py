@@ -522,14 +522,12 @@ class FoundationStereoOnlineTeacher:
             if checkpoint is not None
             else None
         )
-        self.checkpoint_sha256 = checkpoint_sha256
         self.device = torch.device(device)
         self.valid_iters = int(valid_iters)
         self.pair_microbatch = int(pair_microbatch)
         if self.pair_microbatch < 1:
             raise ValueError("FoundationStereo pair microbatch must be positive")
         self.model = None
-        self.config = None
         self.runner = None
         self.las2h = None
         if self.backend == "las2_h":
@@ -559,7 +557,7 @@ class FoundationStereoOnlineTeacher:
                 raise FileNotFoundError("FoundationStereo repo/checkpoint is missing")
             if sha256_file(self.checkpoint) != checkpoint_sha256:
                 raise ValueError("FoundationStereo checkpoint SHA256 mismatch")
-            self.model, self.config = self._load_model()
+            self.model, _ = self._load_model()
         else:
             if self.valid_iters != 32:
                 raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
@@ -952,7 +950,7 @@ class OnlineFoundationGTCallback(Callback):
                 temporary.unlink()
             raise
 
-    def _generate(self, batch, pl_module):
+    def _generate(self, batch):
         if self.teacher is None:
             raise RuntimeError("online FoundationStereo teacher is not initialized")
         eye_modes = batch.get("eye_mode", ())
@@ -1053,7 +1051,7 @@ class OnlineFoundationGTCallback(Callback):
         batch["valid_mask"] = valid
         return len(missing)
 
-    def _prepare_batch(self, trainer, pl_module, batch, prefix):
+    def _prepare_batch(self, pl_module, batch, prefix):
         eye_modes = batch.get("eye_mode", ())
         if isinstance(eye_modes, str):
             eye_modes = (eye_modes,)
@@ -1061,7 +1059,7 @@ class OnlineFoundationGTCallback(Callback):
             return
         started = time.perf_counter()
         with profile_region("stereo/online_gt/foundation_teacher"):
-            generated_count = self._generate(batch, pl_module)
+            generated_count = self._generate(batch)
         torch.cuda.synchronize(batch["video"].device)
         seconds = time.perf_counter() - started
         pl_module.log(
@@ -1080,12 +1078,12 @@ class OnlineFoundationGTCallback(Callback):
         )
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        self._prepare_batch(trainer, pl_module, batch, "train")
+        self._prepare_batch(pl_module, batch, "train")
 
     def on_validation_batch_start(
         self, trainer, pl_module, batch, batch_idx, dataloader_idx=0
     ):
-        self._prepare_batch(trainer, pl_module, batch, "val")
+        self._prepare_batch(pl_module, batch, "val")
 
 
 class DepthAnything3OnlineTeacher:
@@ -1375,7 +1373,7 @@ class OnlineDepthAnything3GTCallback(Callback):
             raise ValueError(f"DA3 batch must contain one {name}")
         return values[0]
 
-    def _prepare_batch(self, trainer, pl_module, batch, prefix):
+    def _prepare_batch(self, pl_module, batch, prefix):
         eye_mode = self._uniform(batch.get("eye_mode", ()), "eye mode")
         if eye_mode == "stereo":
             return
@@ -1451,9 +1449,9 @@ class OnlineDepthAnything3GTCallback(Callback):
         )
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        self._prepare_batch(trainer, pl_module, batch, "train")
+        self._prepare_batch(pl_module, batch, "train")
 
     def on_validation_batch_start(
         self, trainer, pl_module, batch, batch_idx, dataloader_idx=0
     ):
-        self._prepare_batch(trainer, pl_module, batch, "val")
+        self._prepare_batch(pl_module, batch, "val")

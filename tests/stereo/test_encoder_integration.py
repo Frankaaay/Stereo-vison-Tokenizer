@@ -27,7 +27,6 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         return StereoEncoder(
             image_size=32,
             image_channel=3,
-            norm_type="group",
             block="tt",
             window_size=2,
             spatial_pos="rope",

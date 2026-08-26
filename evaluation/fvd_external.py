@@ -63,7 +63,6 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, choices=["k600", "ucf"])
     parser.add_argument("--gen_dir", type=str)
     parser.add_argument("--gt_dir", type=str)
-    parser.add_argument("--split", type=str, choices=["train", "test"])
     parser.add_argument("--frames", type=int, default=17)
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--sampling", type=str, default="center", choices=["first", "last", "center"])

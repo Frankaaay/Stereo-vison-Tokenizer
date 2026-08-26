@@ -7,8 +7,7 @@ from typing import Tuple
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from fairscale.nn import checkpoint_wrapper
+from timm.models.layers import trunc_normal_
 
 def exists(val):
     return val is not None
@@ -25,7 +24,7 @@ def leaky_relu(p=0.1):
 def l2norm(t):
     return F.normalize(t, dim=-1)
 
-def precompute_freqs_cis_2d(dim: int, end: int, theta: float = 10000.0, scale=1.0, use_cls=False):
+def precompute_freqs_cis_2d(dim: int, end: int, theta: float = 10000.0, use_cls=False):
     H = int( end**0.5 )
     # assert  H * H == end
     flat_patch_pos = torch.arange(0 if not use_cls else -1, end) # N = end

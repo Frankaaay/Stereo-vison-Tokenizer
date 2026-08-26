@@ -17,10 +17,6 @@ def set_profiling_enabled(enabled: bool) -> None:
     _ENABLED = bool(enabled)
 
 
-def profiling_enabled() -> bool:
-    return _ENABLED
-
-
 @contextmanager
 def profile_region(name: str):
     if not _ENABLED:
