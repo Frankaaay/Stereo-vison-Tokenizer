@@ -46,3 +46,18 @@ backends remain `conv3d_contiguous` and `conv2d_t1_slice`.
 Tensor-dependent unit tests could not run in the local Windows Python because
 that interpreter does not have `torch` or `pytest`. No training, evaluation,
 preprocessing, remote operation, or GPU task was started.
+
+## Follow-up one-off script cleanup
+
+After commit `81ccce7`, two additional completed experiment utilities were
+removed from the working tree:
+
+- `scripts/data/inspect_hy_lance_schema.py`: the production Hy smoke-cache
+  builder already performs the required Lance schema and inventory checks;
+- `scripts/stereo/benchmark_batch_scaling.sh`: the completed batch-size sweep
+  wrapper only added `nvidia-smi` telemetry around the production launcher.
+
+FoundationStereo remains a supported online backend. Its PyTorch, TensorRT,
+and LAS2-H implementations, backend comparison tools, frozen teacher selection,
+TensorRT manifest writer, launcher branches, and tests are intentionally
+unchanged.
