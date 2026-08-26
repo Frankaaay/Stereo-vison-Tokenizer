@@ -62,19 +62,14 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         self.assertEqual(output.features.shape, (3, 32, 1, 4, 4))
         self.assertIsNotNone(output.fusion)
 
-    def test_mono_mode_ignores_right_eye(self) -> None:
+    def test_mono_mode_uses_one_view_one_eye_without_fusion(self) -> None:
         encoder = self._encoder().eval()
-        video = torch.randn(1, 3, 2, 3, 4, 32, 32)
-        changed_right = video.clone()
-        changed_right[:, :, 1].normal_(mean=100.0, std=1.0)
-        left_only = encoder.forward_stereo(
+        video = torch.randn(2, 1, 1, 3, 4, 32, 32)
+        output = encoder.forward_stereo(
             video, eye_mode="mono", temporal_mode="four_frame"
         )
-        changed = encoder.forward_stereo(
-            changed_right, eye_mode="mono", temporal_mode="four_frame"
-        )
-        torch.testing.assert_close(left_only.features, changed.features)
-        self.assertIsNone(left_only.fusion)
+        self.assertEqual(output.features.shape, (2, 32, 1, 4, 4))
+        self.assertIsNone(output.fusion)
 
     def test_spatial_encoder_keeps_frames_isolated(self) -> None:
         torch.manual_seed(7)
@@ -141,13 +136,15 @@ class StructuredStereoEncoderTest(unittest.TestCase):
 
             order.clear()
             temporal_outputs.clear()
+            mono_video = video[:, :1, :1]
+            mono_changed = changed[:, :1, :1]
             with torch.no_grad():
                 encoder.forward_stereo(
-                    video, eye_mode="mono", temporal_mode="four_frame"
+                    mono_video, eye_mode="mono", temporal_mode="four_frame"
                 )
                 baseline_temporal = temporal_outputs[-1]
                 encoder.forward_stereo(
-                    changed, eye_mode="mono", temporal_mode="four_frame"
+                    mono_changed, eye_mode="mono", temporal_mode="four_frame"
                 )
                 changed_temporal = temporal_outputs[-1]
         finally:
@@ -169,10 +166,10 @@ class StructuredStereoEncoderTest(unittest.TestCase):
 
         with torch.no_grad():
             baseline = encoder.forward_stereo(
-                video, eye_mode="mono", temporal_mode="four_frame"
+                video, eye_mode="stereo", temporal_mode="four_frame"
             ).features
             perturbed = encoder.forward_stereo(
-                changed, eye_mode="mono", temporal_mode="four_frame"
+                changed, eye_mode="stereo", temporal_mode="four_frame"
             ).features
 
         torch.testing.assert_close(baseline[1:], perturbed[1:], rtol=0, atol=0)

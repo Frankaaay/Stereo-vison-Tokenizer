@@ -18,8 +18,10 @@ from torch.profiler import ProfilerActivity
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
+from stereo_tokenizer.mode_sampling import MODE_IDS, mode_occurrences_before
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
 from stereo_tokenizer.online_gt import (
+    OnlineDepthAnything3GTCallback,
     OnlineFoundationGTCallback,
     validate_tensorrt_engine_assets,
 )
@@ -60,21 +62,60 @@ class StepTimingCallback(Callback):
             raise RuntimeError("step timing observed a non-consecutive generator update")
         torch.cuda.synchronize()
         now = time.perf_counter()
+        peak_allocated = torch.cuda.max_memory_allocated()
+        peak_reserved = torch.cuda.max_memory_reserved()
         self.timings.append(
             {
                 "step": generator_update,
+                "mode_id": pl_module.last_mode_id,
                 "temporal_mode": pl_module.last_temporal_mode,
                 "interval_s": now - self.last_batch_end,
+                "peak_memory_allocated_bytes": peak_allocated,
+                "peak_memory_reserved_bytes": peak_reserved,
             }
         )
+        mode_prefix = f"train/{pl_module.last_mode_id}"
+        pl_module.log_dict(
+            {
+                f"{mode_prefix}/step_time_s": now - self.last_batch_end,
+                f"{mode_prefix}/peak_memory_allocated_bytes": float(
+                    peak_allocated
+                ),
+                f"{mode_prefix}/peak_memory_reserved_bytes": float(
+                    peak_reserved
+                ),
+            },
+            on_step=True,
+            on_epoch=False,
+            logger=True,
+            sync_dist=True,
+        )
+        torch.cuda.reset_peak_memory_stats()
         self.last_batch_end = now
         self.last_generator_update = generator_update
 
     def on_train_end(self, trainer, pl_module):
         local_memory = torch.tensor(
             [
-                torch.cuda.max_memory_allocated(),
-                torch.cuda.max_memory_reserved(),
+                [
+                    max(
+                        (
+                            row["peak_memory_allocated_bytes"]
+                            for row in self.timings
+                            if row["mode_id"] == mode_id
+                        ),
+                        default=0,
+                    ),
+                    max(
+                        (
+                            row["peak_memory_reserved_bytes"]
+                            for row in self.timings
+                            if row["mode_id"] == mode_id
+                        ),
+                        default=0,
+                    ),
+                ]
+                for mode_id in MODE_IDS
             ],
             device=pl_module.device,
             dtype=torch.long,
@@ -100,21 +141,36 @@ class StepTimingCallback(Callback):
                 stable_by_temporal_mode[temporal_mode] = _timing_summary(
                     mode_values
                 )
+        stable_by_mode = {}
+        for mode_id in MODE_IDS:
+            mode_values = [
+                row["interval_s"]
+                for row in stable
+                if row["mode_id"] == mode_id
+            ]
+            if mode_values:
+                stable_by_mode[mode_id] = _timing_summary(mode_values)
         payload = {
             "world_size": int(trainer.world_size),
             "per_device_batch_size": int(pl_module.args.batch_size),
             "warmup_updates": self.warmup_updates,
-            "peak_memory_bytes_by_rank": [
+            "peak_memory_bytes_by_rank_and_mode": [
                 {
                     "rank": rank,
-                    "allocated": int(memory[0].item()),
-                    "reserved": int(memory[1].item()),
+                    "modes": {
+                        mode_id: {
+                            "allocated": int(memory[index, 0].item()),
+                            "reserved": int(memory[index, 1].item()),
+                        }
+                        for index, mode_id in enumerate(MODE_IDS)
+                    },
                 }
                 for rank, memory in enumerate(rank_memory)
             ],
             "timings": self.timings,
             "stable": _timing_summary(values),
             "stable_by_temporal_mode": stable_by_temporal_mode,
+            "stable_by_mode": stable_by_mode,
         }
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.output_path.write_text(
@@ -292,6 +348,21 @@ def build_parser():
     parser.add_argument(
         "--online_val_check_interval_steps", type=int, default=500
     )
+    parser.add_argument("--da3_repo", type=str, default=None)
+    parser.add_argument("--da3_source_sha", type=str, default=None)
+    parser.add_argument("--da3_checkpoint", type=str, default=None)
+    parser.add_argument("--da3_checkpoint_sha256", type=str, default=None)
+    parser.add_argument("--da3_process_res", type=int, default=504)
+    parser.add_argument(
+        "--da3_process_res_method",
+        choices=("upper_bound_resize",),
+        default="upper_bound_resize",
+    )
+    parser.add_argument(
+        "--da3_confidence_mask_mode",
+        choices=("finite_positive_non_padding",),
+        default="finite_positive_non_padding",
+    )
     parser = StereoVAE.add_model_specific_args(parser)
     parser = StereoDataModule.add_data_specific_args(parser)
     return parser
@@ -304,6 +375,56 @@ def validate_runtime_args(args):
         raise ValueError("--single_frame_source_index must be in [0, 3]")
     if args.resolution != 256:
         raise ValueError("the frozen pilot recipe requires resolution=256")
+    if args.four_mode_mixed_training:
+        if args.batch_size != 24 or args.grad_accumulates != 1:
+            raise ValueError("four-mode training is frozen to BS24 and GA1")
+        if args.mode_updates_per_epoch < 4 or args.mode_updates_per_epoch % 4:
+            raise ValueError("mode_updates_per_epoch must be a positive multiple of 4")
+        if args.mode_schedule_start_update < 0:
+            raise ValueError("mode_schedule_start_update must be non-negative")
+        if (
+            args.resume_from_checkpoint is None
+            and args.mode_schedule_start_update != 0
+        ):
+            raise ValueError("mode_schedule_start_update requires a checkpoint")
+        remaining_updates = args.max_steps - args.mode_schedule_start_update
+        if remaining_updates < 1:
+            raise ValueError("resume checkpoint has already reached max_steps")
+        if args.mode_updates_per_epoch < remaining_updates:
+            raise ValueError(
+                "mode_updates_per_epoch must cover all remaining updates so the "
+                "stateless resume schedule stays in one data epoch"
+            )
+        required_mono = {
+            "mono_train_manifest": args.mono_train_manifest,
+            "mono_val_manifest": args.mono_val_manifest,
+            "mono_cache_root": args.mono_cache_root,
+            "da3_repo": args.da3_repo,
+            "da3_source_sha": args.da3_source_sha,
+            "da3_checkpoint": args.da3_checkpoint,
+            "da3_checkpoint_sha256": args.da3_checkpoint_sha256,
+        }
+        missing = [name for name, value in required_mono.items() if not value]
+        if missing:
+            raise ValueError("four-mode training requires " + ", ".join(missing))
+        if args.stereo_data_backend != "lerobot_online":
+            raise ValueError("four-mode online-teacher smoke requires lerobot_online")
+        if not args.online_gt_enabled:
+            raise ValueError("four-mode online-teacher smoke requires online GT")
+        if args.da3_process_res != 504:
+            raise ValueError("DA3-BASE smoke process resolution is frozen to 504")
+        if args.da3_confidence_mask_mode != "finite_positive_non_padding":
+            raise ValueError("formal DA3 confidence threshold is not frozen")
+        for name, value, length in (
+            ("da3_source_sha", args.da3_source_sha, 40),
+            ("da3_checkpoint_sha256", args.da3_checkpoint_sha256, 64),
+        ):
+            if len(value) != length:
+                raise ValueError(f"{name} must be a full hexadecimal digest")
+            try:
+                int(value, 16)
+            except ValueError as error:
+                raise ValueError(f"{name} must be hexadecimal") from error
     geometry_values = {
         "stereo_disparity_min_px": args.stereo_disparity_min_px,
         "stereo_disparity_max_px": args.stereo_disparity_max_px,
@@ -425,6 +546,12 @@ def validate_runtime_args(args):
         raise ValueError("--devices must be positive")
     if args.num_nodes < 1:
         raise ValueError("--num_nodes must be positive")
+    if args.four_mode_mixed_training and args.devices * args.num_nodes > 2:
+        raise ValueError(
+            "the fixed 48-sample four-mode smoke supports at most two DDP ranks"
+        )
+    if args.four_mode_mixed_training and args.mixed_stereo_sample_limit != 48:
+        raise ValueError("the fixed four-mode smoke requires 48 stereo samples")
     if args.max_steps < 1:
         raise ValueError("--max_steps must be positive")
     if args.checkpoint_every_n_steps < 1:
@@ -531,6 +658,16 @@ def write_online_gt_run_metadata(args):
         ).hexdigest(),
         "online_gt": online_gt,
     }
+    if args.four_mode_mixed_training:
+        run_manifest["online_gt"]["da3"] = {
+            "repo": str(Path(args.da3_repo).resolve()),
+            "source_sha": args.da3_source_sha,
+            "checkpoint": str(Path(args.da3_checkpoint).resolve()),
+            "checkpoint_sha256": args.da3_checkpoint_sha256,
+            "process_res": args.da3_process_res,
+            "process_res_method": args.da3_process_res_method,
+            "confidence_mask_mode": args.da3_confidence_mask_mode,
+        }
     _write_immutable_json(output_root / "run_manifest.json", run_manifest)
     print(json.dumps({"online_gt_provenance": online_gt}, sort_keys=True))
 
@@ -539,6 +676,8 @@ def build_callbacks(args, has_validation):
     callbacks = []
     if args.online_gt_enabled:
         callbacks.append(OnlineFoundationGTCallback(args))
+        if args.four_mode_mixed_training:
+            callbacks.append(OnlineDepthAnything3GTCallback(args))
     callbacks.extend([
         ModelCheckpoint(
             every_n_train_steps=args.checkpoint_every_n_steps,
@@ -568,10 +707,17 @@ def build_callbacks(args, has_validation):
         callbacks.append(
             StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
         )
-    if has_validation and args.stereo_data_backend == "manifest_v3":
+    if has_validation and (
+        args.four_mode_mixed_training
+        or args.stereo_data_backend == "manifest_v3"
+    ):
         callbacks.append(
             ModelCheckpoint(
-                monitor="val/four/total_loss",
+                monitor=(
+                    "val/mixed/total_loss"
+                    if args.four_mode_mixed_training
+                    else "val/four/total_loss"
+                ),
                 every_n_epochs=1,
                 save_top_k=3,
                 mode="min",
@@ -584,7 +730,22 @@ def build_callbacks(args, has_validation):
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    if args.resume_from_checkpoint is not None:
+        checkpoint = torch.load(
+            args.resume_from_checkpoint, map_location="cpu", weights_only=False
+        )
+        counters = checkpoint.get("stereo_update_counters")
+        if not isinstance(counters, dict):
+            raise ValueError("resume checkpoint has no stereo update counters")
+        args.mode_schedule_start_update = int(counters["generator_updates"])
     validate_runtime_args(args)
+    if args.resume_from_checkpoint is not None and args.four_mode_mixed_training:
+        if counters.get("mode_schedule_seed") != args.mode_schedule_seed:
+            raise ValueError("resume checkpoint mode schedule seed mismatch")
+        if counters.get("mode_updates") != mode_occurrences_before(
+            args.mode_schedule_seed, args.mode_schedule_start_update
+        ):
+            raise ValueError("resume checkpoint counters disagree with next mode")
     write_online_gt_run_metadata(args)
     pl.seed_everything(args.seed)
 

@@ -91,14 +91,11 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}" \
   --stereo_search_radii 7 7 7 \
   --stereo_search_direction left \
-  --stereo_disparity_scale 128.0 128.0 128.0 \
-  --stereo_disparity_bias -2.572 \
-  --stereo_disparity_epsilon 0.000001 \
   --stereo_mode stereo \
   --rgb_weight 1.0 \
-  --disparity_weight 1.0 \
-  --gradient_weight 0.1 \
-  --geometry_gradient_scale_px 16.0 \
+  --relative_depth_weight 1.0 \
+  --relative_gradient_weight 0.1 \
+  --relative_depth_epsilon 0.000001 \
   --smooth_l1_beta 1.0 \
   --grad_accumulates 1 \
   --grad_clip_val 1.0 \

@@ -12,11 +12,22 @@ set -euo pipefail
 : "${WARMUP_STEPS:?set optimizer warmup steps}"
 : "${KL_WARMUP_STEPS:?set KL warmup steps}"
 : "${RGB_WEIGHT:?set the calibrated RGB loss weight}"
-: "${DISPARITY_WEIGHT:?set the calibrated disparity loss weight}"
-: "${GRADIENT_WEIGHT:?set the calibrated gradient loss weight}"
+: "${RELATIVE_DEPTH_WEIGHT:?set the existing geometry weight for relative depth}"
+: "${RELATIVE_GRADIENT_WEIGHT:?set the existing geometry weight for relative gradient}"
 : "${KL_WEIGHT:?set the calibrated KL loss weight}"
 : "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
 : "${SINGLE_FRAME_SOURCE_INDEX:?set the current source frame index}"
+
+MODE_UPDATE_RATIO="${MODE_UPDATE_RATIO:-1:1:1:1}"
+FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
+if [[ "${PER_DEVICE_BATCH_SIZE}" != "24" || "${GRAD_ACCUMULATES}" != "1" ]]; then
+  echo "four-mode training is frozen to per-device BS24 and GA1" >&2
+  exit 2
+fi
+if [[ "${MODE_UPDATE_RATIO}" != "1:1:1:1" ]]; then
+  echo "four-mode training requires MODE_UPDATE_RATIO=1:1:1:1" >&2
+  exit 2
+fi
 
 STEREO_DATA_BACKEND="${STEREO_DATA_BACKEND:-manifest_v3}"
 DATA_ARGS=(--stereo_data_backend "${STEREO_DATA_BACKEND}")
@@ -122,6 +133,44 @@ if [[ -n "${STEP_TIMING_OUTPUT:-}" ]]; then
   )
 fi
 
+MIXED_MODE_ARGS=()
+if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
+  if [[ "${STEREO_DATA_BACKEND}" != "lerobot_online" ]]; then
+    echo "four-mode smoke requires STEREO_DATA_BACKEND=lerobot_online" >&2
+    exit 2
+  fi
+  : "${MONO_SMOKE_MANIFEST:?set the node-local Hy mono manifest}"
+  : "${MONO_SMOKE_CACHE_ROOT:?set the node-local Hy mono cache root}"
+  : "${DA3_REPO:?set the pinned Depth Anything 3 source repository}"
+  : "${DA3_SOURCE_SHA:?set the full Depth Anything 3 source SHA}"
+  : "${DA3_CHECKPOINT:?set the pinned DA3-BASE checkpoint directory}"
+  : "${DA3_CHECKPOINT_SHA256:?set the DA3-BASE model.safetensors SHA256}"
+  MODE_UPDATES_PER_EPOCH="${MODE_UPDATES_PER_EPOCH:-${MAX_STEPS}}"
+  if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS || MODE_UPDATES_PER_EPOCH % 4 != 0 )); then
+    echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS and be divisible by four" >&2
+    exit 2
+  fi
+  MIXED_MODE_ARGS+=(
+    --four_mode_mixed_training 1
+    --mono_train_manifest "${MONO_SMOKE_MANIFEST}"
+    --mono_val_manifest "${MONO_SMOKE_MANIFEST}"
+    --mono_cache_root "${MONO_SMOKE_CACHE_ROOT}"
+    --mixed_stereo_sample_limit 48
+    --mode_schedule_seed "${MODE_SCHEDULE_SEED:-1234}"
+    --mode_updates_per_epoch "${MODE_UPDATES_PER_EPOCH}"
+    --da3_repo "${DA3_REPO}"
+    --da3_source_sha "${DA3_SOURCE_SHA}"
+    --da3_checkpoint "${DA3_CHECKPOINT}"
+    --da3_checkpoint_sha256 "${DA3_CHECKPOINT_SHA256}"
+    --da3_process_res 504
+    --da3_process_res_method upper_bound_resize
+    --da3_confidence_mask_mode finite_positive_non_padding
+  )
+elif [[ "${FOUR_MODE_MIXED_TRAINING}" != "0" ]]; then
+  echo "FOUR_MODE_MIXED_TRAINING must be 0 or 1" >&2
+  exit 2
+fi
+
 PROFILE_ARGS=()
 if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
   PROFILE_ARGS+=(
@@ -132,9 +181,15 @@ if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
   )
 fi
 
+RESUME_ARGS=()
+if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
+  RESUME_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+fi
+
 python3 train_stereo_vae.py \
   "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
+  "${MIXED_MODE_ARGS[@]}" \
   "${VALIDATION_ARGS[@]}" \
   --resolution 256 \
   --sequence_length 4 \
@@ -160,18 +215,15 @@ python3 train_stereo_vae.py \
   --single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}" \
   --stereo_search_radii 7 7 7 \
   --stereo_search_direction left \
-  --stereo_disparity_scale 128 128 128 \
-  --stereo_disparity_bias -2.572 \
-  --stereo_disparity_epsilon 1e-6 \
   --stereo_mode stereo \
   --stereo_disparity_min_px 0.5 \
   --stereo_disparity_max_px 112.0 \
   --stereo_lr_error_abs_threshold_px 1.0 \
   --stereo_lr_error_relative_threshold 0.05 \
-  --geometry_gradient_scale_px 16.0 \
   --rgb_weight "${RGB_WEIGHT}" \
-  --disparity_weight "${DISPARITY_WEIGHT}" \
-  --gradient_weight "${GRADIENT_WEIGHT}" \
+  --relative_depth_weight "${RELATIVE_DEPTH_WEIGHT}" \
+  --relative_gradient_weight "${RELATIVE_GRADIENT_WEIGHT}" \
+  --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
   --image_gan_weight 0 \
@@ -198,4 +250,5 @@ python3 train_stereo_vae.py \
   "${WANDB_ARGS[@]}" \
   "${MEDIA_ARGS[@]}" \
   "${TIMING_ARGS[@]}" \
-  "${PROFILE_ARGS[@]}"
+  "${PROFILE_ARGS[@]}" \
+  "${RESUME_ARGS[@]}"

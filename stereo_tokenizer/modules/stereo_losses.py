@@ -23,11 +23,11 @@ class MaskedViewLoss:
 class StereoLossBreakdown:
     total: torch.Tensor
     rgb: torch.Tensor
-    disparity: torch.Tensor
-    disparity_gradient: torch.Tensor
+    relative_depth: torch.Tensor
+    relative_gradient: torch.Tensor
     kl: torch.Tensor
-    disparity_per_view: torch.Tensor
-    disparity_valid_count: torch.Tensor
+    relative_depth_per_view: torch.Tensor
+    relative_depth_valid_count: torch.Tensor
     gradient_per_view: torch.Tensor
     gradient_valid_count: torch.Tensor
 
@@ -50,20 +50,24 @@ def _validate_mask(reference: torch.Tensor, valid_mask: torch.Tensor) -> None:
 def _reduce_per_view(
     elementwise_loss: torch.Tensor, valid_mask: torch.Tensor
 ) -> MaskedViewLoss:
-    reduction_dims = (0, 2, 3, 4, 5)
-    valid_count = valid_mask.sum(dim=reduction_dims)
-    if torch.any(valid_count == 0):
-        empty_views = torch.nonzero(valid_count == 0, as_tuple=False).flatten()
+    reduction_dims = (2, 3, 4, 5)
+    per_sample_view_count = valid_mask.sum(dim=reduction_dims)
+    valid_count = per_sample_view_count.sum(dim=0)
+    if torch.any(per_sample_view_count == 0):
+        empty_views = torch.nonzero(
+            per_sample_view_count == 0, as_tuple=False
+        )
         raise ValueError(
-            "every view must contain valid supervision; empty view indices: "
+            "every sample/view must contain valid supervision; empty [B,V]: "
             f"{empty_views.detach().cpu().tolist()}"
         )
     loss_sum = elementwise_loss.masked_fill(~valid_mask, 0).sum(
         dim=reduction_dims
     )
-    per_view = loss_sum / valid_count.to(elementwise_loss.dtype)
+    per_sample_view = loss_sum / per_sample_view_count.to(elementwise_loss.dtype)
+    per_view = per_sample_view.mean(dim=0)
     return MaskedViewLoss(
-        loss=per_view.mean(), per_view=per_view, valid_count=valid_count
+        loss=per_sample_view.mean(), per_view=per_view, valid_count=valid_count
     )
 
 
@@ -77,26 +81,26 @@ def _safe_masked_target(
     return torch.where(valid_mask, target, prediction.detach())
 
 
-def masked_smooth_l1_disparity_loss(
+def masked_smooth_l1_relative_depth_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     valid_mask: torch.Tensor,
     *,
     beta: float,
 ) -> MaskedViewLoss:
-    """SmoothL1 on normalized disparity, normalized per view before averaging."""
+    """SmoothL1 on centered relative log-depth with sample/view equality."""
 
     _validate_dense_map("prediction", prediction)
     _validate_dense_map("target", target)
     if prediction.shape != target.shape:
-        raise ValueError("prediction and target disparity shapes must match")
+        raise ValueError("prediction and target relative log-depth shapes must match")
     _validate_mask(prediction, valid_mask)
     if beta <= 0:
         raise ValueError("SmoothL1 beta must be positive")
     if not torch.isfinite(prediction).all():
-        raise ValueError("predicted normalized disparity contains NaN/Inf")
+        raise ValueError("predicted relative log-depth contains NaN/Inf")
     if not torch.isfinite(target.masked_select(valid_mask)).all():
-        raise ValueError("valid target disparity contains NaN/Inf")
+        raise ValueError("valid target relative log-depth contains NaN/Inf")
 
     safe_target = _safe_masked_target(prediction, target, valid_mask)
     elementwise = F.smooth_l1_loss(
@@ -105,58 +109,64 @@ def masked_smooth_l1_disparity_loss(
     return _reduce_per_view(elementwise, valid_mask)
 
 
-def masked_disparity_gradient_loss(
+def masked_relative_gradient_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     valid_mask: torch.Tensor,
     *,
-    scale_px: float,
+    beta: float,
 ) -> MaskedViewLoss:
-    """Pixel-disparity gradient L1 with an explicit target-derived scale."""
+    """Spatial x/y SmoothL1 on relative log-depth, normalized per sample/view."""
 
     _validate_dense_map("prediction", prediction)
     _validate_dense_map("target", target)
     if prediction.shape != target.shape:
-        raise ValueError("prediction and target disparity shapes must match")
+        raise ValueError("prediction and target relative log-depth shapes must match")
     _validate_mask(prediction, valid_mask)
-    if scale_px <= 0:
-        raise ValueError("gradient scale_px must be positive")
+    if beta <= 0:
+        raise ValueError("SmoothL1 beta must be positive")
     if prediction.shape[-2] < 2 or prediction.shape[-1] < 2:
         raise ValueError("gradient loss requires H>=2 and W>=2")
     if not torch.isfinite(prediction).all():
-        raise ValueError("predicted normalized disparity contains NaN/Inf")
+        raise ValueError("predicted relative log-depth contains NaN/Inf")
     if not torch.isfinite(target.masked_select(valid_mask)).all():
-        raise ValueError("valid target disparity contains NaN/Inf")
+        raise ValueError("valid target relative log-depth contains NaN/Inf")
 
     safe_target = _safe_masked_target(prediction, target, valid_mask)
-    prediction_dx = (prediction[..., 1:] - prediction[..., :-1]) / scale_px
-    target_dx = (safe_target[..., 1:] - safe_target[..., :-1]) / scale_px
+    prediction_dx = prediction[..., 1:] - prediction[..., :-1]
+    target_dx = safe_target[..., 1:] - safe_target[..., :-1]
     mask_dx = valid_mask[..., 1:] & valid_mask[..., :-1]
 
-    prediction_dy = (prediction[..., 1:, :] - prediction[..., :-1, :]) / scale_px
-    target_dy = (safe_target[..., 1:, :] - safe_target[..., :-1, :]) / scale_px
+    prediction_dy = prediction[..., 1:, :] - prediction[..., :-1, :]
+    target_dy = safe_target[..., 1:, :] - safe_target[..., :-1, :]
     mask_dy = valid_mask[..., 1:, :] & valid_mask[..., :-1, :]
 
-    reduction_dims = (0, 2, 3, 4, 5)
+    reduction_dims = (2, 3, 4, 5)
     count_x = mask_dx.sum(dim=reduction_dims)
     count_y = mask_dy.sum(dim=reduction_dims)
-    valid_count = count_x + count_y
-    if torch.any(valid_count == 0):
-        empty_views = torch.nonzero(valid_count == 0, as_tuple=False).flatten()
+    if torch.any(count_x == 0) or torch.any(count_y == 0):
+        empty_x = torch.nonzero(count_x == 0, as_tuple=False)
+        empty_y = torch.nonzero(count_y == 0, as_tuple=False)
         raise ValueError(
-            "every view must contain valid gradient pairs; empty view indices: "
-            f"{empty_views.detach().cpu().tolist()}"
+            "every sample/view must contain x/y gradient pairs; empty x/y [B,V]: "
+            f"{empty_x.detach().cpu().tolist()}/"
+            f"{empty_y.detach().cpu().tolist()}"
         )
 
-    loss_x = (prediction_dx - target_dx).abs().masked_fill(~mask_dx, 0).sum(
-        dim=reduction_dims
+    loss_x = F.smooth_l1_loss(
+        prediction_dx, target_dx, reduction="none", beta=beta
+    ).masked_fill(~mask_dx, 0).sum(dim=reduction_dims)
+    loss_y = F.smooth_l1_loss(
+        prediction_dy, target_dy, reduction="none", beta=beta
+    ).masked_fill(~mask_dy, 0).sum(dim=reduction_dims)
+    per_sample_view = 0.5 * (
+        loss_x / count_x.to(prediction.dtype)
+        + loss_y / count_y.to(prediction.dtype)
     )
-    loss_y = (prediction_dy - target_dy).abs().masked_fill(~mask_dy, 0).sum(
-        dim=reduction_dims
-    )
-    per_view = (loss_x + loss_y) / valid_count.to(prediction.dtype)
+    per_view = per_sample_view.mean(dim=0)
+    valid_count = (count_x + count_y).sum(dim=0)
     return MaskedViewLoss(
-        loss=per_view.mean(), per_view=per_view, valid_count=valid_count
+        loss=per_sample_view.mean(), per_view=per_view, valid_count=valid_count
     )
 
 
@@ -191,7 +201,7 @@ def rgb_reconstruction_loss(
 
 
 class StereoReconstructionKLLoss(nn.Module):
-    """Core RGB/disparity/gradient/KL objective with explicit weights.
+    """Core RGB/relative-depth/gradient/KL objective with explicit weights.
 
     LPIPS, GAN, and feature matching remain separate training-stage terms so
     their activation gates cannot be hidden in this deterministic core loss.
@@ -201,21 +211,26 @@ class StereoReconstructionKLLoss(nn.Module):
         self,
         *,
         rgb_weight: float,
-        disparity_weight: float,
-        gradient_weight: float,
+        relative_depth_weight: float,
+        relative_gradient_weight: float,
         kl_weight: float,
         smooth_l1_beta: float,
         rgb_loss_type: Literal["l1", "l2"],
     ) -> None:
         super().__init__()
-        weights = (rgb_weight, disparity_weight, gradient_weight, kl_weight)
+        weights = (
+            rgb_weight,
+            relative_depth_weight,
+            relative_gradient_weight,
+            kl_weight,
+        )
         if any(weight < 0 for weight in weights):
             raise ValueError("loss weights must be non-negative")
         if smooth_l1_beta <= 0:
             raise ValueError("smooth_l1_beta must be positive")
         self.rgb_weight = rgb_weight
-        self.disparity_weight = disparity_weight
-        self.gradient_weight = gradient_weight
+        self.relative_depth_weight = relative_depth_weight
+        self.relative_gradient_weight = relative_gradient_weight
         self.kl_weight = kl_weight
         self.smooth_l1_beta = smooth_l1_beta
         self.rgb_loss_type = rgb_loss_type
@@ -225,32 +240,29 @@ class StereoReconstructionKLLoss(nn.Module):
         *,
         rgb_prediction: torch.Tensor,
         rgb_target: torch.Tensor,
-        normalized_disparity_prediction: torch.Tensor,
-        normalized_disparity_target: torch.Tensor,
-        pixel_disparity_prediction: torch.Tensor,
-        pixel_disparity_target: torch.Tensor,
+        relative_depth_prediction: torch.Tensor,
+        relative_depth_target: torch.Tensor,
         valid_mask: torch.Tensor,
         posterior: PosteriorWithKL,
-        gradient_scale_px: float,
         kl_weight_override: float | None = None,
     ) -> StereoLossBreakdown:
         with profile_region("stereo/loss/rgb"):
             rgb = rgb_reconstruction_loss(
                 rgb_prediction, rgb_target, loss_type=self.rgb_loss_type
             )
-        with profile_region("stereo/loss/disparity"):
-            disparity = masked_smooth_l1_disparity_loss(
-                normalized_disparity_prediction,
-                normalized_disparity_target,
+        with profile_region("stereo/loss/relative_depth"):
+            relative_depth = masked_smooth_l1_relative_depth_loss(
+                relative_depth_prediction,
+                relative_depth_target,
                 valid_mask,
                 beta=self.smooth_l1_beta,
             )
-        with profile_region("stereo/loss/disparity_gradient"):
-            gradient = masked_disparity_gradient_loss(
-                pixel_disparity_prediction,
-                pixel_disparity_target,
+        with profile_region("stereo/loss/relative_gradient"):
+            gradient = masked_relative_gradient_loss(
+                relative_depth_prediction,
+                relative_depth_target,
                 valid_mask,
-                scale_px=gradient_scale_px,
+                beta=self.smooth_l1_beta,
             )
         with profile_region("stereo/loss/kl"):
             kl = posterior_kl_loss(posterior)
@@ -263,18 +275,18 @@ class StereoReconstructionKLLoss(nn.Module):
             raise ValueError("kl_weight_override must be non-negative")
         total = (
             self.rgb_weight * rgb
-            + self.disparity_weight * disparity.loss
-            + self.gradient_weight * gradient.loss
+            + self.relative_depth_weight * relative_depth.loss
+            + self.relative_gradient_weight * gradient.loss
             + kl_weight * kl
         )
         return StereoLossBreakdown(
             total=total,
             rgb=rgb,
-            disparity=disparity.loss,
-            disparity_gradient=gradient.loss,
+            relative_depth=relative_depth.loss,
+            relative_gradient=gradient.loss,
             kl=kl,
-            disparity_per_view=disparity.per_view,
-            disparity_valid_count=disparity.valid_count,
+            relative_depth_per_view=relative_depth.per_view,
+            relative_depth_valid_count=relative_depth.valid_count,
             gradient_per_view=gradient.per_view,
             gradient_valid_count=gradient.valid_count,
         )

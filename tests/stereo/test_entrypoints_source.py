@@ -33,9 +33,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("--eval_single_frame_index", source)
         self.assertIn("args.single_frame_source_index", source)
         self.assertNotIn(".codebook", source)
-        self.assertIn("depth_abs_rel", source)
-        self.assertIn("disparity_to_depth(", source)
-        self.assertNotIn("calibration / disparity_target", source)
+        self.assertIn("relative_log_l1", source)
+        self.assertIn("relative_log_rmse", source)
+        self.assertIn("relative_target_from_foundation_stereo(", source)
+        self.assertNotIn("metric_depth", source)
         self.assertIn('choices=["train", "val", "test"]', source)
         self.assertIn('choices=["single_frame", "four_frame", "both"]', source)
         self.assertIn("FoundationStereoOnlineTeacher", source)
@@ -56,8 +57,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "PER_DEVICE_BATCH_SIZE",
             "GRAD_ACCUMULATES",
             "RGB_WEIGHT",
-            "DISPARITY_WEIGHT",
-            "GRADIENT_WEIGHT",
+            "RELATIVE_DEPTH_WEIGHT",
+            "RELATIVE_GRADIENT_WEIGHT",
             "KL_WEIGHT",
             "KL_WARMUP_STEPS",
             "SINGLE_FRAME_SOURCE_INDEX",
@@ -146,8 +147,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             self.assertIn(region, data)
         for region in (
             "stereo/loss/rgb",
-            "stereo/loss/disparity",
-            "stereo/loss/disparity_gradient",
+            "stereo/loss/relative_depth",
+            "stereo/loss/relative_gradient",
             "stereo/loss/kl",
         ):
             self.assertIn(region, losses)
@@ -180,7 +181,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("DISABLE_MEDIA_LOGGING:-0", launcher)
         train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
         self.assertIn("peak_memory_bytes_by_rank", train)
-        self.assertIn('"temporal_mode": pl_module.last_temporal_mode', train)
+        self.assertIn('"mode_id": pl_module.last_mode_id', train)
+        self.assertIn("peak_memory_bytes_by_rank_and_mode", train)
         self.assertIn("DDPStrategy(", train)
         self.assertIn("static_graph=False", train)
         self.assertIn("find_unused_parameters=True", train)
@@ -223,6 +225,32 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
         self.assertIn("use_distributed_sampler=False", train)
         self.assertNotIn("max_time=", train)
+
+    def test_four_mode_smoke_wires_da3_and_average_checkpoint(self) -> None:
+        launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
+            encoding="utf-8"
+        )
+        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        model = (ROOT / "stereo_tokenizer/model.py").read_text(encoding="utf-8")
+        online_gt = (ROOT / "stereo_tokenizer/online_gt.py").read_text(
+            encoding="utf-8"
+        )
+        for token in (
+            "FOUR_MODE_MIXED_TRAINING",
+            "MONO_SMOKE_MANIFEST",
+            "MODE_UPDATES_PER_EPOCH",
+            "DA3_CHECKPOINT_SHA256",
+            "--mixed_stereo_sample_limit 48",
+        ):
+            self.assertIn(token, launcher)
+        self.assertIn('"val/mixed/total_loss"', train)
+        self.assertIn("OnlineDepthAnything3GTCallback", train)
+        self.assertIn("mode_occurrences_before", train)
+        self.assertIn("mode_for_update", model)
+        self.assertNotIn("teacher_rgb_raw", model)
+        self.assertIn("da3_images", online_gt)
+        self.assertIn("DepthAnything3OnlineTeacher", online_gt)
+        self.assertIn("finite_positive_non_padding", launcher)
 
     def test_tensorrt_backend_is_explicit_and_frozen_to_32_iterations(self):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(

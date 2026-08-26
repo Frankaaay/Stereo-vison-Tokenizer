@@ -1,9 +1,11 @@
 # OmniTokenizer: A Joint Image-Video Tokenizer for Visual Generation
 
-> **Stereo-only development branch.** The public tokenizer in this branch is
-> no longer the upstream image/video VQGAN. It accepts structured
-> `[B,3,2,3,T,256,256]` stereo samples with `T=1|4`, produces a raw
-> `[B,3,48,1,16,16]` VAE latent, and decodes left-view RGB plus disparity.
+> **Structured mono/stereo VAE development branch.** The public tokenizer in
+> this branch is no longer the upstream image/video VQGAN. Its model contract
+> accepts mono `[B,1,1,3,T,256,256]` or stereo
+> `[B,3,2,3,T,256,256]`, with `T=1|4`, and produces
+> `[B,V,48,1,16,16]` latents. The Decoder returns left/reference RGB plus
+> `raw_relative_log_depth`; it does not return metric depth or disparity.
 > Legacy image-mode and VQ codebook paths are not supported. The upstream
 > model-zoo checkpoints and LM/DiT/Latte entrypoints below are retained as
 > historical repository context and are not strict-load compatible with this
@@ -15,9 +17,13 @@ The implementation lives in the original repository path:
 
 - `stereo_tokenizer/model.py`: shared per-frame Spatial Encoder,
   StereoFusion, explicit single/four temporal branches, shared VAE posterior,
-  symmetric Decoder branches, RGB/disparity heads, and alternating training.
-- `stereo_tokenizer/modules/stereo_*.py`: fusion, geometry, and masked loss
-  primitives.
+  dynamic `V=1|3` Decoder branches, RGB/relative-log-depth heads, and explicit
+  batch metadata routing.
+- `stereo_tokenizer/modules/relative_depth.py`: common DA3/FoundationStereo
+  target conversion and per-sample view-equal centering.
+- `stereo_tokenizer/mode_sampling.py`: deterministic four-mode update schedule
+  and fixed-batch sampler primitives.
+- `stereo_tokenizer/modules/stereo_*.py`: fusion and masked loss primitives.
 - `stereo_tokenizer/data.py`: Manifest v3 loader for independent RGB and
   FoundationStereo GT caches.
 - `scripts/data/build_stereo_rgb_cache.py`: independent RGB-cache builder and
@@ -114,20 +120,19 @@ from scratch and evaluation uses strict checkpoint loading through
 
 ## Stereo Tokenizer Training
 
-`scripts/stereo/train_stereo_vae.sh` is the canonical recipe template. It requires the
-Manifest v3/cache paths and all not-yet-calibrated loss, batch, warmup, and
-step-budget values as environment variables. GAN is explicitly disabled in
-the first smoke/overfit recipe. A validation Manifest is optional for the
-engineering pilot; when supplied for formal data, the complete validation
-split runs once at each epoch end.
+The four-mode contract is mono/stereo × single/four, with one homogeneous mode
+per batch, per-device batch size 24, gradient accumulation 1, and a seeded
+1:1:1:1 shuffled update schedule. RGB reconstruction, KL warmup, LPIPS, and the
+existing optional GAN/feature-matching structure are retained; only the former
+disparity and disparity-gradient slots become relative log-depth SmoothL1 and
+spatial-gradient SmoothL1.
 
-Training uses deterministic 1:1 alternation by completed generator optimizer
-updates: even `generator_updates` run `four_frame`, odd updates run
-`single_frame`. A gradient-accumulation window therefore never mixes modes.
-The Manifest/cache contract remains `T=4`; single batches slice the explicit
-`SINGLE_FRAME_SOURCE_INDEX` (currently configured as `0`). Keeping a 100k
-total-step budget yields about 50k updates per branch; the launcher does not
-automatically change batch size, learning rate, scheduler horizon, or steps.
+The model/loss/sampler contracts are implemented. The production DataModule
+and online-teacher dispatcher are not declared complete until the ego mono
+episode manifest/schema and pinned DA3-BASE source/checkpoint/preprocessing
+provenance are supplied. The existing stereo Manifest v3 and LeRobot paths
+remain native FoundationStereo-disparity sources; conversion to relative
+log-depth happens at the loss boundary without rewriting those caches.
 
 
 ## LM-based Visual Synthesis

@@ -293,12 +293,17 @@ class FoundationTensorRTBackendTest(unittest.TestCase):
             pytorch = OnlineFoundationGTCallback(args("pytorch"))
             tensorrt = OnlineFoundationGTCallback(args("tensorrt"))
             self.assertNotEqual(
-                pytorch._cache_path("sample"), tensorrt._cache_path("sample")
+                pytorch._cache_path("sample", "four_frame"),
+                tensorrt._cache_path("sample", "four_frame"),
             )
             self.assertNotEqual(pytorch.state_key, tensorrt.state_key)
-            metadata = tensorrt._cache_metadata("sample", "c" * 64)
+            metadata = tensorrt._cache_metadata(
+                "sample", "c" * 64, "four_frame"
+            )
             self.assertEqual(metadata["backend"], "tensorrt")
             self.assertEqual(metadata["engine_sha256"], "a" * 64)
+            self.assertEqual(metadata["target_representation"], "pixel_disparity_px")
+            self.assertEqual(metadata["tensor_shape"], [3, 1, 4, 256, 256])
 
     def test_runner_source_has_no_cpu_or_numpy_data_path(self):
         source = inspect.getsource(FoundationStereoTensorRTRunner)

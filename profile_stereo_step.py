@@ -89,6 +89,7 @@ class StepTraceCallback(Callback):
         self.step_timings.append(
             {
                 "step": int(pl_module.generator_updates),
+                "mode_id": pl_module.last_mode_id,
                 "temporal_mode": pl_module.last_temporal_mode,
                 "interval_s": interval_s,
                 "loss": self.pending_loss,

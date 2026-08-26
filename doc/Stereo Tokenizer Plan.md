@@ -1,5 +1,11 @@
 # Stereo Tokenizer Plan
 
+> 2026-08-25 状态：本文中关于 student disparity/metric-depth 输出、固定
+> `V=3` 和 single/four 交替训练的旧章节已被统一 relative log-depth 设计取代。
+> 当前实现状态、冻结合同与尚待提供的 mono/DA3 接入输入见
+> `docs/26-08-25/26-08-25-mono-stereo-relative-log-depth-implementation.md`。
+> 下文保留为历史设计证据，不再作为新 checkpoint 的输出语义。
+
 # Stereo OmniTokenizer 设计文档
 
 ## 1\. 项目目标

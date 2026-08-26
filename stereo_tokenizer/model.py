@@ -13,12 +13,16 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.models.layers import trunc_normal_
+from .mode_sampling import MODE_IDS, mode_for_update, mode_occurrences_before
 from .modules import (
     LPIPS,
     StereoFusion,
     StereoFusionOutput,
     StereoLossBreakdown,
     StereoReconstructionKLLoss,
+    relative_prediction_from_raw,
+    relative_target_from_da3,
+    relative_target_from_foundation_stereo,
 )
 from .modules.attention import PEG, Transformer
 from .modules.discriminator import NLayerDiscriminator, NLayerDiscriminator3D
@@ -72,8 +76,7 @@ class StereoEncodeOutput:
 @dataclass
 class StereoVAEOutput:
     rgb: torch.Tensor
-    disparity: torch.Tensor
-    normalized_disparity: torch.Tensor
+    raw_relative_log_depth: torch.Tensor
     latent: torch.Tensor
     posterior: StructuredDiagonalGaussianPosterior
     fusion: Optional[StereoFusionOutput]
@@ -86,7 +89,9 @@ class StereoVAEOutput:
 class _StereoCoreLossOutput:
     model: StereoVAEOutput
     loss: StereoLossBreakdown
-    normalized_disparity_target: torch.Tensor
+    relative_log_depth_prediction: torch.Tensor
+    relative_log_depth_target: torch.Tensor
+    valid_mask: torch.Tensor
     effective_kl_weight: float
 
 
@@ -161,9 +166,6 @@ class StereoVAE(pl.LightningModule):
             initialize=args.initialize_vit,
             stereo_num_views=args.stereo_num_views,
             stereo_num_frames=args.stereo_num_frames,
-            stereo_disparity_scale=tuple(args.stereo_disparity_scale),
-            stereo_disparity_bias=args.stereo_disparity_bias,
-            stereo_disparity_epsilon=args.stereo_disparity_epsilon,
             # 与 Encoder 保持同一配置语义；默认 False 不启用 causal mask。
             causal_in_temporal_transformer=args.causal_in_temporal_transformer,
         )
@@ -188,15 +190,15 @@ class StereoVAE(pl.LightningModule):
 
         self.core_objective = StereoReconstructionKLLoss(
             rgb_weight=args.rgb_weight,
-            disparity_weight=args.disparity_weight,
-            gradient_weight=args.gradient_weight,
+            relative_depth_weight=args.relative_depth_weight,
+            relative_gradient_weight=args.relative_gradient_weight,
             kl_weight=args.kl_weight,
             smooth_l1_beta=args.smooth_l1_beta,
             rgb_loss_type=args.recon_loss_type,
         )
         self.kl_weight = args.kl_weight
         self.kl_warmup_steps = args.kl_warmup_steps
-        self.geometry_gradient_scale_px = args.geometry_gradient_scale_px
+        self.relative_depth_epsilon = args.relative_depth_epsilon
         self.perceptual_weight = args.perceptual_weight
         self.gan_enabled = args.gan_enabled
         self.image_gan_weight = args.image_gan_weight
@@ -250,8 +252,13 @@ class StereoVAE(pl.LightningModule):
         self.discriminator_updates = 0
         self.four_frame_updates = 0
         self.single_frame_updates = 0
+        self.mode_updates = {mode_id: 0 for mode_id in MODE_IDS}
+        self.mode_samples = {mode_id: 0 for mode_id in MODE_IDS}
         self.batch_updates = 0
         self.last_temporal_mode: Optional[TemporalMode] = None
+        self.last_mode_id: Optional[str] = None
+        self._validation_mode_sums = None
+        self._validation_mode_counts = None
         self.save_hyperparameters("args")
 
     def train(self, mode: bool = True):
@@ -284,12 +291,10 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("dec_block length must equal spatial_depth")
         if len(args.stereo_search_radii) != args.stereo_num_views:
             raise ValueError("one stereo search radius is required per view")
-        if len(args.stereo_disparity_scale) != args.stereo_num_views:
-            raise ValueError("one disparity scale is required per view")
         explicit_nonnegative = (
             "rgb_weight",
-            "disparity_weight",
-            "gradient_weight",
+            "relative_depth_weight",
+            "relative_gradient_weight",
             "kl_weight",
             "perceptual_weight",
             "image_gan_weight",
@@ -300,8 +305,8 @@ class StereoVAE(pl.LightningModule):
             value = getattr(args, name)
             if value is None or value < 0:
                 raise ValueError(f"{name} must be explicitly set and non-negative")
-        if args.geometry_gradient_scale_px <= 0:
-            raise ValueError("geometry_gradient_scale_px must be positive")
+        if args.relative_depth_epsilon <= 0:
+            raise ValueError("relative_depth_epsilon must be positive")
         if args.grad_accumulates <= 0:
             raise ValueError("grad_accumulates must be positive")
         if args.discriminator_iter_start < 0:
@@ -330,7 +335,20 @@ class StereoVAE(pl.LightningModule):
             "discriminator_updates": self.discriminator_updates,
             "four_frame_updates": self.four_frame_updates,
             "single_frame_updates": self.single_frame_updates,
+            "mode_updates": dict(self.mode_updates),
+            "mode_samples": dict(self.mode_samples),
             "batch_updates": self.batch_updates,
+            "mode_contract": list(MODE_IDS),
+            "mode_update_ratio": "1:1:1:1",
+            "per_device_batch_size": int(self.args.batch_size),
+            "grad_accumulates": int(self.grad_accumulates),
+            "mode_schedule_seed": int(
+                getattr(self.args, "mode_schedule_seed", 1234)
+            ),
+            "world_size_contract": int(
+                getattr(self.args, "devices", 1)
+                * getattr(self.args, "num_nodes", 1)
+            ),
         }
 
     def on_load_checkpoint(self, checkpoint) -> None:
@@ -355,25 +373,86 @@ class StereoVAE(pl.LightningModule):
             counters, "single_frame_updates"
         )
         batch_updates = self._read_checkpoint_counter(counters, "batch_updates")
+        if counters.get("mode_contract") != list(MODE_IDS):
+            raise ValueError("checkpoint four-mode contract mismatch")
+        if counters.get("mode_update_ratio") != "1:1:1:1":
+            raise ValueError("checkpoint mode update ratio mismatch")
+        if counters.get("per_device_batch_size") != int(self.args.batch_size):
+            raise ValueError("checkpoint per-device batch size mismatch")
+        if counters.get("grad_accumulates") != int(self.grad_accumulates):
+            raise ValueError("checkpoint gradient accumulation mismatch")
+        schedule_seed = int(getattr(self.args, "mode_schedule_seed", 1234))
+        if counters.get("mode_schedule_seed") != schedule_seed:
+            raise ValueError("checkpoint mode schedule seed mismatch")
+        expected_world_size = int(
+            getattr(self.args, "devices", 1)
+            * getattr(self.args, "num_nodes", 1)
+        )
+        if counters.get("world_size_contract") != expected_world_size:
+            raise ValueError("checkpoint DDP world-size contract mismatch")
+        mode_updates = counters.get("mode_updates")
+        mode_samples = counters.get("mode_samples")
+        if not isinstance(mode_updates, Mapping) or set(mode_updates) != set(MODE_IDS):
+            raise ValueError("checkpoint mode update counters mismatch")
+        if not isinstance(mode_samples, Mapping) or set(mode_samples) != set(MODE_IDS):
+            raise ValueError("checkpoint mode sample counters mismatch")
+        mode_updates = {
+            mode_id: self._read_checkpoint_counter(mode_updates, mode_id)
+            for mode_id in MODE_IDS
+        }
+        mode_samples = {
+            mode_id: self._read_checkpoint_counter(mode_samples, mode_id)
+            for mode_id in MODE_IDS
+        }
         if discriminator_updates > generator_updates:
             raise ValueError("discriminator updates cannot exceed generator updates")
         if not self.gan_enabled and discriminator_updates != 0:
             raise ValueError("GAN-disabled checkpoint has discriminator updates")
         if batch_updates < generator_updates * self.grad_accumulates:
             raise ValueError("batch updates are inconsistent with generator updates")
+        if generator_updates != sum(mode_updates.values()):
+            raise ValueError("generator updates must equal the four mode counters")
         if generator_updates != four_frame_updates + single_frame_updates:
             raise ValueError(
                 "generator updates must equal four-frame plus single-frame updates"
             )
-        if four_frame_updates != (generator_updates + 1) // 2:
-            raise ValueError("four-frame update counter violates strict alternation")
-        if single_frame_updates != generator_updates // 2:
-            raise ValueError("single-frame update counter violates strict alternation")
+        if four_frame_updates != (
+            mode_updates["mono/four_frame"]
+            + mode_updates["stereo/four_frame"]
+        ):
+            raise ValueError("four-frame counter disagrees with mode counters")
+        if single_frame_updates != (
+            mode_updates["mono/single_frame"]
+            + mode_updates["stereo/single_frame"]
+        ):
+            raise ValueError("single-frame counter disagrees with mode counters")
+        if mode_updates and max(mode_updates.values()) - min(mode_updates.values()) > 1:
+            raise ValueError("checkpoint mode counters violate 1:1:1:1 scheduling")
+        if bool(getattr(self.args, "four_mode_mixed_training", False)):
+            expected_mode_updates = mode_occurrences_before(
+                schedule_seed, generator_updates
+            )
+            if mode_updates != expected_mode_updates:
+                raise ValueError(
+                    "checkpoint mode counters disagree with seeded schedule"
+                )
+            expected_mode_samples = {
+                mode_id: updates
+                * int(self.args.batch_size)
+                * expected_world_size
+                for mode_id, updates in mode_updates.items()
+            }
+            if mode_samples != expected_mode_samples:
+                raise ValueError(
+                    "checkpoint sample counters disagree with update/BS/DDP contract"
+                )
 
         self.generator_updates = generator_updates
         self.discriminator_updates = discriminator_updates
         self.four_frame_updates = four_frame_updates
         self.single_frame_updates = single_frame_updates
+        self.mode_updates = mode_updates
+        self.mode_samples = mode_samples
         self.batch_updates = batch_updates
         self._micro_step = 0
 
@@ -417,10 +496,66 @@ class StereoVAE(pl.LightningModule):
         return temporal_mode_num_frames(temporal_mode)
 
     @staticmethod
-    def _temporal_mode_for_update(generator_updates: int) -> TemporalMode:
-        if type(generator_updates) is not int or generator_updates < 0:
-            raise ValueError("generator_updates must be a non-negative integer")
-        return "four_frame" if generator_updates % 2 == 0 else "single_frame"
+    def _uniform_batch_metadata(batch, key: str) -> str:
+        value = batch.get(key)
+        batch_size = int(batch["video"].shape[0])
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise ValueError(f"batch metadata {key!r} is missing or invalid")
+        if len(values) != batch_size:
+            raise ValueError(
+                f"batch metadata {key!r} has {len(values)} entries for B={batch_size}"
+            )
+        if not values or any(item != values[0] for item in values):
+            raise ValueError(f"batch mixes multiple values for {key!r}")
+        return values[0]
+
+    @staticmethod
+    def _uniform_batch_integer(batch, key: str) -> int:
+        value = batch.get(key)
+        batch_size = int(batch["video"].shape[0])
+        if isinstance(value, torch.Tensor):
+            values = value.detach().cpu().reshape(-1).tolist()
+        elif isinstance(value, int):
+            values = [value]
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise ValueError(f"batch metadata {key!r} is missing or invalid")
+        if len(values) != batch_size:
+            raise ValueError(
+                f"batch metadata {key!r} has {len(values)} entries for B={batch_size}"
+            )
+        if not values or any(type(item) is not int for item in values):
+            raise ValueError(f"batch metadata {key!r} must contain integers")
+        if any(item != values[0] for item in values):
+            raise ValueError(f"batch mixes multiple values for {key!r}")
+        return values[0]
+
+    @classmethod
+    def _mode_from_batch(cls, batch) -> tuple[str, EyeMode, TemporalMode]:
+        mode_id = cls._uniform_batch_metadata(batch, "mode_id")
+        eye_mode = cls._uniform_batch_metadata(batch, "eye_mode")
+        temporal_mode = cls._uniform_batch_metadata(batch, "temporal_mode")
+        if mode_id not in MODE_IDS:
+            raise ValueError(f"unsupported mode_id {mode_id!r}")
+        if eye_mode not in ("mono", "stereo"):
+            raise ValueError(f"unsupported eye_mode {eye_mode!r}")
+        if temporal_mode not in ("single_frame", "four_frame"):
+            raise ValueError(f"unsupported temporal_mode {temporal_mode!r}")
+        if mode_id != f"{eye_mode}/{temporal_mode}":
+            raise ValueError("mode_id disagrees with eye/temporal metadata")
+        expected_view_count = 1 if eye_mode == "mono" else 3
+        if cls._uniform_batch_integer(batch, "view_count") != expected_view_count:
+            raise ValueError("view_count metadata disagrees with eye_mode")
+        teacher_kind = cls._uniform_batch_metadata(batch, "teacher_kind")
+        expected_teacher = "da3" if eye_mode == "mono" else "foundation_stereo"
+        if teacher_kind != expected_teacher:
+            raise ValueError("teacher_kind metadata disagrees with eye_mode")
+        return mode_id, eye_mode, temporal_mode
 
     def _validate_video(
         self,
@@ -438,12 +573,10 @@ class StereoVAE(pl.LightningModule):
                 f"got {tuple(video.shape)}"
             )
         _, views, eyes, channels, time, height, width = video.shape
-        if views != self.stereo_num_views:
-            raise ValueError(f"expected {self.stereo_num_views} views, got {views}")
-        if eye_mode == "stereo" and eyes != 2:
-            raise ValueError("stereo eye mode requires exactly two eyes")
-        if eye_mode == "mono" and eyes not in (1, 2):
-            raise ValueError("mono eye mode accepts one eye or ignores the second eye")
+        if eye_mode == "stereo" and (views, eyes) != (self.stereo_num_views, 2):
+            raise ValueError("stereo eye mode requires V=3,E=2")
+        if eye_mode == "mono" and (views, eyes) != (1, 1):
+            raise ValueError("mono eye mode requires V=1,E=1")
         if channels != 3:
             raise ValueError(f"expected RGB input, got {channels} channels")
         if time != expected_time:
@@ -468,27 +601,18 @@ class StereoVAE(pl.LightningModule):
         batch = self._unwrap_batch(batch)
         self._source_num_frames(temporal_mode)
         video = batch["video"]
-        disparity = batch["disparity"]
-        valid_mask = batch["valid_mask"]
-        if video.shape[-3] != self.stereo_num_frames:
-            raise ValueError("training source video must retain the T=4 data contract")
-        if disparity.shape[-3] != self.stereo_num_frames:
-            raise ValueError("training source disparity must retain the T=4 data contract")
-        if valid_mask.shape != disparity.shape:
-            raise ValueError("training valid_mask must match disparity")
-        if temporal_mode == "four_frame":
-            return batch
-
-        index = self.single_frame_source_index
-        selected = dict(batch)
-        selected["video"] = video[..., index : index + 1, :, :]
-        selected["disparity"] = disparity[..., index : index + 1, :, :]
-        selected["valid_mask"] = valid_mask[..., index : index + 1, :, :]
-        return selected
+        expected_time = temporal_mode_num_frames(temporal_mode)
+        if video.shape[-3] != expected_time:
+            raise ValueError(
+                f"{temporal_mode} batch must already be decoded with T={expected_time}"
+            )
+        return batch
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         with profile_region("stereo/transfer/cpu_to_gpu"):
-            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+            return super().transfer_batch_to_device(
+                batch, device, dataloader_idx
+            )
 
     def encode(
         self,
@@ -539,8 +663,9 @@ class StereoVAE(pl.LightningModule):
             raise ValueError(
                 f"latent must use [B,V,C,1,H,W], got {tuple(latent.shape)}"
             )
-        if latent.shape[1] != self.stereo_num_views:
-            raise ValueError("latent view count does not match configuration")
+        view_count = latent.shape[1]
+        if view_count not in (1, self.stereo_num_views):
+            raise ValueError("latent view count must be one or three")
         if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
             raise ValueError("latent must contain 48 channels and one temporal slot")
         flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
@@ -550,6 +675,7 @@ class StereoVAE(pl.LightningModule):
             return self.decoder.forward_stereo(
                 projected,
                 temporal_mode=temporal_mode,
+                view_count=view_count,
             )
 
     def forward(
@@ -569,8 +695,7 @@ class StereoVAE(pl.LightningModule):
         decoded = self.decode(encoded.latent, temporal_mode=temporal_mode)
         return StereoVAEOutput(
             rgb=decoded.rgb,
-            disparity=decoded.disparity,
-            normalized_disparity=decoded.normalized_disparity,
+            raw_relative_log_depth=decoded.raw_relative_log_depth,
             latent=encoded.latent,
             posterior=encoded.posterior,
             fusion=encoded.fusion,
@@ -604,31 +729,45 @@ class StereoVAE(pl.LightningModule):
             sample_posterior=sample_posterior,
         )
         rgb_target = batch["video"][:, :, 0]
-        disparity_target = batch["disparity"]
+        teacher_kind = self._uniform_batch_metadata(batch, "teacher_kind")
         valid_mask = batch["valid_mask"]
-        scale = self.decoder.stereo_disparity_scale.to(
-            device=disparity_target.device,
-            dtype=disparity_target.dtype,
+        if teacher_kind == "foundation_stereo":
+            target = relative_target_from_foundation_stereo(
+                batch["disparity"],
+                valid_mask,
+                batch["fx"],
+                batch["baseline_m"],
+                epsilon=self.relative_depth_epsilon,
+            )
+        elif teacher_kind == "da3":
+            target = relative_target_from_da3(
+                batch["da3_relative_depth"],
+                valid_mask,
+                epsilon=self.relative_depth_epsilon,
+            )
+        else:
+            raise ValueError(f"unsupported teacher_kind {teacher_kind!r}")
+        relative_prediction, _ = relative_prediction_from_raw(
+            model_output.raw_relative_log_depth,
+            target.valid_mask,
         )
-        normalized_target = disparity_target / scale
         effective_kl_weight = self._effective_kl_weight()
         with profile_region("stereo/loss/core_total"):
             loss = self.core_objective(
                 rgb_prediction=model_output.rgb,
                 rgb_target=rgb_target,
-                normalized_disparity_prediction=model_output.normalized_disparity,
-                normalized_disparity_target=normalized_target,
-                pixel_disparity_prediction=model_output.disparity,
-                pixel_disparity_target=disparity_target,
-                valid_mask=valid_mask,
+                relative_depth_prediction=relative_prediction,
+                relative_depth_target=target.relative_log_depth,
+                valid_mask=target.valid_mask,
                 posterior=model_output.posterior,
-                gradient_scale_px=self.geometry_gradient_scale_px,
                 kl_weight_override=effective_kl_weight,
             )
         return _StereoCoreLossOutput(
             model=model_output,
             loss=loss,
-            normalized_disparity_target=normalized_target,
+            relative_log_depth_prediction=relative_prediction,
+            relative_log_depth_target=target.relative_log_depth,
+            valid_mask=target.valid_mask,
             effective_kl_weight=effective_kl_weight,
         )
 
@@ -807,28 +946,31 @@ class StereoVAE(pl.LightningModule):
         *,
         total_loss: Optional[torch.Tensor] = None,
     ) -> None:
-        pixels_per_view = result.model.disparity.numel() // self.stereo_num_views
+        view_count = result.model.raw_relative_log_depth.shape[1]
+        pixels_per_view = (
+            result.model.raw_relative_log_depth.numel() // view_count
+        )
         metrics = {
             f"{prefix}/total_loss": (
                 result.loss.total if total_loss is None else total_loss
             ),
             f"{prefix}/rgb_loss": result.loss.rgb,
-            f"{prefix}/disparity_loss": result.loss.disparity,
-            f"{prefix}/gradient_loss": result.loss.disparity_gradient,
+            f"{prefix}/relative_depth_loss": result.loss.relative_depth,
+            f"{prefix}/relative_gradient_loss": result.loss.relative_gradient,
             f"{prefix}/kl_loss": result.loss.kl,
             f"{prefix}/kl_weight": result.model.rgb.new_tensor(
                 result.effective_kl_weight
             ),
         }
-        for view in range(self.stereo_num_views):
-            metrics[f"{prefix}/disparity_loss_view_{view}"] = (
-                result.loss.disparity_per_view[view]
+        for view in range(view_count):
+            metrics[f"{prefix}/relative_depth_loss_view_{view}"] = (
+                result.loss.relative_depth_per_view[view]
             )
             metrics[f"{prefix}/valid_pixels_view_{view}"] = (
-                result.loss.disparity_valid_count[view].float()
+                result.loss.relative_depth_valid_count[view].float()
             )
             metrics[f"{prefix}/valid_ratio_view_{view}"] = (
-                result.loss.disparity_valid_count[view].float()
+                result.loss.relative_depth_valid_count[view].float()
                 / pixels_per_view
             )
             if result.model.fusion is not None:
@@ -851,15 +993,24 @@ class StereoVAE(pl.LightningModule):
 
     def _profiled_training_step(self, batch, batch_idx):
         source_batch = self._unwrap_batch(batch)
-        temporal_mode = self._temporal_mode_for_update(self.generator_updates)
+        mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        if bool(getattr(self.args, "four_mode_mixed_training", False)):
+            expected_mode = mode_for_update(
+                int(self.args.mode_schedule_seed), self.generator_updates
+            )
+            if mode_id != expected_mode:
+                raise RuntimeError(
+                    f"seeded mode schedule expected {expected_mode}, got {mode_id}"
+                )
         self.last_temporal_mode = temporal_mode
+        self.last_mode_id = mode_id
         batch = self._prepare_temporal_batch(
             source_batch,
             temporal_mode=temporal_mode,
         )
         result = self.compute_core_loss(
             batch,
-            eye_mode="stereo",
+            eye_mode=eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=True,
         )
@@ -905,6 +1056,12 @@ class StereoVAE(pl.LightningModule):
                 self.four_frame_updates += 1
             else:
                 self.single_frame_updates += 1
+            self.mode_updates[mode_id] += 1
+            self.mode_samples[mode_id] += (
+                int(batch["video"].shape[0]) * int(self.trainer.world_size)
+            )
+            if max(self.mode_updates.values()) - min(self.mode_updates.values()) > 1:
+                raise RuntimeError("four-mode update counts violate 1:1:1:1")
             self.generator_updates += 1
             with profile_region("stereo/update/scheduler"):
                 schedulers[0].step_update(self.generator_updates)
@@ -942,8 +1099,7 @@ class StereoVAE(pl.LightningModule):
         if should_step and self.generator_updates >= self.args.max_steps:
             self.trainer.should_stop = True
 
-        mode_name = "four" if temporal_mode == "four_frame" else "single"
-        prefix = f"train/{mode_name}"
+        prefix = f"train/{mode_id}"
         with profile_region("stereo/logging/loss_breakdown"):
             self._log_loss_breakdown(
                 prefix,
@@ -973,6 +1129,14 @@ class StereoVAE(pl.LightningModule):
                 float(self.single_frame_updates)
             ),
         }
+        for tracked_mode in MODE_IDS:
+            metric_name = tracked_mode.replace("/", "_")
+            mode_metrics[f"train/{metric_name}_updates"] = (
+                result.model.rgb.new_tensor(float(self.mode_updates[tracked_mode]))
+            )
+            mode_metrics[f"train/{metric_name}_samples"] = (
+                result.model.rgb.new_tensor(float(self.mode_samples[tracked_mode]))
+            )
         if temporal_mode == "four_frame":
             mode_metrics[f"{prefix}/g_video_loss"] = video_gan
             mode_metrics[f"{prefix}/d_video_loss"] = discriminator_video
@@ -986,38 +1150,85 @@ class StereoVAE(pl.LightningModule):
             )
         return {"loss": generator_loss.detach()}
 
+    def on_validation_epoch_start(self):
+        if bool(getattr(self.args, "four_mode_mixed_training", False)):
+            self._validation_mode_sums = {
+                mode_id: torch.zeros((), device=self.device, dtype=torch.float64)
+                for mode_id in MODE_IDS
+            }
+            self._validation_mode_counts = {
+                mode_id: torch.zeros((), device=self.device, dtype=torch.long)
+                for mode_id in MODE_IDS
+            }
+
     def validation_step(self, batch, batch_idx):
         source_batch = self._unwrap_batch(batch)
-        for temporal_mode, mode_name in (
-            ("four_frame", "four"),
-            ("single_frame", "single"),
-        ):
-            mode_batch = self._prepare_temporal_batch(
-                source_batch,
-                temporal_mode=temporal_mode,
+        mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        mode_batch = self._prepare_temporal_batch(
+            source_batch,
+            temporal_mode=temporal_mode,
+        )
+        result = self.compute_core_loss(
+            mode_batch,
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
+            sample_posterior=False,
+        )
+        rgb_target = mode_batch["video"][:, :, 0]
+        perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
+        validation_total = result.loss.total + perceptual
+        prefix = f"val/{mode_id}"
+        self._log_loss_breakdown(
+            prefix,
+            result,
+            total_loss=validation_total,
+        )
+        self.log(
+            f"{prefix}/perceptual_loss",
+            perceptual,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        if self._validation_mode_sums is not None:
+            batch_size = int(mode_batch["video"].shape[0])
+            self._validation_mode_sums[mode_id] += (
+                validation_total.detach().double() * batch_size
             )
-            result = self.compute_core_loss(
-                mode_batch,
-                eye_mode="stereo",
-                temporal_mode=temporal_mode,
-                sample_posterior=False,
-            )
-            rgb_target = mode_batch["video"][:, :, 0]
-            perceptual = self._perceptual_loss(result.model.rgb, rgb_target)
-            prefix = f"val/{mode_name}"
-            self._log_loss_breakdown(
-                prefix,
-                result,
-                total_loss=result.loss.total + perceptual,
-            )
-            self.log(
-                f"{prefix}/perceptual_loss",
-                perceptual,
-                prog_bar=False,
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-            )
+            self._validation_mode_counts[mode_id] += batch_size
+
+    def on_validation_epoch_end(self):
+        if self._validation_mode_sums is None:
+            return
+        sums = torch.stack(
+            [self._validation_mode_sums[mode_id] for mode_id in MODE_IDS]
+        )
+        counts = torch.stack(
+            [self._validation_mode_counts[mode_id] for mode_id in MODE_IDS]
+        )
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(sums, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.SUM)
+        if torch.any(counts == 0):
+            missing = [
+                mode_id
+                for mode_id, count in zip(MODE_IDS, counts.tolist())
+                if count == 0
+            ]
+            raise RuntimeError(f"validation did not observe modes: {missing}")
+        per_mode = sums / counts.double()
+        self.log(
+            "val/mixed/total_loss",
+            per_mode.mean().float(),
+            prog_bar=True,
+            logger=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=False,
+        )
+        self._validation_mode_sums = None
+        self._validation_mode_counts = None
 
     def configure_optimizers(self):
         generator_parameters = (
@@ -1090,41 +1301,30 @@ class StereoVAE(pl.LightningModule):
 
     def log_images(self, batch, **kwargs):
         source_batch = self._unwrap_batch(batch)
-        four_output = self(
+        mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        output = self(
             source_batch["video"],
-            eye_mode="stereo",
-            temporal_mode="four_frame",
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
             sample_posterior=False,
         )
-        single_batch = self._prepare_temporal_batch(
-            source_batch,
-            temporal_mode="single_frame",
-        )
-        single_output = self(
-            single_batch["video"],
-            eye_mode="stereo",
-            temporal_mode="single_frame",
-            sample_posterior=False,
-        )
+        key = mode_id.replace("/", "_")
         return {
-            "four_inputs": self._flatten_view_frames(
+            f"{key}_inputs": self._flatten_view_frames(
                 source_batch["video"][:, :, 0]
             ),
-            "four_reconstructions": self._flatten_view_frames(four_output.rgb),
-            "single_inputs": self._flatten_view_frames(
-                single_batch["video"][:, :, 0]
-            ),
-            "single_reconstructions": self._flatten_view_frames(
-                single_output.rgb
+            f"{key}_reconstructions": self._flatten_view_frames(
+                output.rgb
             ),
         }
 
     def log_videos(self, batch, **kwargs):
         batch = self._unwrap_batch(batch)
+        _, eye_mode, temporal_mode = self._mode_from_batch(batch)
         output = self(
             batch["video"],
-            eye_mode="stereo",
-            temporal_mode="four_frame",
+            eye_mode=eye_mode,
+            temporal_mode=temporal_mode,
             sample_posterior=False,
         )
         return {
@@ -1239,34 +1439,14 @@ class StereoVAE(pl.LightningModule):
             default="left",
         )
         parser.add_argument(
-            "--stereo_disparity_scale",
-            nargs=3,
-            type=float,
-            required=True,
-        )
-        parser.add_argument(
-            "--stereo_disparity_bias",
-            type=float,
-            required=True,
-        )
-        parser.add_argument(
-            "--stereo_disparity_epsilon",
-            type=float,
-            default=1e-6,
-        )
-        parser.add_argument(
             "--stereo_mode",
             choices=["mono", "stereo"],
             default="stereo",
         )
         parser.add_argument("--rgb_weight", type=float, required=True)
-        parser.add_argument("--disparity_weight", type=float, required=True)
-        parser.add_argument("--gradient_weight", type=float, required=True)
-        parser.add_argument(
-            "--geometry_gradient_scale_px",
-            type=float,
-            required=True,
-        )
+        parser.add_argument("--relative_depth_weight", type=float, required=True)
+        parser.add_argument("--relative_gradient_weight", type=float, required=True)
+        parser.add_argument("--relative_depth_epsilon", type=float, default=1e-6)
         parser.add_argument("--smooth_l1_beta", type=float, default=1.0)
         parser.add_argument("--gan_enabled", action="store_true")
         return parser
@@ -1460,18 +1640,16 @@ class StereoEncoder(nn.Module):
             )
 
         batch, views, eyes, channels, time, height, width = video.shape
-        if views != self.stereo_num_views:
-            raise ValueError(f"expected {self.stereo_num_views} views, got {views}")
         if time != expected_time:
             raise ValueError(
                 f"{temporal_mode} requires T={expected_time}, got T={time}"
             )
         if channels != 3:
             raise ValueError(f"expected RGB inputs, got {channels} channels")
-        if eye_mode == "stereo" and eyes != 2:
-            raise ValueError("stereo mode requires exactly two eyes")
-        if eye_mode == "mono" and eyes not in (1, 2):
-            raise ValueError("mono mode accepts one eye or ignores the second eye")
+        if eye_mode == "stereo" and (views, eyes) != (self.stereo_num_views, 2):
+            raise ValueError("stereo mode requires V=3,E=2")
+        if eye_mode == "mono" and (views, eyes) != (1, 1):
+            raise ValueError("mono mode requires V=1,E=1")
         if (height, width) != self.image_size:
             raise ValueError(
                 f"expected stereo frame size {self.image_size}, got {(height, width)}"
@@ -1548,11 +1726,10 @@ class StereoEncoder(nn.Module):
 
 @dataclass
 class StereoDecodeOutput:
-    """Four-frame RGB and disparity decoded for each structured view."""
+    """RGB and raw relative log-depth decoded for each structured view."""
 
     rgb: torch.Tensor
-    disparity: torch.Tensor
-    normalized_disparity: torch.Tensor
+    raw_relative_log_depth: torch.Tensor
 
 
 class StereoDecoder(nn.Module):
@@ -1561,9 +1738,7 @@ class StereoDecoder(nn.Module):
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
                     dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
-                    stereo_num_views=None, stereo_num_frames=None,
-                    stereo_disparity_scale=None, stereo_disparity_bias=None,
-                    stereo_disparity_epsilon=1e-6):
+                    stereo_num_views=None, stereo_num_frames=None):
         super().__init__()
         if gen_upscale is not None:
             raise ValueError("Stereo Decoder does not use gen_upscale")
@@ -1623,42 +1798,20 @@ class StereoDecoder(nn.Module):
 
         self.stereo_num_views = stereo_num_views
         self.stereo_num_frames = stereo_num_frames
-        self.stereo_disparity_epsilon = stereo_disparity_epsilon
         if stereo_num_views != 3:
             raise ValueError("Stereo Decoder requires exactly 3 views")
         if image_channel != 3:
             raise ValueError("Stereo Decoder requires RGB output")
         if any(layer not in "tw" for layer in block):
             raise ValueError("Stereo Decoder supports only t/w spatial blocks")
-        if stereo_disparity_scale is None:
-            raise ValueError("stereo_disparity_scale must be explicitly configured")
-        if len(stereo_disparity_scale) != stereo_num_views:
-            raise ValueError("stereo_disparity_scale must contain one value per view")
-        if any(scale <= 0 for scale in stereo_disparity_scale):
-            raise ValueError("every stereo disparity scale must be positive")
-        if stereo_disparity_bias is None or not math.isfinite(
-            stereo_disparity_bias
-        ):
-            raise ValueError("stereo_disparity_bias must be finite")
-        if stereo_disparity_epsilon <= 0:
-            raise ValueError("stereo_disparity_epsilon must be positive")
-
         patch_area = patch_height * patch_width
         # 四个帧级特征分别投影为一帧 patch，Head 不再一次生成四帧。
         self.stereo_rgb_head = nn.Linear(dim, image_channel * patch_area)
-        self.stereo_disparity_head = nn.Linear(dim, patch_area)
-        self.register_buffer(
-            "stereo_disparity_scale",
-            torch.as_tensor(
-                stereo_disparity_scale, dtype=torch.float32
-            ).reshape(1, stereo_num_views, 1, 1, 1, 1),
-            persistent=True,
-        )
+        self.relative_log_depth_head = nn.Linear(dim, patch_area, bias=False)
 
         if initialize:
             self.apply(self._init_weights)
         trunc_normal_(self.dec_temporal_position, std=.02)
-        nn.init.constant_(self.stereo_disparity_head.bias, stereo_disparity_bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -1762,8 +1915,9 @@ class StereoDecoder(nn.Module):
         tokens: torch.Tensor,
         *,
         temporal_mode: TemporalMode,
+        view_count: int,
     ) -> StereoDecodeOutput:
-        """Decode one latent slot into one or four RGB/disparity frames."""
+        """Decode one latent slot into RGB and raw relative log-depth."""
 
         if tokens.ndim != 5:
             raise ValueError(
@@ -1771,7 +1925,9 @@ class StereoDecoder(nn.Module):
             )
         if tokens.shape[2] != 1:
             raise ValueError("structured Stereo Decoder requires exactly one slot")
-        if tokens.shape[0] % self.stereo_num_views:
+        if view_count not in (1, self.stereo_num_views):
+            raise ValueError("decoder view_count must be one or three")
+        if tokens.shape[0] % view_count:
             raise ValueError("flattened decoder batch must be divisible by views")
 
         features = rearrange(tokens, "n d t h w -> n t h w d")
@@ -1791,29 +1947,23 @@ class StereoDecoder(nn.Module):
                 output_channels=3,
                 temporal_mode=temporal_mode,
             )
-        with profile_region("stereo/decoder/disparity_head"):
-            raw_disparity = self._unpatch_stereo(
-                self.stereo_disparity_head(features),
+        with profile_region("stereo/decoder/relative_log_depth_head"):
+            raw_relative_log_depth = self._unpatch_stereo(
+                self.relative_log_depth_head(features),
                 output_channels=1,
                 temporal_mode=temporal_mode,
             )
-        batch = tokens.shape[0] // self.stereo_num_views
-        rgb = rearrange(rgb, "(b v) c t h w -> b v c t h w", b=batch, v=self.stereo_num_views)
-        raw_disparity = rearrange(
-            raw_disparity,
+        batch = tokens.shape[0] // view_count
+        rgb = rearrange(
+            rgb, "(b v) c t h w -> b v c t h w", b=batch, v=view_count
+        )
+        raw_relative_log_depth = rearrange(
+            raw_relative_log_depth,
             "(b v) c t h w -> b v c t h w",
             b=batch,
-            v=self.stereo_num_views,
-        )
-        normalized_disparity = (
-            F.softplus(raw_disparity) + self.stereo_disparity_epsilon
-        )
-        disparity = normalized_disparity * self.stereo_disparity_scale.to(
-            device=normalized_disparity.device,
-            dtype=normalized_disparity.dtype,
+            v=view_count,
         )
         return StereoDecodeOutput(
             rgb=rgb,
-            disparity=disparity,
-            normalized_disparity=normalized_disparity,
+            raw_relative_log_depth=raw_relative_log_depth,
         )

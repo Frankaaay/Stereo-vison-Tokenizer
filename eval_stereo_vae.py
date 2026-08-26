@@ -17,7 +17,10 @@ from tqdm import tqdm
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.lerobot_data import fixed_episode_subset_indices
-from stereo_tokenizer.modules.stereo_geometry import disparity_to_depth
+from stereo_tokenizer.modules.relative_depth import (
+    relative_prediction_from_raw,
+    relative_target_from_foundation_stereo,
+)
 from stereo_tokenizer.online_gt import FoundationStereoOnlineTeacher
 
 
@@ -52,9 +55,7 @@ CHECKPOINT_SEMANTIC_FIELDS = (
     "single_frame_source_index",
     "stereo_search_radii",
     "stereo_search_direction",
-    "stereo_disparity_scale",
-    "stereo_disparity_bias",
-    "stereo_disparity_epsilon",
+    "relative_depth_epsilon",
     "stereo_mode",
     "stereo_disparity_min_px",
     "stereo_disparity_max_px",
@@ -400,30 +401,34 @@ def _robust_range(tensor, valid, low=0.02, high=0.98):
     return value_min, value_max
 
 
-def save_depth_case_visualization(output_path, batch, outputs, source_index):
+def save_depth_case_visualization(
+    output_path, batch, outputs, source_index, relative_depth_epsilon
+):
     four = outputs.get("four_frame")
     single = outputs.get("single_frame")
     if four is None or single is None:
         raise ValueError("depth comparison requires both temporal modes")
 
-    target = disparity_to_depth(
+    target = relative_target_from_foundation_stereo(
         batch["disparity"],
+        batch["valid_mask"],
         batch["fx"],
         batch["baseline_m"],
-        valid_mask=batch["valid_mask"],
+        epsilon=relative_depth_epsilon,
     )
-    four_depth = disparity_to_depth(
-        four.disparity,
-        batch["fx"],
-        batch["baseline_m"],
-        valid_mask=batch["valid_mask"],
+    four_relative, _ = relative_prediction_from_raw(
+        four.raw_relative_log_depth, batch["valid_mask"]
     )
     single_batch = batch_for_temporal_mode(batch, "single_frame", source_index)
-    single_depth = disparity_to_depth(
-        single.disparity,
+    single_target = relative_target_from_foundation_stereo(
+        single_batch["disparity"],
+        single_batch["valid_mask"],
         single_batch["fx"],
         single_batch["baseline_m"],
-        valid_mask=single_batch["valid_mask"],
+        epsilon=relative_depth_epsilon,
+    )
+    single_relative, _ = relative_prediction_from_raw(
+        single.raw_relative_log_depth, single_batch["valid_mask"]
     )
 
     cell = 192
@@ -438,17 +443,17 @@ def save_depth_case_visualization(output_path, batch, outputs, source_index):
     )
     draw = ImageDraw.Draw(canvas)
     draw.text((12, 10), f"sample: {batch['sample_id'][0]}", fill="black")
-    draw.text((12, 30), "depth in meters; black = invalid", fill="black")
+    draw.text((12, 30), "relative log-depth; black = invalid", fill="black")
     for column, label in enumerate(("t0", "t1", "t2", "t3")):
         draw.text((label_width + column * cell + 8, 62), label, fill="black")
 
     for view_index, view_name in enumerate(VIEW_NAMES):
         valid = batch["valid_mask"][0, view_index, 0]
-        gt = target.depth[0, view_index, 0]
-        pred_four = four_depth.depth[0, view_index, 0]
+        gt = target.relative_log_depth[0, view_index, 0]
+        pred_four = four_relative[0, view_index, 0]
         single_valid = single_batch["valid_mask"][0, view_index, 0, 0]
-        gt_single = target.depth[0, view_index, 0, source_index]
-        pred_single = single_depth.depth[0, view_index, 0, 0]
+        gt_single = single_target.relative_log_depth[0, view_index, 0, 0]
+        pred_single = single_relative[0, view_index, 0, 0]
         depth_min, depth_max = _robust_range(gt, valid)
         four_error = (pred_four - gt).abs()
         single_error = (pred_single - gt_single).abs()
@@ -459,9 +464,9 @@ def save_depth_case_visualization(output_path, batch, outputs, source_index):
 
         first_row = view_index * 4
         labels = (
-            f"{view_name} GT [{depth_min:.2f},{depth_max:.2f}]m",
+            f"{view_name} GT log-ratio [{depth_min:.2f},{depth_max:.2f}]",
             f"{view_name} four prediction",
-            f"{view_name} four abs error [0,{error_max:.2f}]m",
+            f"{view_name} four abs log error [0,{error_max:.2f}]",
             f"{view_name} single: GT / pred / error / mask",
         )
         for offset, label in enumerate(labels):
@@ -565,60 +570,38 @@ def empty_accumulator(device):
         "sample_count": torch.zeros((), dtype=torch.long, device=device),
         "rgb_abs_sum": torch.zeros((), dtype=torch.float64, device=device),
         "rgb_count": torch.zeros((), dtype=torch.long, device=device),
-        "disp_abs_sum": torch.zeros(3, dtype=torch.float64, device=device),
+        "relative_log_abs_sum": torch.zeros(3, dtype=torch.float64, device=device),
         "valid_count": torch.zeros(3, dtype=torch.long, device=device),
-        "depth_abs_rel_sum": torch.zeros(3, dtype=torch.float64, device=device),
-        "depth_sq_sum": torch.zeros(3, dtype=torch.float64, device=device),
+        "relative_log_sq_sum": torch.zeros(3, dtype=torch.float64, device=device),
     }
 
 
-def update_metrics(accumulator, batch, output):
+def update_metrics(accumulator, batch, output, relative_depth_epsilon):
     rgb_target = batch["video"][:, :, 0]
     rgb_error = (output.rgb - rgb_target).abs()
     accumulator["sample_count"] += rgb_target.shape[0]
     accumulator["rgb_abs_sum"] += rgb_error.double().sum()
     accumulator["rgb_count"] += rgb_error.numel()
 
-    disparity_target = batch["disparity"]
     valid = batch["valid_mask"]
-    disparity_error = (output.disparity - disparity_target).abs()
+    target = relative_target_from_foundation_stereo(
+        batch["disparity"],
+        valid,
+        batch["fx"],
+        batch["baseline_m"],
+        epsilon=relative_depth_epsilon,
+    )
+    prediction, _ = relative_prediction_from_raw(
+        output.raw_relative_log_depth, valid
+    )
+    relative_error = prediction - target.relative_log_depth
     reduction_dims = (0, 2, 3, 4, 5)
-    accumulator["disp_abs_sum"] += (
-        disparity_error.double().masked_fill(~valid, 0).sum(dim=reduction_dims)
+    accumulator["relative_log_abs_sum"] += (
+        relative_error.abs().double().masked_fill(~valid, 0).sum(dim=reduction_dims)
     )
     accumulator["valid_count"] += valid.sum(dim=reduction_dims)
-
-    target_depth = disparity_to_depth(
-        disparity_target,
-        batch["fx"],
-        batch["baseline_m"],
-        valid_mask=valid,
-    )
-    predicted_depth = disparity_to_depth(
-        output.disparity,
-        batch["fx"],
-        batch["baseline_m"],
-        valid_mask=valid,
-    )
-    if not torch.equal(target_depth.valid_mask, valid):
-        raise ValueError("valid target disparity failed metric-depth conversion")
-    if not torch.equal(predicted_depth.valid_mask, valid):
-        raise ValueError("predicted disparity is invalid on supervised pixels")
-
-    depth_error = predicted_depth.depth - target_depth.depth
-    safe_target_depth = torch.where(
-        valid,
-        target_depth.depth,
-        torch.ones_like(target_depth.depth),
-    )
-    accumulator["depth_abs_rel_sum"] += (
-        (depth_error.abs() / safe_target_depth)
-        .double()
-        .masked_fill(~valid, 0)
-        .sum(dim=reduction_dims)
-    )
-    accumulator["depth_sq_sum"] += (
-        depth_error.square()
+    accumulator["relative_log_sq_sum"] += (
+        relative_error.square()
         .double()
         .masked_fill(~valid, 0)
         .sum(dim=reduction_dims)
@@ -629,7 +612,7 @@ def finalize_metrics(accumulator):
     if accumulator["sample_count"].item() == 0:
         raise ValueError("evaluation loader produced no samples")
     if torch.any(accumulator["valid_count"] == 0):
-        raise ValueError("at least one view has no valid disparity pixels")
+        raise ValueError("at least one view has no valid relative-depth pixels")
     valid_count = accumulator["valid_count"].double()
     result = {
         "sample_count": int(accumulator["sample_count"].item()),
@@ -641,18 +624,15 @@ def finalize_metrics(accumulator):
     for view_index, view_name in enumerate(VIEW_NAMES):
         result["views"][view_name] = {
             "valid_pixels": int(accumulator["valid_count"][view_index].item()),
-            "disparity_epe_px": float(
-                (accumulator["disp_abs_sum"][view_index] / valid_count[view_index]).item()
-            ),
-            "depth_abs_rel": float(
+            "relative_log_l1": float(
                 (
-                    accumulator["depth_abs_rel_sum"][view_index]
+                    accumulator["relative_log_abs_sum"][view_index]
                     / valid_count[view_index]
                 ).item()
             ),
-            "depth_rmse_m": float(
+            "relative_log_rmse": float(
                 torch.sqrt(
-                    accumulator["depth_sq_sum"][view_index]
+                    accumulator["relative_log_sq_sum"][view_index]
                     / valid_count[view_index]
                 ).item()
             ),
@@ -700,7 +680,12 @@ def main():
                         temporal_mode=mode,
                         sample_posterior=False,
                     )
-                update_metrics(accumulators[mode], mode_batch, output)
+                update_metrics(
+                    accumulators[mode],
+                    mode_batch,
+                    output,
+                    args.relative_depth_epsilon,
+                )
 
     for accumulator in accumulators.values():
         reduce_accumulator(accumulator, world_size)
@@ -775,6 +760,7 @@ def main():
                     tensor_batch,
                     outputs,
                     args.single_frame_source_index,
+                    args.relative_depth_epsilon,
                 )
                 local_records.append(
                     {

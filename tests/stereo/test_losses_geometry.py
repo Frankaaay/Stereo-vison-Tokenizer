@@ -3,10 +3,15 @@ import unittest
 import torch
 
 from stereo_tokenizer.modules.stereo_geometry import disparity_to_depth
+from stereo_tokenizer.modules.relative_depth import (
+    relative_prediction_from_raw,
+    relative_target_from_da3,
+    relative_target_from_foundation_stereo,
+)
 from stereo_tokenizer.modules.stereo_losses import (
     StereoReconstructionKLLoss,
-    masked_disparity_gradient_loss,
-    masked_smooth_l1_disparity_loss,
+    masked_relative_gradient_loss,
+    masked_smooth_l1_relative_depth_loss,
     posterior_kl_loss,
 )
 
@@ -23,8 +28,8 @@ class StereoLossTest(unittest.TestCase):
     def test_existing_core_objective_accepts_single_frame_tensors(self) -> None:
         objective = StereoReconstructionKLLoss(
             rgb_weight=1.0,
-            disparity_weight=1.0,
-            gradient_weight=1.0,
+            relative_depth_weight=1.0,
+            relative_gradient_weight=1.0,
             kl_weight=1e-6,
             smooth_l1_beta=1.0,
             rgb_loss_type="l1",
@@ -33,32 +38,27 @@ class StereoLossTest(unittest.TestCase):
             1, 3, 3, 1, 4, 4, requires_grad=True
         )
         rgb_target = torch.zeros_like(rgb_prediction)
-        normalized_prediction = torch.ones(
+        relative_prediction = torch.ones(
             1, 3, 1, 1, 4, 4, requires_grad=True
         )
-        normalized_target = torch.full_like(normalized_prediction, 0.5)
-        pixel_prediction = normalized_prediction * 16.0
-        pixel_target = normalized_target * 16.0
-        valid = torch.ones_like(normalized_prediction, dtype=torch.bool)
+        relative_target = torch.full_like(relative_prediction, 0.5)
+        valid = torch.ones_like(relative_prediction, dtype=torch.bool)
 
         result = objective(
             rgb_prediction=rgb_prediction,
             rgb_target=rgb_target,
-            normalized_disparity_prediction=normalized_prediction,
-            normalized_disparity_target=normalized_target,
-            pixel_disparity_prediction=pixel_prediction,
-            pixel_disparity_target=pixel_target,
+            relative_depth_prediction=relative_prediction,
+            relative_depth_target=relative_target,
             valid_mask=valid,
             posterior=_PosteriorStub(torch.zeros(1, 3)),
-            gradient_scale_px=16.0,
         )
         result.total.backward()
 
         self.assertTrue(torch.isfinite(result.total))
         self.assertTrue(torch.isfinite(rgb_prediction.grad).all())
-        self.assertTrue(torch.isfinite(normalized_prediction.grad).all())
+        self.assertTrue(torch.isfinite(relative_prediction.grad).all())
 
-    def test_disparity_is_normalized_per_view_before_average(self) -> None:
+    def test_relative_depth_is_normalized_per_sample_view_before_average(self) -> None:
         prediction = torch.zeros(1, 3, 1, 1, 2, 3)
         target = torch.stack(
             (
@@ -72,7 +72,7 @@ class StereoLossTest(unittest.TestCase):
         valid[:, 0, :, :, :, 1:] = False
         valid[:, 1, :, :, :, 2:] = False
 
-        result = masked_smooth_l1_disparity_loss(
+        result = masked_smooth_l1_relative_depth_loss(
             prediction, target, valid, beta=1.0
         )
         torch.testing.assert_close(
@@ -86,8 +86,8 @@ class StereoLossTest(unittest.TestCase):
         target = torch.zeros_like(prediction)
         valid = torch.ones_like(prediction, dtype=torch.bool)
         valid[:, 2] = False
-        with self.assertRaisesRegex(ValueError, "empty view indices"):
-            masked_smooth_l1_disparity_loss(
+        with self.assertRaisesRegex(ValueError, r"empty \[B,V\]"):
+            masked_smooth_l1_relative_depth_loss(
                 prediction, target, valid, beta=1.0
             )
 
@@ -100,7 +100,7 @@ class StereoLossTest(unittest.TestCase):
         target[..., 0, 0] = torch.nan
         valid[..., 0, 0] = False
 
-        result = masked_smooth_l1_disparity_loss(
+        result = masked_smooth_l1_relative_depth_loss(
             prediction, target, valid, beta=1.0
         )
         result.loss.backward()
@@ -114,21 +114,38 @@ class StereoLossTest(unittest.TestCase):
         target[..., 1:] = 1.0
         valid = torch.ones_like(prediction, dtype=torch.bool)
         valid[..., -1] = False
-        result = masked_disparity_gradient_loss(
-            prediction, target, valid, scale_px=16.0
+        result = masked_relative_gradient_loss(
+            prediction, target, valid, beta=1.0
         )
         self.assertTrue(torch.isfinite(result.loss))
         self.assertTrue((result.valid_count > 0).all())
 
-    def test_gradient_loss_uses_independent_pixel_scale(self) -> None:
+    def test_gradient_loss_uses_equal_x_y_smooth_l1(self) -> None:
         prediction = torch.zeros(1, 3, 1, 1, 2, 2)
         target = torch.zeros_like(prediction)
-        target[..., 1] = 16.0
+        target[..., 1] = 1.0
         valid = torch.ones_like(target, dtype=torch.bool)
-        result = masked_disparity_gradient_loss(
-            prediction, target, valid, scale_px=16.0
+        result = masked_relative_gradient_loss(
+            prediction, target, valid, beta=1.0
         )
-        torch.testing.assert_close(result.loss, torch.tensor(0.5))
+        torch.testing.assert_close(result.loss, torch.tensor(0.25))
+
+    def test_four_frames_do_not_receive_four_times_single_frame_weight(self) -> None:
+        single_prediction = torch.tensor(
+            [[[[[[0.0, 1.0], [2.0, 3.0]]]]]], dtype=torch.float32
+        )
+        single_target = torch.zeros_like(single_prediction)
+        single_valid = torch.ones_like(single_prediction, dtype=torch.bool)
+        four_prediction = single_prediction.repeat(1, 1, 1, 4, 1, 1)
+        four_target = single_target.repeat(1, 1, 1, 4, 1, 1)
+        four_valid = single_valid.repeat(1, 1, 1, 4, 1, 1)
+        single = masked_smooth_l1_relative_depth_loss(
+            single_prediction, single_target, single_valid, beta=1.0
+        )
+        four = masked_smooth_l1_relative_depth_loss(
+            four_prediction, four_target, four_valid, beta=1.0
+        )
+        torch.testing.assert_close(single.loss, four.loss)
 
     def test_invalid_nonfinite_disparity_is_sanitized_before_differences(
         self,
@@ -139,8 +156,8 @@ class StereoLossTest(unittest.TestCase):
         target[..., 0, 0] = torch.nan
         valid[..., 0, 0] = False
 
-        result = masked_disparity_gradient_loss(
-            prediction, target, valid, scale_px=16.0
+        result = masked_relative_gradient_loss(
+            prediction, target, valid, beta=1.0
         )
         result.loss.backward()
 
@@ -166,6 +183,73 @@ class GeometryTest(unittest.TestCase):
             output.depth[0, :, 0, :, 0, 1],
             torch.tensor(((1.0, 1.0), (2.0, 2.0), (3.0, 3.0))),
         )
+
+
+class RelativeDepthTargetTest(unittest.TestCase):
+    def test_da3_target_is_invariant_to_positive_scale(self) -> None:
+        depth = torch.tensor(
+            [[[[[[1.0, 2.0], [4.0, 8.0]]]]]], dtype=torch.float32
+        )
+        valid = torch.ones_like(depth, dtype=torch.bool)
+        first = relative_target_from_da3(depth, valid, epsilon=1e-6)
+        second = relative_target_from_da3(depth * 17.0, valid, epsilon=1e-6)
+        torch.testing.assert_close(
+            first.relative_log_depth, second.relative_log_depth
+        )
+
+    def test_other_batch_sample_does_not_change_target(self) -> None:
+        depth = torch.arange(1, 17, dtype=torch.float32).reshape(2, 1, 1, 2, 2, 2)
+        valid = torch.ones_like(depth, dtype=torch.bool)
+        baseline = relative_target_from_da3(depth, valid, epsilon=1e-6)
+        changed = depth.clone()
+        changed[1] *= 1000.0
+        updated = relative_target_from_da3(changed, valid, epsilon=1e-6)
+        torch.testing.assert_close(
+            baseline.relative_log_depth[0], updated.relative_log_depth[0]
+        )
+
+    def test_stereo_fx_baseline_corrects_cross_view_scale(self) -> None:
+        metric_depth = torch.tensor((2.0, 4.0, 8.0)).reshape(1, 3, 1, 1, 1, 1)
+        fx = torch.tensor(((100.0, 200.0, 400.0),))
+        baseline = torch.tensor(((0.1, 0.1, 0.1),))
+        disparity = (
+            (fx * baseline).reshape(1, 3, 1, 1, 1, 1) / metric_depth
+        ).expand(1, 3, 1, 1, 2, 2)
+        valid = torch.ones_like(disparity, dtype=torch.bool)
+        target = relative_target_from_foundation_stereo(
+            disparity, valid, fx, baseline, epsilon=1e-6
+        )
+        expected = metric_depth.log()
+        expected = expected - expected.mean(dim=1, keepdim=True)
+        torch.testing.assert_close(
+            target.relative_log_depth[..., :1, :1], expected
+        )
+
+    def test_da3_and_foundation_targets_share_relative_semantics(self) -> None:
+        depth = torch.tensor(
+            [[[[[[1.0, 2.0], [4.0, 8.0]]]]]], dtype=torch.float32
+        )
+        valid = torch.ones_like(depth, dtype=torch.bool)
+        fx = torch.tensor(((120.0,),))
+        baseline = torch.tensor(((0.08,),))
+        disparity = (fx * baseline).reshape(1, 1, 1, 1, 1, 1) / depth
+        da3 = relative_target_from_da3(depth, valid, epsilon=1e-6)
+        foundation = relative_target_from_foundation_stereo(
+            disparity, valid, fx, baseline, epsilon=1e-6
+        )
+        torch.testing.assert_close(
+            da3.relative_log_depth, foundation.relative_log_depth
+        )
+
+    def test_student_center_is_differentiable_and_shared_across_frames(self) -> None:
+        raw = torch.arange(8, dtype=torch.float32).reshape(1, 1, 1, 2, 2, 2)
+        raw.requires_grad_()
+        valid = torch.ones_like(raw, dtype=torch.bool)
+        relative, center = relative_prediction_from_raw(raw, valid)
+        self.assertEqual(center.shape, (1, 1, 1, 1, 1, 1))
+        torch.testing.assert_close(relative.mean(), torch.tensor(0.0))
+        relative.square().mean().backward()
+        self.assertTrue(torch.isfinite(raw.grad).all())
 
 if __name__ == "__main__":
     unittest.main()

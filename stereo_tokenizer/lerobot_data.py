@@ -163,6 +163,7 @@ class LeRobotStereoDataset(data.Dataset):
         expected_rectification_audit_sha256: str,
         video_cache_capacity: int = 12,
         maximum_timestamp_error_s: float = 0.05,
+        single_frame_source_index: int = 2,
     ):
         super().__init__()
         self.manifest_path = Path(manifest_path).expanduser().resolve()
@@ -173,6 +174,7 @@ class LeRobotStereoDataset(data.Dataset):
         )
         self.video_cache_capacity = int(video_cache_capacity)
         self.maximum_timestamp_error_s = float(maximum_timestamp_error_s)
+        self.single_frame_source_index = int(single_frame_source_index)
         self._video_cache = None
         self._rectification_maps = {}
 
@@ -186,6 +188,8 @@ class LeRobotStereoDataset(data.Dataset):
             raise ValueError("a full rectification audit SHA256 is required")
         if self.maximum_timestamp_error_s <= 0:
             raise ValueError("maximum timestamp error must be positive")
+        if not 0 <= self.single_frame_source_index < len(FRAME_OFFSETS):
+            raise ValueError("single-frame source index is out of range")
 
         self.records = self._read_manifest()
         self.episode_spans = []
@@ -403,9 +407,20 @@ class LeRobotStereoDataset(data.Dataset):
         )
 
     def __getitem__(self, index):
+        return self.get_mode_item(index, "four_frame")
+
+    def get_mode_item(self, index, temporal_mode):
         with profile_region("stereo/data/lerobot_getitem"):
             record, start_frame = self._sample_address(index)
-            images = np.empty((3, 2, 3, 4, 256, 256), dtype=np.uint8)
+            if temporal_mode == "four_frame":
+                frame_offsets = FRAME_OFFSETS
+            elif temporal_mode == "single_frame":
+                frame_offsets = (FRAME_OFFSETS[self.single_frame_source_index],)
+            else:
+                raise ValueError(f"unsupported temporal mode {temporal_mode!r}")
+            images = np.empty(
+                (3, 2, 3, len(frame_offsets), 256, 256), dtype=np.uint8
+            )
             for view_index, view in enumerate(VIEWS):
                 for eye_index, eye in enumerate(EYES):
                     key = VIDEO_KEYS[(view, eye)]
@@ -419,7 +434,7 @@ class LeRobotStereoDataset(data.Dataset):
                     from_timestamp = float(video["from_timestamp"])
                     timestamps = [
                         from_timestamp + (start_frame + offset) / FPS
-                        for offset in FRAME_OFFSETS
+                        for offset in frame_offsets
                     ]
                     decoded = self._decode_frames(path, timestamps)
                     for frame_index, image in enumerate(decoded):
@@ -440,6 +455,11 @@ class LeRobotStereoDataset(data.Dataset):
                 "shard_id": record["shard_id"],
                 "start_frame": start_frame,
                 "contract_sha256": record["contract_sha256"],
+                "mode_id": f"stereo/{temporal_mode}",
+                "eye_mode": "stereo",
+                "temporal_mode": temporal_mode,
+                "view_count": 3,
+                "teacher_kind": "foundation_stereo",
             }
 
 
