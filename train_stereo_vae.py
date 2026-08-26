@@ -314,8 +314,8 @@ def build_parser():
     parser.add_argument("--online_gt_enabled", type=int, choices=(0, 1), default=0)
     parser.add_argument(
         "--foundation_stereo_backend",
-        choices=("pytorch", "tensorrt"),
-        default="pytorch",
+        choices=("las2_h", "pytorch", "tensorrt"),
+        default="las2_h",
     )
     parser.add_argument("--foundation_stereo_repo", type=str, default=None)
     parser.add_argument("--foundation_stereo_checkpoint", type=str, default=None)
@@ -341,6 +341,11 @@ def build_parser():
     parser.add_argument(
         "--foundation_stereo_engine_manifest_sha256", type=str, default=None
     )
+    parser.add_argument("--las2_h_repo", type=str, default=None)
+    parser.add_argument("--las2_h_checkpoint", type=str, default=None)
+    parser.add_argument("--las2_h_checkpoint_sha256", type=str, default=None)
+    parser.add_argument("--las2_h_valid_iters", type=int, default=4)
+    parser.add_argument("--las2_h_max_disp", type=int, default=192)
     parser.add_argument(
         "--online_gt_cache_enabled", type=int, choices=(0, 1), default=0
     )
@@ -456,17 +461,28 @@ def validate_runtime_args(args):
         if args.online_gt_enabled:
             raise ValueError("Manifest-v3 training cannot enable online GT")
     elif args.stereo_data_backend == "lerobot_online":
+        teacher_sha256 = (
+            args.las2_h_checkpoint_sha256
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
+        )
         required = {
             "lerobot_episode_manifest": args.lerobot_episode_manifest,
             "lerobot_dataset_root": args.lerobot_dataset_root,
             "lerobot_rectification_audit_sha256": (
                 args.lerobot_rectification_audit_sha256
             ),
-            "foundation_stereo_checkpoint_sha256": (
-                args.foundation_stereo_checkpoint_sha256
-            ),
+            "teacher_checkpoint_sha256": teacher_sha256,
         }
-        if args.foundation_stereo_backend == "pytorch":
+        if args.foundation_stereo_backend == "las2_h":
+            required.update(
+                {
+                    "las2_h_repo": args.las2_h_repo,
+                    "las2_h_checkpoint": args.las2_h_checkpoint,
+                    "las2_h_checkpoint_sha256": args.las2_h_checkpoint_sha256,
+                }
+            )
+        elif args.foundation_stereo_backend == "pytorch":
             required.update(
                 {
                     "foundation_stereo_repo": args.foundation_stereo_repo,
@@ -499,8 +515,8 @@ def validate_runtime_args(args):
             raise ValueError("LeRobot online training requires --online_gt_enabled=1")
         if len(args.lerobot_rectification_audit_sha256) != 64:
             raise ValueError("a full rectification audit SHA256 is required")
-        if len(args.foundation_stereo_checkpoint_sha256) != 64:
-            raise ValueError("a full FoundationStereo checkpoint SHA256 is required")
+        if len(teacher_sha256) != 64:
+            raise ValueError("a full online teacher checkpoint SHA256 is required")
         if args.online_gt_cache_enabled and not args.online_gt_cache_root:
             raise ValueError("online GT cache requires --online_gt_cache_root")
         if args.foundation_stereo_pair_microbatch < 1:
@@ -511,7 +527,14 @@ def validate_runtime_args(args):
             args.foundation_stereo_engine_manifest,
             args.foundation_stereo_engine_manifest_sha256,
         )
-        if args.foundation_stereo_backend == "pytorch":
+        if args.foundation_stereo_backend == "las2_h":
+            if args.las2_h_valid_iters < 1:
+                raise ValueError("LAS2-H valid_iters must be positive")
+            if args.las2_h_max_disp != 192:
+                raise ValueError("LAS2-H max_disp is frozen to 192")
+            if any(value is not None for value in engine_values):
+                raise ValueError("LAS2-H forbids TensorRT engine arguments")
+        elif args.foundation_stereo_backend == "pytorch":
             if any(value is not None for value in engine_values):
                 raise ValueError(
                     "PyTorch FoundationStereo forbids TensorRT engine arguments"
@@ -625,13 +648,29 @@ def write_online_gt_run_metadata(args):
     ).stdout.strip()
     online_gt = {
         "backend": args.foundation_stereo_backend,
-        "checkpoint_sha256": args.foundation_stereo_checkpoint_sha256,
-        "valid_iters": args.foundation_stereo_valid_iters,
+        "checkpoint_sha256": (
+            args.las2_h_checkpoint_sha256
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
+        ),
+        "valid_iters": (
+            args.las2_h_valid_iters
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_valid_iters
+        ),
         "pair_microbatch": args.foundation_stereo_pair_microbatch,
         "bidirectional": True,
         "lr_consistency": True,
     }
-    if args.foundation_stereo_backend == "pytorch":
+    if args.foundation_stereo_backend == "las2_h":
+        online_gt.update(
+            {
+                "repo": str(Path(args.las2_h_repo).resolve()),
+                "checkpoint": str(Path(args.las2_h_checkpoint).resolve()),
+                "max_disp": args.las2_h_max_disp,
+            }
+        )
+    elif args.foundation_stereo_backend == "pytorch":
         online_gt.update(
             {
                 "repo": str(Path(args.foundation_stereo_repo).resolve()),

@@ -372,6 +372,122 @@ class FoundationStereoTensorRTRunner:
         return output
 
 
+class LAS2HOnlineTeacher:
+    """Frozen LAS2-H stereo teacher used as the primary online GT backend."""
+
+    def __init__(
+        self,
+        repo,
+        checkpoint,
+        checkpoint_sha256,
+        *,
+        device,
+        max_disp=192,
+        valid_iters=4,
+    ):
+        self.repo = Path(repo).expanduser().resolve() if repo is not None else None
+        self.checkpoint = (
+            Path(checkpoint).expanduser().resolve()
+            if checkpoint is not None
+            else None
+        )
+        if (
+            self.repo is None
+            or self.checkpoint is None
+            or not self.repo.is_dir()
+            or not self.checkpoint.is_file()
+        ):
+            raise FileNotFoundError(
+                "LAS2-H repo/checkpoint is missing: "
+                f"repo={self.repo}, checkpoint={self.checkpoint}"
+            )
+        if sha256_file(self.checkpoint) != checkpoint_sha256:
+            raise ValueError("LAS2-H checkpoint SHA256 mismatch")
+        self.device = torch.device(device)
+        if self.device.type != "cuda":
+            raise ValueError("LAS2-H online inference requires a CUDA device")
+        self.max_disp = int(max_disp)
+        self.valid_iters = int(valid_iters)
+        if self.max_disp != 192:
+            raise ValueError("LAS2-H is frozen to max_disp=192")
+        if self.valid_iters < 1:
+            raise ValueError("LAS2-H valid_iters must be positive")
+        original_path = list(sys.path)
+        sys.path.insert(0, str(self.repo))
+        try:
+            from core.models import build_model, load_model_weights
+            from core.utils.utils import InputPadder
+        finally:
+            sys.path[:] = original_path
+        payload = torch.load(
+            self.checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
+        model = build_model(
+            version="las2",
+            model_size="h",
+            fnet_pretrained=False,
+            max_disp=self.max_disp,
+        )
+        load_model_weights(model, payload, strict=True)
+        model.requires_grad_(False)
+        model.to(self.device)
+        model.eval()
+        self.model = model
+        self._input_padder = InputPadder
+
+    @staticmethod
+    def reshape_pair_output(pair_output, *, batch, views, frames):
+        expected_pairs = int(batch) * int(views) * int(frames)
+        if pair_output.ndim == 3:
+            pair_output = pair_output.unsqueeze(1)
+        if pair_output.ndim != 4 or pair_output.shape[0] != expected_pairs:
+            raise ValueError(
+                "LAS2-H output must contain "
+                f"{expected_pairs} stereo pairs, got shape {tuple(pair_output.shape)}"
+            )
+        _, channels, height, width = pair_output.shape
+        if channels != 1:
+            raise ValueError("LAS2-H disparity output must have one channel")
+        return (
+            pair_output.float()
+            .reshape(batch, views, frames, 1, height, width)
+            .permute(0, 1, 3, 2, 4, 5)
+            .contiguous()
+        )
+
+    def _infer_microbatch(self, left, right):
+        if left.shape != right.shape or left.ndim != 4:
+            raise ValueError("LAS2-H expects matching left/right NCHW tensors")
+        padder = self._input_padder(left.shape)
+        left_padded, right_padded = padder.pad(left, right)
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda", dtype=torch.float16
+        ):
+            disparity_left = self.model(
+                left_padded,
+                right_padded,
+                max_disp=self.max_disp,
+                iters=self.valid_iters,
+                test_mode=True,
+            )
+            disparity_right = self.model(
+                torch.flip(right_padded, dims=[3]),
+                torch.flip(left_padded, dims=[3]),
+                max_disp=self.max_disp,
+                iters=self.valid_iters,
+                test_mode=True,
+            )
+        if disparity_left.ndim == 3:
+            disparity_left = disparity_left.unsqueeze(1)
+        if disparity_right.ndim == 3:
+            disparity_right = disparity_right.unsqueeze(1)
+        disparity_left = padder.unpad(disparity_left).float()
+        disparity_right = torch.flip(padder.unpad(disparity_right), dims=[3]).float()
+        return disparity_left, disparity_right
+
+
 class FoundationStereoOnlineTeacher:
     """Non-checkpointed frozen FoundationStereo inference wrapper."""
 
@@ -389,10 +505,15 @@ class FoundationStereoOnlineTeacher:
         engine_sha256=None,
         engine_manifest=None,
         engine_manifest_sha256=None,
+        las2_h_repo=None,
+        las2_h_checkpoint=None,
+        las2_h_checkpoint_sha256=None,
+        las2_h_valid_iters=4,
+        las2_h_max_disp=192,
     ):
         self.backend = str(backend)
-        if self.backend not in {"pytorch", "tensorrt"}:
-            raise ValueError(f"unsupported FoundationStereo backend {self.backend}")
+        if self.backend not in {"las2_h", "pytorch", "tensorrt"}:
+            raise ValueError(f"unsupported online stereo backend {self.backend}")
         self.repo = (
             Path(repo).expanduser().resolve() if repo is not None else None
         )
@@ -410,7 +531,21 @@ class FoundationStereoOnlineTeacher:
         self.model = None
         self.config = None
         self.runner = None
-        if self.backend == "pytorch":
+        self.las2h = None
+        if self.backend == "las2_h":
+            self.las2h = LAS2HOnlineTeacher(
+                las2_h_repo if las2_h_repo is not None else repo,
+                las2_h_checkpoint if las2_h_checkpoint is not None else checkpoint,
+                (
+                    las2_h_checkpoint_sha256
+                    if las2_h_checkpoint_sha256 is not None
+                    else checkpoint_sha256
+                ),
+                device=self.device,
+                max_disp=las2_h_max_disp,
+                valid_iters=las2_h_valid_iters,
+            )
+        elif self.backend == "pytorch":
             if self.valid_iters not in {12, 16, 32}:
                 raise ValueError(
                     "online FoundationStereo iterations must be 12, 16, or 32"
@@ -505,6 +640,8 @@ class FoundationStereoOnlineTeacher:
         return model, config
 
     def _infer_microbatch(self, left, right):
+        if self.backend == "las2_h":
+            return self.las2h._infer_microbatch(left, right)
         if self.backend == "tensorrt":
             with torch.inference_mode():
                 disparity_left = self.runner.infer(left, right)
@@ -625,11 +762,21 @@ class OnlineFoundationGTCallback(Callback):
         if self.cache_enabled and self.cache_root is None:
             raise ValueError("online GT cache requires --online_gt_cache_root")
         self.backend = args.foundation_stereo_backend
+        self.teacher_checkpoint_sha256 = (
+            args.las2_h_checkpoint_sha256
+            if self.backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
+        )
+        self.teacher_valid_iters = (
+            args.las2_h_valid_iters
+            if self.backend == "las2_h"
+            else args.foundation_stereo_valid_iters
+        )
         cache_provenance = {
             "schema": CACHE_SCHEMA,
             "backend": self.backend,
-            "checkpoint_sha256": args.foundation_stereo_checkpoint_sha256,
-            "valid_iters": args.foundation_stereo_valid_iters,
+            "checkpoint_sha256": self.teacher_checkpoint_sha256,
+            "valid_iters": self.teacher_valid_iters,
             "engine_sha256": getattr(
                 args, "foundation_stereo_engine_sha256", None
             ),
@@ -648,8 +795,8 @@ class OnlineFoundationGTCallback(Callback):
         return (
             f"{self.__class__.__qualname__}:"
             f"{self.backend}:"
-            f"{self.args.foundation_stereo_checkpoint_sha256}:"
-            f"{self.args.foundation_stereo_valid_iters}:"
+            f"{getattr(self.args, 'las2_h_checkpoint_sha256', None) if self.backend == 'las2_h' else self.args.foundation_stereo_checkpoint_sha256}:"
+            f"{getattr(self.args, 'las2_h_valid_iters', None) if self.backend == 'las2_h' else self.args.foundation_stereo_valid_iters}:"
             f"{getattr(self.args, 'foundation_stereo_engine_sha256', None)}:"
             f"{getattr(self.args, 'foundation_stereo_engine_manifest_sha256', None)}"
         )
@@ -661,11 +808,19 @@ class OnlineFoundationGTCallback(Callback):
         if stage not in (None, "fit") or self.teacher is not None:
             return
         self.teacher = FoundationStereoOnlineTeacher(
-            self.args.foundation_stereo_repo,
-            self.args.foundation_stereo_checkpoint,
-            self.args.foundation_stereo_checkpoint_sha256,
+            (
+                self.args.las2_h_repo
+                if self.backend == "las2_h"
+                else self.args.foundation_stereo_repo
+            ),
+            (
+                self.args.las2_h_checkpoint
+                if self.backend == "las2_h"
+                else self.args.foundation_stereo_checkpoint
+            ),
+            self.teacher_checkpoint_sha256,
             device=trainer.strategy.root_device,
-            valid_iters=self.args.foundation_stereo_valid_iters,
+            valid_iters=self.teacher_valid_iters,
             pair_microbatch=self.args.foundation_stereo_pair_microbatch,
             backend=self.backend,
             engine=getattr(self.args, "foundation_stereo_engine", None),
@@ -678,6 +833,13 @@ class OnlineFoundationGTCallback(Callback):
             engine_manifest_sha256=getattr(
                 self.args, "foundation_stereo_engine_manifest_sha256", None
             ),
+            las2_h_repo=getattr(self.args, "las2_h_repo", None),
+            las2_h_checkpoint=getattr(self.args, "las2_h_checkpoint", None),
+            las2_h_checkpoint_sha256=getattr(
+                self.args, "las2_h_checkpoint_sha256", None
+            ),
+            las2_h_valid_iters=getattr(self.args, "las2_h_valid_iters", 4),
+            las2_h_max_disp=getattr(self.args, "las2_h_max_disp", 192),
         )
 
     def teardown(self, trainer, pl_module, stage=None):
@@ -703,12 +865,12 @@ class OnlineFoundationGTCallback(Callback):
             "contract_sha256": contract_sha256,
             "eye_mode": "stereo",
             "view_count": 3,
-            "teacher_family": "foundation_stereo",
+            "teacher_family": self.backend,
             "target_representation": "pixel_disparity_px",
             "tensor_shape": [3, 1, expected_time, 256, 256],
             "backend": self.backend,
-            "checkpoint_sha256": self.args.foundation_stereo_checkpoint_sha256,
-            "valid_iters": self.args.foundation_stereo_valid_iters,
+            "checkpoint_sha256": self.teacher_checkpoint_sha256,
+            "valid_iters": self.teacher_valid_iters,
             "engine_sha256": getattr(
                 self.args, "foundation_stereo_engine_sha256", None
             ),
@@ -805,10 +967,10 @@ class OnlineFoundationGTCallback(Callback):
         if not eye_modes or any(mode != "stereo" for mode in eye_modes):
             raise ValueError("FoundationStereo callback only accepts stereo batches")
         if not teacher_kinds or any(
-            kind != "foundation_stereo" for kind in teacher_kinds
+            kind not in {"foundation_stereo", "las2_h"} for kind in teacher_kinds
         ):
             raise ValueError(
-                "FoundationStereo callback requires teacher_kind=foundation_stereo"
+                "online stereo callback requires teacher_kind=foundation_stereo or las2_h"
             )
         temporal_modes = list(temporal_modes)
         if not temporal_modes or any(

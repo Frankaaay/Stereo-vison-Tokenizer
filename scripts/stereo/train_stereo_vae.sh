@@ -20,13 +20,15 @@ set -euo pipefail
 
 MODE_UPDATE_RATIO="${MODE_UPDATE_RATIO:-1:1:1:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
-if [[ "${PER_DEVICE_BATCH_SIZE}" != "24" || "${GRAD_ACCUMULATES}" != "1" ]]; then
-  echo "four-mode training is frozen to per-device BS24 and GA1" >&2
-  exit 2
-fi
-if [[ "${MODE_UPDATE_RATIO}" != "1:1:1:1" ]]; then
-  echo "four-mode training requires MODE_UPDATE_RATIO=1:1:1:1" >&2
-  exit 2
+if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
+  if [[ "${PER_DEVICE_BATCH_SIZE}" != "24" || "${GRAD_ACCUMULATES}" != "1" ]]; then
+    echo "four-mode training is frozen to per-device BS24 and GA1" >&2
+    exit 2
+  fi
+  if [[ "${MODE_UPDATE_RATIO}" != "1:1:1:1" ]]; then
+    echo "four-mode training requires MODE_UPDATE_RATIO=1:1:1:1" >&2
+    exit 2
+  fi
 fi
 
 STEREO_DATA_BACKEND="${STEREO_DATA_BACKEND:-manifest_v3}"
@@ -45,18 +47,34 @@ elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
   : "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
   : "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
   : "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
-  : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
   FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
   FOUNDATION_BACKEND_ARGS=()
-  if [[ "${FOUNDATION_STEREO_BACKEND}" == "pytorch" ]]; then
+  if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
+    : "${LAS2_H_REPO:?set the LiteAnyStereo repository}"
+    : "${LAS2_H_CHECKPOINT:?set the LAS2-H checkpoint}"
+    : "${LAS2_H_CHECKPOINT_SHA256:?set the LAS2-H checkpoint SHA256}"
+    LAS2_H_VALID_ITERS="${LAS2_H_VALID_ITERS:-4}"
+    LAS2_H_MAX_DISP="${LAS2_H_MAX_DISP:-192}"
+    FOUNDATION_BACKEND_ARGS=(
+      --las2_h_repo "${LAS2_H_REPO}"
+      --las2_h_checkpoint "${LAS2_H_CHECKPOINT}"
+      --las2_h_checkpoint_sha256 "${LAS2_H_CHECKPOINT_SHA256}"
+      --las2_h_valid_iters "${LAS2_H_VALID_ITERS}"
+      --las2_h_max_disp "${LAS2_H_MAX_DISP}"
+    )
+  elif [[ "${FOUNDATION_STEREO_BACKEND}" == "pytorch" ]]; then
+    : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
     : "${FOUNDATION_STEREO_REPO:?set the FoundationStereo repository}"
     : "${FOUNDATION_STEREO_CHECKPOINT:?set the ViT-L checkpoint}"
     FOUNDATION_STEREO_VALID_ITERS="${FOUNDATION_STEREO_VALID_ITERS:-16}"
     FOUNDATION_BACKEND_ARGS+=(
       --foundation_stereo_repo "${FOUNDATION_STEREO_REPO}"
       --foundation_stereo_checkpoint "${FOUNDATION_STEREO_CHECKPOINT}"
+      --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
+      --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
     )
   elif [[ "${FOUNDATION_STEREO_BACKEND}" == "tensorrt" ]]; then
+    : "${FOUNDATION_STEREO_CHECKPOINT_SHA256:?set the checkpoint SHA256}"
     : "${FOUNDATION_STEREO_ENGINE:?set the TensorRT engine path}"
     : "${FOUNDATION_STEREO_ENGINE_SHA256:?set the TensorRT engine SHA256}"
     : "${FOUNDATION_STEREO_ENGINE_MANIFEST:?set the engine manifest path}"
@@ -71,6 +89,8 @@ elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
       --foundation_stereo_engine_sha256 "${FOUNDATION_STEREO_ENGINE_SHA256}"
       --foundation_stereo_engine_manifest "${FOUNDATION_STEREO_ENGINE_MANIFEST}"
       --foundation_stereo_engine_manifest_sha256 "${FOUNDATION_STEREO_ENGINE_MANIFEST_SHA256}"
+      --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
+      --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
     )
   else
     echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
@@ -91,13 +111,11 @@ elif [[ "${STEREO_DATA_BACKEND}" == "lerobot_online" ]]; then
   ONLINE_GT_ARGS+=(
     --online_gt_enabled 1
     --foundation_stereo_backend "${FOUNDATION_STEREO_BACKEND}"
-    --foundation_stereo_checkpoint_sha256 "${FOUNDATION_STEREO_CHECKPOINT_SHA256}"
-    --foundation_stereo_valid_iters "${FOUNDATION_STEREO_VALID_ITERS}"
     --foundation_stereo_pair_microbatch "${FOUNDATION_STEREO_PAIR_MICROBATCH:-48}"
+    "${FOUNDATION_BACKEND_ARGS[@]}"
     --online_gt_cache_enabled "${ONLINE_GT_CACHE_ENABLED}"
     --online_gt_cache_root "${ONLINE_GT_CACHE_ROOT:-}"
     --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
-    "${FOUNDATION_BACKEND_ARGS[@]}"
   )
 else
   echo "unsupported STEREO_DATA_BACKEND=${STEREO_DATA_BACKEND}" >&2

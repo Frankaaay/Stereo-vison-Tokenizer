@@ -1071,7 +1071,9 @@ class StereoVAE(pl.LightningModule):
             self.mode_samples[mode_id] += (
                 int(batch["video"].shape[0]) * int(self.trainer.world_size)
             )
-            if max(self.mode_updates.values()) - min(self.mode_updates.values()) > 1:
+            if bool(getattr(self.args, "four_mode_mixed_training", False)) and (
+                max(self.mode_updates.values()) - min(self.mode_updates.values()) > 1
+            ):
                 raise RuntimeError("four-mode update counts violate 1:1:1:1")
             self.generator_updates += 1
             with profile_region("stereo/update/scheduler"):
