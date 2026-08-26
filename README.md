@@ -131,8 +131,9 @@ python -m pip install \
 
 ```bash
 export LAS2_H_REPO=$EXTERNAL_ROOT/LiteAnyStereo
+export LAS2_H_SOURCE_SHA=8c97bd4c4da3712c2ac60003a23201dfdb5935f4
 git clone https://github.com/TomTomTommi/LiteAnyStereo.git "$LAS2_H_REPO"
-git -C "$LAS2_H_REPO" checkout 8c97bd4c4da3712c2ac60003a23201dfdb5935f4
+git -C "$LAS2_H_REPO" checkout "$LAS2_H_SOURCE_SHA"
 git -C "$LAS2_H_REPO" status --short
 ```
 
@@ -401,6 +402,8 @@ test -f "$LAS2_H_CHECKPOINT"
 test -d "$DA3_REPO"
 test -f "$DA3_CHECKPOINT/model.safetensors"
 
+test "$(git -C "$LAS2_H_REPO" rev-parse HEAD)" = "$LAS2_H_SOURCE_SHA"
+test -z "$(git -C "$LAS2_H_REPO" status --porcelain)"
 test "$(git -C "$DA3_REPO" rev-parse HEAD)" = "$DA3_SOURCE_SHA"
 test -z "$(git -C "$DA3_REPO" status --porcelain)"
 test "$(sha256sum "$LAS2_H_CHECKPOINT" | cut -d ' ' -f 1)" = "$LAS2_H_CHECKPOINT_SHA256"
@@ -456,6 +459,7 @@ export LEROBOT_VAL_SAMPLE_LIMIT=512
 
 export FOUNDATION_STEREO_BACKEND=las2_h
 export LAS2_H_REPO
+export LAS2_H_SOURCE_SHA
 export LAS2_H_CHECKPOINT
 export LAS2_H_CHECKPOINT_SHA256
 export LAS2_H_VALID_ITERS=4
@@ -503,8 +507,10 @@ export ONLINE_GT_CACHE_ENABLED=1
 export ONLINE_GT_CACHE_ROOT=$RUN_ROOT/online-gt-cache-v1
 ```
 
-LAS2-H 与 DA3 使用各自 provenance namespace。不要把旧 cache 与新的 checkpoint、
-`SINGLE_FRAME_SOURCE_INDEX`、disparity range、LR threshold 或 geometry 配置混用。
+LAS2-H 与 DA3 使用各自 provenance namespace。Stereo cache schema v4 会把 LAS2 source
+SHA、checkpoint、`SINGLE_FRAME_SOURCE_INDEX`、disparity range 和 LR threshold 编入
+namespace/metadata；DA3 cache schema v3 同样编码 source frame、source/checkpoint 和
+preprocess。任一语义变化都会进入新 namespace，旧 stereo v3 / DA3 v2 cache 不会被复用。
 
 ## 10. 恢复训练
 
@@ -548,8 +554,9 @@ WandB 模式和 output path；不要把四步 smoke 参数直接当作正式训�
 
 ## 12. 严格评估
 
-评估只接受与 checkpoint architecture 完全一致的 CLI 参数，并使用 posterior mean 与
-在线 stereo teacher。以下示例在单 GPU 上对 val split 跑两个 batch，同时评估
+评估只接受与 checkpoint architecture 完全一致的 CLI 参数（数据选择参数
+`single_frame_source_index` 除外），并使用 posterior mean 与在线 teacher。以下示例在单
+GPU 上对 val split 跑两个 batch，同时评估
 single/four-frame：
 
 ```bash
@@ -573,6 +580,7 @@ python eval_stereo_vae.py \
   --lerobot_rectification_audit_sha256 "$LEROBOT_RECTIFICATION_AUDIT_SHA256" \
   --foundation_stereo_backend las2_h \
   --las2_h_repo "$LAS2_H_REPO" \
+  --las2_h_source_sha "$LAS2_H_SOURCE_SHA" \
   --las2_h_checkpoint "$LAS2_H_CHECKPOINT" \
   --las2_h_checkpoint_sha256 "$LAS2_H_CHECKPOINT_SHA256" \
   --las2_h_valid_iters 4 \
@@ -622,6 +630,117 @@ python eval_stereo_vae.py \
   --persistent_workers 1
 ```
 
+### 12.1 正式 mono + DA3 评估
+
+Mono evaluation 直接读取 immutable Hy RGB manifest/cache；不会从 stereo batch 截取眼睛。
+Dataset 输出严格为 `[B,1,1,3,T,256,256]`，DA3 接收未带 Student padding 的原始比例
+预处理，输出映射回 Student geometry。一个 manifest 必须只有一种 `source_hw`，从而保证
+DA3 tensor 可以组成 batch。当前 48 条 smoke manifest 可作为最小正式输入：
+
+```bash
+export MONO_EVAL_MANIFEST=$MONO_SMOKE_MANIFEST
+export MONO_EVAL_ROOT=$RUN_ROOT/mono-eval-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$MONO_EVAL_ROOT"
+
+python eval_stereo_vae.py \
+  --stereo_vae_ckpt "$STEREO_VAE_CKPT" \
+  --eval_eye_mode mono \
+  --eval_temporal_mode both \
+  --device cuda \
+  --bf16 \
+  --output_json "$MONO_EVAL_ROOT/metrics.json" \
+  --visualization_dir "$MONO_EVAL_ROOT/cases" \
+  --num_visualizations 2 \
+  --mono_eval_manifest "$MONO_EVAL_MANIFEST" \
+  --mono_cache_root "$MONO_SMOKE_CACHE_ROOT" \
+  --da3_repo "$DA3_REPO" \
+  --da3_source_sha "$DA3_SOURCE_SHA" \
+  --da3_checkpoint "$DA3_CHECKPOINT" \
+  --da3_checkpoint_sha256 "$DA3_CHECKPOINT_SHA256" \
+  --da3_process_res 504 \
+  --da3_process_res_method upper_bound_resize \
+  --da3_confidence_mask_mode finite_positive_non_padding \
+  --resolution 256 \
+  --sequence_length 4 \
+  --image_channels 3 \
+  --patch_embed linear \
+  --patch_size 16 \
+  --spatial_depth 4 \
+  --temporal_depth 4 \
+  --embedding_dim 512 \
+  --latent_channels 48 \
+  --enc_block ttww \
+  --dec_block tttt \
+  --twod_window_size 8 \
+  --spatial_pos rope \
+  --causal_in_peg \
+  --peg_backend conv2d_t1_slice \
+  --dim_head 64 \
+  --heads 8 \
+  --initialize_vit \
+  --stereo_num_views 3 \
+  --stereo_num_frames 4 \
+  --single_frame_source_index 0 \
+  --stereo_search_radii 7 7 7 \
+  --stereo_search_direction left \
+  --stereo_disparity_min_px 0.5 \
+  --stereo_disparity_max_px 112.0 \
+  --stereo_lr_error_abs_threshold_px 1.0 \
+  --stereo_lr_error_relative_threshold 0.05 \
+  --rgb_weight 1.0 \
+  --relative_depth_weight 1.0 \
+  --relative_gradient_weight 0.1 \
+  --relative_depth_epsilon 1e-6 \
+  --kl_weight 1e-6 \
+  --perceptual_weight 1.0 \
+  --image_gan_weight 0 \
+  --video_gan_weight 0 \
+  --gan_feat_weight 0 \
+  --recon_loss_type l1 \
+  --smooth_l1_beta 1.0 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --pin_memory 1 \
+  --persistent_workers 1
+```
+
+Mono `metrics.json` 对 `cam_high` 报告 RGB L1、有效 depth pixels、centered
+relative-log-depth L1/RMSE，并记录 DA3 source/checkpoint/process provenance。可视化支持
+`single_frame`、`four_frame` 或 `both`，只渲染实际请求的输出。
+
+### 12.2 一次运行全部四种模式
+
+`--eval_eye_mode` 接受 `mono|stereo|both`，`--eval_temporal_mode` 接受
+`single_frame|four_frame|both`，二者按笛卡尔积展开，并复用训练侧 `MODE_IDS`。例如：
+
+```bash
+python eval_stereo_vae.py \
+  ... \
+  --eval_eye_mode both \
+  --eval_temporal_mode both \
+  --mono_eval_manifest "$MONO_EVAL_MANIFEST" \
+  --mono_cache_root "$MONO_SMOKE_CACHE_ROOT" \
+  --da3_repo "$DA3_REPO" \
+  --da3_source_sha "$DA3_SOURCE_SHA" \
+  --da3_checkpoint "$DA3_CHECKPOINT" \
+  --da3_checkpoint_sha256 "$DA3_CHECKPOINT_SHA256" \
+  --lerobot_episode_manifest "$LEROBOT_EPISODE_MANIFEST" \
+  --lerobot_dataset_root "$LEROBOT_DATASET_ROOT" \
+  --lerobot_rectification_audit_sha256 "$LEROBOT_RECTIFICATION_AUDIT_SHA256" \
+  --foundation_stereo_backend las2_h \
+  --las2_h_repo "$LAS2_H_REPO" \
+  --las2_h_source_sha "$LAS2_H_SOURCE_SHA" \
+  --las2_h_checkpoint "$LAS2_H_CHECKPOINT" \
+  --las2_h_checkpoint_sha256 "$LAS2_H_CHECKPOINT_SHA256"
+```
+
+内部按 eye mode 建立两个独立 session：mono 使用正式 mono dataset + DA3，stereo 使用
+LeRobot stereo dataset + FoundationStereo/LAS2-H。同一 eye session 内 teacher 每个 batch
+只推理一次，single/four 共用 GT。`metrics.json` 使用完整 `mono/single_frame` 等 mode key，
+并分别记录 `datasets.mono|stereo`、`teachers.mono|stereo` 以及每个 mode 的精确 provenance。
+可视化分别写入 `visualizations/mono/` 和 `visualizations/stereo/`，不会把两个不同 sample
+universe 画成伪配对。
+
 `metrics.json`、程序 exit code 0、精确 sample count、有限指标和可视化图片共同构成
 评估成功；仅看到进程启动不算完成。完整 split 评估时删除 `--max_batches`。
 
@@ -630,7 +749,8 @@ python eval_stereo_vae.py \
 每次训练至少保留：
 
 - `resolved_config.json`；
-- `run_manifest.json`，包括代码 SHA、teacher backend、权重 SHA 和 DA3 source SHA；
+- `run_manifest.json`，包括代码 SHA、teacher backend、权重 SHA、LAS2 source SHA 和
+  DA3 source SHA；
 - Lightning checkpoint，尤其 `last.ckpt`；
 - console log 与 WandB offline/online run（若启用）；
 - 数据 manifest、summary、rectification audit 及各自 SHA256；
@@ -646,6 +766,7 @@ Git。更换服务器时复制这些仓库外资产，或按本 README 重新生
 - `ModuleNotFoundError: wandb`：安装 `wandb==0.23.1`，或显式
   `DISABLE_WANDB=1`；`WANDB_MODE=offline` 不能替代缺失的 package。
 - `DA3 source SHA mismatch`：DA3 repo 不在冻结 commit，或 repo 有未提交修改。
+- `LAS2-H source SHA mismatch`：LAS2 repo 不在 `LAS2_H_SOURCE_SHA`，或 repo 有未提交修改。
 - `DA3 checkpoint SHA256 mismatch` / `LAS2-H checkpoint SHA256 mismatch`：传入的
   环境变量与实际文件不一致，重新计算 SHA，不要绕过检查。
 - `LeRobot MP4 loading requires PyAV`：PyAV 未安装或当前 shell 没激活训练 venv。

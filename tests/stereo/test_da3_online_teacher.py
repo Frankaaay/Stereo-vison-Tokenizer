@@ -9,11 +9,19 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 
-from stereo_tokenizer.data import HyMonoSmokeDataset
+from eval_stereo_vae import (
+    _exact_mono_rank_indices,
+    batch_for_temporal_mode,
+    empty_accumulator,
+    finalize_metrics,
+    update_metrics,
+)
+from stereo_tokenizer.data import HyMonoDataset, HyMonoSmokeDataset
 from stereo_tokenizer.geometry import GeometryMapping
 from stereo_tokenizer.online_gt import (
     DepthAnything3OnlineTeacher,
     OnlineDepthAnything3GTCallback,
+    attach_da3_student_targets,
 )
 
 
@@ -122,6 +130,7 @@ class GeometryMappingTest(unittest.TestCase):
             da3_checkpoint_sha256="b" * 64,
             da3_process_res=504,
             da3_process_res_method="upper_bound_resize",
+            single_frame_source_index=0,
         )
         callback.cache_enabled = True
         callback.cache_namespace = "test"
@@ -133,6 +142,7 @@ class GeometryMappingTest(unittest.TestCase):
             metadata = callback._cache_metadata(
                 "sample", "c" * 64, "single_frame", mapping
             )
+            self.assertEqual(metadata["single_frame_source_index"], 0)
             with path.open("wb") as stream:
                 np.savez_compressed(
                     stream,
@@ -159,13 +169,88 @@ class GeometryMappingTest(unittest.TestCase):
                     "single_frame",
                     GeometryMapping.create((480, 640)),
                 )
+            base_args = SimpleNamespace(**vars(callback.args))
+            base_args.online_gt_cache_enabled = 0
+            base_args.online_gt_cache_root = None
+            changed_args = SimpleNamespace(**vars(base_args))
+            changed_args.single_frame_source_index = 2
+            base_callback = OnlineDepthAnything3GTCallback(base_args)
+            changed_callback = OnlineDepthAnything3GTCallback(changed_args)
+            self.assertNotEqual(
+                base_callback.cache_namespace,
+                changed_callback.cache_namespace,
+            )
 
     def test_dataset_worker_has_no_da3_model_or_forward(self):
-        data_source = inspect.getsource(HyMonoSmokeDataset)
+        data_source = inspect.getsource(HyMonoDataset)
         geometry_source = inspect.getsource(GeometryMapping.da3_preprocess)
         self.assertNotIn("DepthAnything3", data_source)
         self.assertNotIn("depth_anything_3", geometry_source)
         self.assertNotIn(".forward(", geometry_source)
+
+    def test_formal_mono_contract_maps_da3_and_computes_one_view_metrics(self):
+        mapping = GeometryMapping.create((240, 424))
+        raw = torch.zeros(4, 3, 240, 424, dtype=torch.uint8)
+        student, non_padding = mapping.student_letterbox(raw)
+        batch = {
+            "video": student.div(255.0)
+            .sub(0.5)
+            .permute(1, 0, 2, 3)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0),
+            "da3_images": mapping.da3_preprocess(raw).unsqueeze(0),
+            "non_padding_mask": non_padding.permute(1, 0, 2, 3)
+            .unsqueeze(0)
+            .unsqueeze(0),
+            "geometry_mapping": default_collate(
+                [mapping.to_collatable_metadata()]
+            ),
+            "eye_mode": ["mono"],
+            "temporal_mode": ["four_frame"],
+            "teacher_kind": ["da3"],
+        }
+        native_shape = (1, 4, *mapping.da3_processed_hw)
+        attach_da3_student_targets(
+            batch,
+            torch.ones(native_shape),
+            torch.ones(native_shape),
+            process_res=504,
+            process_res_method="upper_bound_resize",
+        )
+        self.assertEqual(batch["video"].shape, (1, 1, 1, 3, 4, 256, 256))
+        self.assertEqual(
+            batch["da3_relative_depth"].shape,
+            (1, 1, 1, 4, 256, 256),
+        )
+        single = batch_for_temporal_mode(batch, "single_frame", 2)
+        self.assertEqual(single["video"].shape, (1, 1, 1, 3, 1, 256, 256))
+        self.assertEqual(single["da3_relative_depth"].shape[3], 1)
+        self.assertEqual(single["mode_id"], ["mono/single_frame"])
+        output = SimpleNamespace(
+            rgb=batch["video"][:, :, 0].clone(),
+            raw_relative_log_depth=torch.zeros_like(batch["da3_relative_depth"]),
+        )
+        accumulator = empty_accumulator(torch.device("cpu"), 1)
+        update_metrics(accumulator, batch, output, 1e-6)
+        metrics = finalize_metrics(accumulator, ("cam_high",))
+        self.assertEqual(metrics["sample_count"], 1)
+        self.assertEqual(metrics["rgb_l1"], 0.0)
+        self.assertEqual(metrics["views"]["cam_high"]["relative_log_l1"], 0.0)
+
+    def test_mono_ddp_indices_are_exact_and_non_overlapping(self):
+        dataset = list(range(7))
+        rank_indices = [
+            _exact_mono_rank_indices(dataset, rank, 3) for rank in range(3)
+        ]
+        self.assertEqual(
+            sorted(index for indices in rank_indices for index in indices),
+            list(range(7)),
+        )
+        self.assertEqual(
+            sum(len(indices) for indices in rank_indices),
+            len({index for indices in rank_indices for index in indices}),
+        )
 
 
 if __name__ == "__main__":

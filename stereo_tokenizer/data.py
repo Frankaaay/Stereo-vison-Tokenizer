@@ -61,21 +61,36 @@ def _resolve_cache_path(root: Path, relative_path: str) -> Path:
     return resolved
 
 
-class HyMonoSmokeDataset(data.Dataset):
-    """Immutable raw-RGB Hy cam_high smoke samples with runtime letterboxing."""
+class HyMonoDataset(data.Dataset):
+    """Immutable Hy cam_high RGB samples with runtime Student/DA3 preprocessing."""
 
     SCHEMA = "hy-mono-cam-high-smoke-v1"
 
-    def __init__(self, manifest_path, cache_root):
+    def __init__(
+        self,
+        manifest_path,
+        cache_root,
+        *,
+        single_frame_source_index=0,
+        expected_sample_count=None,
+    ):
         self.manifest_path = Path(manifest_path).expanduser().resolve()
         self.cache_root = Path(cache_root).expanduser().resolve()
+        self.single_frame_source_index = int(single_frame_source_index)
+        if not 0 <= self.single_frame_source_index < 4:
+            raise ValueError("single-frame source index must be in [0, 3]")
         if not self.manifest_path.is_file():
             raise FileNotFoundError(self.manifest_path)
         if not self.cache_root.is_dir():
             raise FileNotFoundError(self.cache_root)
         self.records = self._read_jsonl(self.manifest_path)
-        if len(self.records) != 48:
-            raise ValueError("Hy mono smoke manifest must contain exactly 48 samples")
+        if expected_sample_count is not None and len(self.records) != int(
+            expected_sample_count
+        ):
+            raise ValueError(
+                "Hy mono manifest must contain exactly "
+                f"{int(expected_sample_count)} samples"
+            )
         verified_cache_hashes = {}
         for line_number, record in enumerate(self.records, start=1):
             if record.get("schema") != self.SCHEMA:
@@ -84,6 +99,7 @@ class HyMonoSmokeDataset(data.Dataset):
                 )
             required = (
                 "sample_id",
+                "episode_id",
                 "rgb_relative_path",
                 "rgb_sha256",
                 "source_contract_sha256",
@@ -119,6 +135,12 @@ class HyMonoSmokeDataset(data.Dataset):
                 verified_cache_hashes[cache_path] = digest
             if digest != record["rgb_sha256"]:
                 raise ValueError(f"{cache_path}: RGB cache SHA256 mismatch")
+        source_shapes = {tuple(record["source_hw"]) for record in self.records}
+        if len(source_shapes) != 1:
+            raise ValueError(
+                "one Hy mono manifest must contain a single source geometry so "
+                "DA3 tensors remain batch-collatable"
+            )
 
     @staticmethod
     def _read_jsonl(path):
@@ -138,9 +160,12 @@ class HyMonoSmokeDataset(data.Dataset):
     def __len__(self):
         return len(self.records)
 
+    def __getitem__(self, index):
+        return self.get_mode_item(index, "four_frame")
+
     @staticmethod
-    def _read_first_rgb_frame(path, expected_shape):
-        """Decode only frame zero from the compressed rgb.npy NPZ member."""
+    def _read_rgb_frame(path, expected_shape, source_index):
+        """Decode one configured frame from the compressed rgb.npy NPZ member."""
         with zipfile.ZipFile(path, mode="r") as archive:
             with archive.open("rgb.npy", mode="r") as stream:
                 version = np.lib.format.read_magic(stream)
@@ -159,9 +184,12 @@ class HyMonoSmokeDataset(data.Dataset):
                 if fortran_order or dtype != np.dtype(np.uint8):
                     raise ValueError(f"{path}: rgb.npy must be C-order uint8")
                 frame_bytes = int(np.prod(shape[1:], dtype=np.int64))
+                skipped = stream.read(frame_bytes * int(source_index))
+                if len(skipped) != frame_bytes * int(source_index):
+                    raise ValueError(f"{path}: truncated RGB frames before selection")
                 payload = stream.read(frame_bytes)
                 if len(payload) != frame_bytes:
-                    raise ValueError(f"{path}: truncated first RGB frame")
+                    raise ValueError(f"{path}: truncated selected RGB frame")
         return np.frombuffer(payload, dtype=np.uint8).reshape((1, *shape[1:])).copy()
 
     def get_mode_item(self, index, temporal_mode):
@@ -193,9 +221,10 @@ class HyMonoSmokeDataset(data.Dataset):
         source_hw = tuple(int(value) for value in record["source_hw"])
         source_shape = (4, 3, *source_hw)
         if temporal_mode == "single_frame":
-            selected_rgb = self._read_first_rgb_frame(path, source_shape)
-            selected_frame_index = frame_index[0:1]
-            selected_timestamp = timestamp_s[0:1]
+            source_index = self.single_frame_source_index
+            selected_rgb = self._read_rgb_frame(path, source_shape, source_index)
+            selected_frame_index = frame_index[source_index : source_index + 1]
+            selected_timestamp = timestamp_s[source_index : source_index + 1]
         elif temporal_mode == "four_frame":
             with np.load(path, allow_pickle=False) as cache:
                 selected_rgb = cache["rgb"]
@@ -233,6 +262,18 @@ class HyMonoSmokeDataset(data.Dataset):
             "view_count": 1,
             "teacher_kind": "da3",
         }
+
+
+class HyMonoSmokeDataset(HyMonoDataset):
+    """The frozen 48-sample Hy mono training/validation smoke dataset."""
+
+    def __init__(self, manifest_path, cache_root, *, single_frame_source_index=0):
+        super().__init__(
+            manifest_path,
+            cache_root,
+            single_frame_source_index=single_frame_source_index,
+            expected_sample_count=48,
+        )
 
 
 class StereoDataModule(pl.LightningDataModule):
@@ -281,7 +322,11 @@ class StereoDataModule(pl.LightningDataModule):
         )
         if manifest is None:
             return None
-        return HyMonoSmokeDataset(manifest, self.args.mono_cache_root)
+        return HyMonoSmokeDataset(
+            manifest,
+            self.args.mono_cache_root,
+            single_frame_source_index=self.args.single_frame_source_index,
+        )
 
     def _dataset(self, train: bool, split: str | None = None):
         if not bool(getattr(self.args, "four_mode_mixed_training", False)):

@@ -342,6 +342,7 @@ def build_parser():
         "--foundation_stereo_engine_manifest_sha256", type=str, default=None
     )
     parser.add_argument("--las2_h_repo", type=str, default=None)
+    parser.add_argument("--las2_h_source_sha", type=str, default=None)
     parser.add_argument("--las2_h_checkpoint", type=str, default=None)
     parser.add_argument("--las2_h_checkpoint_sha256", type=str, default=None)
     parser.add_argument("--las2_h_valid_iters", type=int, default=4)
@@ -381,6 +382,11 @@ def validate_runtime_args(args):
     if args.resolution != 256:
         raise ValueError("the frozen pilot recipe requires resolution=256")
     if args.four_mode_mixed_training:
+        if args.single_frame_source_index != 0:
+            raise ValueError(
+                "four-mode training currently requires "
+                "--single_frame_source_index=0"
+            )
         if args.batch_size != 24 or args.grad_accumulates != 1:
             raise ValueError("four-mode training is frozen to BS24 and GA1")
         if args.mode_updates_per_epoch < 4 or args.mode_updates_per_epoch % 4:
@@ -468,6 +474,7 @@ def validate_runtime_args(args):
         required.update(
             {
                 "las2_h_repo": args.las2_h_repo,
+                "las2_h_source_sha": args.las2_h_source_sha,
                 "las2_h_checkpoint": args.las2_h_checkpoint,
                 "las2_h_checkpoint_sha256": args.las2_h_checkpoint_sha256,
             }
@@ -518,6 +525,12 @@ def validate_runtime_args(args):
         args.foundation_stereo_engine_manifest_sha256,
     )
     if args.foundation_stereo_backend == "las2_h":
+        if len(args.las2_h_source_sha) != 40:
+            raise ValueError("LAS2-H requires a full source Git SHA")
+        try:
+            int(args.las2_h_source_sha, 16)
+        except ValueError as error:
+            raise ValueError("LAS2-H source SHA must be hexadecimal") from error
         if args.las2_h_valid_iters < 1:
             raise ValueError("LAS2-H valid_iters must be positive")
         if args.las2_h_max_disp != 192:
@@ -654,6 +667,7 @@ def write_online_gt_run_metadata(args):
         online_gt.update(
             {
                 "repo": str(Path(args.las2_h_repo).resolve()),
+                "source_sha": args.las2_h_source_sha,
                 "checkpoint": str(Path(args.las2_h_checkpoint).resolve()),
                 "max_disp": args.las2_h_max_disp,
             }

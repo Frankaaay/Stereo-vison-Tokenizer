@@ -20,7 +20,7 @@ from .geometry import GeometryMapping
 from .profiling import profile_region
 
 
-CACHE_SCHEMA = "stereo-online-foundation-gt-v3"
+CACHE_SCHEMA = "stereo-online-foundation-gt-v4"
 TENSORRT_ENGINE_MANIFEST_SCHEMA = "foundation-stereo-tensorrt-engine-v1"
 TENSORRT_BINDING_ROLES = ("left", "right", "disparity")
 
@@ -59,6 +59,51 @@ def _require_git_sha(value, field):
         int(value, 16)
     except ValueError as error:
         raise ValueError(f"{field} must be hexadecimal") from error
+
+
+def _validate_clean_git_source(repo: Path, source_sha: str, label: str) -> None:
+    _require_git_sha(source_sha, f"{label} source SHA")
+    actual_source_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if actual_source_sha != source_sha:
+        raise ValueError(f"{label} source SHA mismatch")
+    source_status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if source_status.strip():
+        raise ValueError(f"{label} source repository is dirty")
+
+
+def validate_git_teacher_assets(
+    repo,
+    source_sha,
+    checkpoint,
+    checkpoint_sha256,
+    *,
+    label,
+    checkpoint_is_directory=False,
+):
+    """Validate pinned teacher assets without importing or loading the model."""
+    _require_sha256(checkpoint_sha256, f"{label} checkpoint SHA256")
+    repo = Path(repo).expanduser().resolve()
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    if not repo.is_dir():
+        raise FileNotFoundError(f"{label} source repository is missing: {repo}")
+    expected_type = checkpoint.is_dir if checkpoint_is_directory else checkpoint.is_file
+    if not expected_type():
+        raise FileNotFoundError(f"{label} checkpoint is missing: {checkpoint}")
+    _validate_clean_git_source(repo, source_sha, label)
+    weights = checkpoint / "model.safetensors" if checkpoint_is_directory else checkpoint
+    if not weights.is_file() or sha256_file(weights) != checkpoint_sha256:
+        raise ValueError(f"{label} checkpoint SHA256 mismatch")
+    return repo, checkpoint
 
 
 def validate_tensorrt_engine_assets(
@@ -381,28 +426,19 @@ class LAS2HOnlineTeacher:
         checkpoint,
         checkpoint_sha256,
         *,
+        source_sha,
         device,
         max_disp=192,
         valid_iters=4,
     ):
-        self.repo = Path(repo).expanduser().resolve() if repo is not None else None
-        self.checkpoint = (
-            Path(checkpoint).expanduser().resolve()
-            if checkpoint is not None
-            else None
+        self.repo, self.checkpoint = validate_git_teacher_assets(
+            repo,
+            source_sha,
+            checkpoint,
+            checkpoint_sha256,
+            label="LAS2-H",
         )
-        if (
-            self.repo is None
-            or self.checkpoint is None
-            or not self.repo.is_dir()
-            or not self.checkpoint.is_file()
-        ):
-            raise FileNotFoundError(
-                "LAS2-H repo/checkpoint is missing: "
-                f"repo={self.repo}, checkpoint={self.checkpoint}"
-            )
-        if sha256_file(self.checkpoint) != checkpoint_sha256:
-            raise ValueError("LAS2-H checkpoint SHA256 mismatch")
+        self.source_sha = source_sha
         self.device = torch.device(device)
         if self.device.type != "cuda":
             raise ValueError("LAS2-H online inference requires a CUDA device")
@@ -506,6 +542,7 @@ class FoundationStereoOnlineTeacher:
         engine_manifest=None,
         engine_manifest_sha256=None,
         las2_h_repo=None,
+        las2_h_source_sha=None,
         las2_h_checkpoint=None,
         las2_h_checkpoint_sha256=None,
         las2_h_valid_iters=4,
@@ -539,6 +576,7 @@ class FoundationStereoOnlineTeacher:
                     if las2_h_checkpoint_sha256 is not None
                     else checkpoint_sha256
                 ),
+                source_sha=las2_h_source_sha,
                 device=self.device,
                 max_disp=las2_h_max_disp,
                 valid_iters=las2_h_valid_iters,
@@ -744,6 +782,30 @@ class FoundationStereoOnlineTeacher:
         return residual, valid
 
 
+def stereo_supervision_valid_mask(
+    disparity,
+    residual,
+    base_valid,
+    *,
+    disparity_min_px,
+    disparity_max_px,
+    lr_error_abs_threshold_px,
+    lr_error_relative_threshold,
+):
+    threshold = torch.maximum(
+        residual.new_tensor(lr_error_abs_threshold_px),
+        float(lr_error_relative_threshold) * disparity,
+    )
+    return (
+        base_valid
+        & torch.isfinite(disparity)
+        & torch.isfinite(residual)
+        & (disparity >= float(disparity_min_px))
+        & (disparity <= float(disparity_max_px))
+        & (residual <= threshold)
+    )
+
+
 class OnlineFoundationGTCallback(Callback):
     """Generate native FoundationStereo targets for stereo-only batches."""
 
@@ -770,9 +832,12 @@ class OnlineFoundationGTCallback(Callback):
             if self.backend == "las2_h"
             else args.foundation_stereo_valid_iters
         )
-        cache_provenance = {
+        self.cache_provenance = {
             "schema": CACHE_SCHEMA,
             "backend": self.backend,
+            "source_sha": (
+                args.las2_h_source_sha if self.backend == "las2_h" else None
+            ),
             "checkpoint_sha256": self.teacher_checkpoint_sha256,
             "valid_iters": self.teacher_valid_iters,
             "engine_sha256": getattr(
@@ -781,23 +846,25 @@ class OnlineFoundationGTCallback(Callback):
             "engine_manifest_sha256": getattr(
                 args, "foundation_stereo_engine_manifest_sha256", None
             ),
+            "single_frame_source_index": int(args.single_frame_source_index),
+            "disparity_min_px": float(args.stereo_disparity_min_px),
+            "disparity_max_px": float(args.stereo_disparity_max_px),
+            "lr_error_abs_threshold_px": float(
+                args.stereo_lr_error_abs_threshold_px
+            ),
+            "lr_error_relative_threshold": float(
+                args.stereo_lr_error_relative_threshold
+            ),
         }
         self.cache_namespace = hashlib.sha256(
             json.dumps(
-                cache_provenance, sort_keys=True, separators=(",", ":")
+                self.cache_provenance, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest()
 
     @property
     def state_key(self):
-        return (
-            f"{self.__class__.__qualname__}:"
-            f"{self.backend}:"
-            f"{getattr(self.args, 'las2_h_checkpoint_sha256', None) if self.backend == 'las2_h' else self.args.foundation_stereo_checkpoint_sha256}:"
-            f"{getattr(self.args, 'las2_h_valid_iters', None) if self.backend == 'las2_h' else self.args.foundation_stereo_valid_iters}:"
-            f"{getattr(self.args, 'foundation_stereo_engine_sha256', None)}:"
-            f"{getattr(self.args, 'foundation_stereo_engine_manifest_sha256', None)}"
-        )
+        return f"{self.__class__.__qualname__}:{self.cache_namespace}"
 
     def state_dict(self):
         return {}
@@ -832,6 +899,7 @@ class OnlineFoundationGTCallback(Callback):
                 self.args, "foundation_stereo_engine_manifest_sha256", None
             ),
             las2_h_repo=getattr(self.args, "las2_h_repo", None),
+            las2_h_source_sha=getattr(self.args, "las2_h_source_sha", None),
             las2_h_checkpoint=getattr(self.args, "las2_h_checkpoint", None),
             las2_h_checkpoint_sha256=getattr(
                 self.args, "las2_h_checkpoint_sha256", None
@@ -867,6 +935,7 @@ class OnlineFoundationGTCallback(Callback):
             "target_representation": "pixel_disparity_px",
             "tensor_shape": [3, 1, expected_time, 256, 256],
             "backend": self.backend,
+            "source_sha": self.cache_provenance["source_sha"],
             "checkpoint_sha256": self.teacher_checkpoint_sha256,
             "valid_iters": self.teacher_valid_iters,
             "engine_sha256": getattr(
@@ -875,6 +944,17 @@ class OnlineFoundationGTCallback(Callback):
             "engine_manifest_sha256": getattr(
                 self.args, "foundation_stereo_engine_manifest_sha256", None
             ),
+            "single_frame_source_index": self.cache_provenance[
+                "single_frame_source_index"
+            ],
+            "disparity_min_px": self.cache_provenance["disparity_min_px"],
+            "disparity_max_px": self.cache_provenance["disparity_max_px"],
+            "lr_error_abs_threshold_px": self.cache_provenance[
+                "lr_error_abs_threshold_px"
+            ],
+            "lr_error_relative_threshold": self.cache_provenance[
+                "lr_error_relative_threshold"
+            ],
             "bidirectional": True,
             "lr_consistency": True,
             "temporal_mode": temporal_mode,
@@ -980,18 +1060,19 @@ class OnlineFoundationGTCallback(Callback):
             raise ValueError(f"unsupported temporal mode {temporal_mode!r}")
         if not self.cache_enabled:
             disparity, residual, base_valid = self.teacher.infer(batch["video"])
-            threshold = torch.maximum(
-                residual.new_tensor(self.args.stereo_lr_error_abs_threshold_px),
-                self.args.stereo_lr_error_relative_threshold * disparity,
-            )
             batch["disparity"] = disparity
-            batch["valid_mask"] = (
-                base_valid
-                & torch.isfinite(disparity)
-                & torch.isfinite(residual)
-                & (disparity >= self.args.stereo_disparity_min_px)
-                & (disparity <= self.args.stereo_disparity_max_px)
-                & (residual <= threshold)
+            batch["valid_mask"] = stereo_supervision_valid_mask(
+                disparity,
+                residual,
+                base_valid,
+                disparity_min_px=self.args.stereo_disparity_min_px,
+                disparity_max_px=self.args.stereo_disparity_max_px,
+                lr_error_abs_threshold_px=(
+                    self.args.stereo_lr_error_abs_threshold_px
+                ),
+                lr_error_relative_threshold=(
+                    self.args.stereo_lr_error_relative_threshold
+                ),
             )
             return int(batch["video"].shape[0])
 
@@ -1014,17 +1095,18 @@ class OnlineFoundationGTCallback(Callback):
             )
             video = batch["video"].index_select(0, missing_tensor)
             disparity, residual, base_valid = self.teacher.infer(video)
-            threshold = torch.maximum(
-                residual.new_tensor(self.args.stereo_lr_error_abs_threshold_px),
-                self.args.stereo_lr_error_relative_threshold * disparity,
-            )
-            valid = (
-                base_valid
-                & torch.isfinite(disparity)
-                & torch.isfinite(residual)
-                & (disparity >= self.args.stereo_disparity_min_px)
-                & (disparity <= self.args.stereo_disparity_max_px)
-                & (residual <= threshold)
+            valid = stereo_supervision_valid_mask(
+                disparity,
+                residual,
+                base_valid,
+                disparity_min_px=self.args.stereo_disparity_min_px,
+                disparity_max_px=self.args.stereo_disparity_max_px,
+                lr_error_abs_threshold_px=(
+                    self.args.stereo_lr_error_abs_threshold_px
+                ),
+                lr_error_relative_threshold=(
+                    self.args.stereo_lr_error_relative_threshold
+                ),
             )
             for output_index, batch_index in enumerate(missing):
                 item = (
@@ -1100,34 +1182,17 @@ class DepthAnything3OnlineTeacher:
         process_res=504,
         process_res_method="upper_bound_resize",
     ):
-        _require_git_sha(source_sha, "DA3 source SHA")
-        _require_sha256(checkpoint_sha256, "DA3 checkpoint SHA256")
-        self.repo = Path(repo).expanduser().resolve()
-        self.checkpoint = Path(checkpoint).expanduser().resolve()
+        self.repo, self.checkpoint = validate_git_teacher_assets(
+            repo,
+            source_sha,
+            checkpoint,
+            checkpoint_sha256,
+            label="DA3",
+            checkpoint_is_directory=True,
+        )
         self.device = torch.device(device)
         self.process_res = int(process_res)
         self.process_res_method = str(process_res_method)
-        if not self.repo.is_dir() or not self.checkpoint.is_dir():
-            raise FileNotFoundError("DA3 repo/checkpoint directory is missing")
-        actual_source_sha = subprocess.run(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if actual_source_sha != source_sha:
-            raise ValueError("DA3 source SHA mismatch")
-        source_status = subprocess.run(
-            ["git", "-C", str(self.repo), "status", "--porcelain"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        if source_status.strip():
-            raise ValueError("DA3 source repository is dirty")
-        weights = self.checkpoint / "model.safetensors"
-        if not weights.is_file() or sha256_file(weights) != checkpoint_sha256:
-            raise ValueError("DA3 checkpoint SHA256 mismatch")
         source_root = self.repo / "src"
         if str(source_root) not in sys.path:
             sys.path.insert(0, str(source_root))
@@ -1157,6 +1222,88 @@ class DepthAnything3OnlineTeacher:
         return depth, confidence
 
 
+def _uniform_batch_value(values, name):
+    if isinstance(values, str):
+        values = (values,)
+    values = list(values)
+    if not values or any(value != values[0] for value in values):
+        raise ValueError(f"batch must contain one {name}")
+    return values[0]
+
+
+def attach_da3_student_targets(
+    batch,
+    native_depth,
+    native_confidence,
+    *,
+    process_res,
+    process_res_method,
+):
+    """Map native DA3 outputs onto the formal mono Student tensor contract."""
+
+    eye_mode = _uniform_batch_value(batch.get("eye_mode", ()), "eye mode")
+    if eye_mode != "mono":
+        raise ValueError("DA3 targets require eye_mode=mono")
+    if _uniform_batch_value(batch.get("teacher_kind", ()), "teacher kind") != "da3":
+        raise ValueError("mono batch must declare teacher_kind=da3")
+    temporal_mode = _uniform_batch_value(
+        batch.get("temporal_mode", ()), "temporal mode"
+    )
+    expected_frames = 1 if temporal_mode == "single_frame" else 4
+    video = batch.get("video")
+    if (
+        video is None
+        or video.ndim != 7
+        or tuple(video.shape[1:4]) != (1, 1, 3)
+        or int(video.shape[4]) != expected_frames
+    ):
+        raise ValueError(
+            "mono video must use [B,1,1,3,T,H,W] with T matching temporal mode"
+        )
+    da3_images = batch.get("da3_images")
+    if da3_images is None or da3_images.ndim != 5:
+        raise ValueError("mono batch must provide DA3 processed images")
+    geometry = GeometryMapping.from_collated(
+        batch.get("geometry_mapping"), int(da3_images.shape[0])
+    )
+    expected_input_shape = (
+        int(da3_images.shape[0]),
+        expected_frames,
+        3,
+        *geometry.da3_processed_hw,
+    )
+    if tuple(da3_images.shape) != expected_input_shape:
+        raise ValueError("mono DA3 tensor disagrees with geometry metadata")
+    if geometry.da3_process_res != int(process_res) or (
+        geometry.da3_process_res_method != str(process_res_method)
+    ):
+        raise ValueError("batch geometry disagrees with DA3 teacher settings")
+    expected_output_shape = (
+        int(da3_images.shape[0]),
+        expected_frames,
+        *geometry.da3_processed_hw,
+    )
+    if tuple(native_depth.shape) != expected_output_shape or tuple(
+        native_confidence.shape
+    ) != expected_output_shape:
+        raise ValueError("native DA3 output disagrees with mono batch contract")
+
+    depth = geometry.map_da3_output_to_student(native_depth).unsqueeze(1)
+    confidence = geometry.map_da3_output_to_student(native_confidence).unsqueeze(1)
+    non_padding = batch.get("non_padding_mask")
+    if non_padding is None or non_padding.shape != depth.shape:
+        raise ValueError("mono non-padding mask shape mismatch")
+    valid = torch.isfinite(depth) & (depth > 0) & non_padding
+    if not torch.isfinite(confidence.masked_select(non_padding)).all():
+        raise ValueError("DA3 confidence contains NaN/Inf in image content")
+    if torch.any(valid.sum(dim=(2, 3, 4, 5)) == 0):
+        raise ValueError("DA3 produced a mono sample with no valid depth")
+    batch["da3_relative_depth"] = depth
+    batch["da3_confidence"] = confidence
+    batch["valid_mask"] = valid
+    return depth, confidence, valid
+
+
 class OnlineDepthAnything3GTCallback(Callback):
     """Attach native DA3 relative depth to homogeneous mono batches."""
 
@@ -1173,11 +1320,12 @@ class OnlineDepthAnything3GTCallback(Callback):
         if self.cache_enabled and self.cache_root is None:
             raise ValueError("online DA3 cache requires --online_gt_cache_root")
         provenance = {
-            "schema": "da3-processed-relative-depth-cache-v2",
+            "schema": "da3-processed-relative-depth-cache-v3",
             "source_sha": args.da3_source_sha,
             "checkpoint_sha256": args.da3_checkpoint_sha256,
             "process_res": args.da3_process_res,
             "process_res_method": args.da3_process_res_method,
+            "single_frame_source_index": int(args.single_frame_source_index),
         }
         self.cache_namespace = hashlib.sha256(
             json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()
@@ -1190,7 +1338,8 @@ class OnlineDepthAnything3GTCallback(Callback):
             f"{self.args.da3_source_sha}:"
             f"{self.args.da3_checkpoint_sha256}:"
             f"{self.args.da3_process_res}:"
-            f"{self.args.da3_process_res_method}"
+            f"{self.args.da3_process_res_method}:"
+            f"{self.args.single_frame_source_index}"
         )
 
     def state_dict(self):
@@ -1229,7 +1378,7 @@ class OnlineDepthAnything3GTCallback(Callback):
     ):
         frames = 1 if temporal_mode == "single_frame" else 4
         return {
-            "schema": "da3-processed-relative-depth-cache-v2",
+            "schema": "da3-processed-relative-depth-cache-v3",
             "sample_id": sample_id,
             "contract_sha256": contract_sha256,
             "teacher_family": "depth_anything_3_base",
@@ -1237,6 +1386,9 @@ class OnlineDepthAnything3GTCallback(Callback):
             "checkpoint_sha256": self.args.da3_checkpoint_sha256,
             "process_res": self.args.da3_process_res,
             "process_res_method": self.args.da3_process_res_method,
+            "single_frame_source_index": int(
+                self.args.single_frame_source_index
+            ),
             "target_representation": "da3_processed_relative_depth",
             "tensor_shape": [frames, *geometry.da3_processed_hw],
             "geometry_mapping": geometry.to_metadata(),
@@ -1366,12 +1518,7 @@ class OnlineDepthAnything3GTCallback(Callback):
 
     @staticmethod
     def _uniform(values, name):
-        if isinstance(values, str):
-            values = (values,)
-        values = list(values)
-        if not values or any(value != values[0] for value in values):
-            raise ValueError(f"DA3 batch must contain one {name}")
-        return values[0]
+        return _uniform_batch_value(values, f"DA3 {name}")
 
     def _prepare_batch(self, pl_module, batch, prefix):
         eye_mode = self._uniform(batch.get("eye_mode", ()), "eye mode")
@@ -1384,45 +1531,25 @@ class OnlineDepthAnything3GTCallback(Callback):
         temporal_mode = self._uniform(
             batch.get("temporal_mode", ()), "temporal mode"
         )
-        expected_frames = 1 if temporal_mode == "single_frame" else 4
         da3_images = batch.get("da3_images")
         if da3_images is None or da3_images.ndim != 5:
             raise ValueError("mono batch must provide DA3 processed images")
         geometry = GeometryMapping.from_collated(
             batch.get("geometry_mapping"), int(da3_images.shape[0])
         )
-        expected_shape = (
-            int(da3_images.shape[0]),
-            expected_frames,
-            3,
-            *geometry.da3_processed_hw,
-        )
-        if tuple(da3_images.shape) != expected_shape:
-            raise ValueError("mono DA3 tensor disagrees with geometry metadata")
-        if geometry.da3_process_res != self.teacher.process_res or (
-            geometry.da3_process_res_method != self.teacher.process_res_method
-        ):
-            raise ValueError("batch geometry disagrees with DA3 teacher settings")
         started = time.perf_counter()
         with profile_region("stereo/online_gt/da3_teacher"):
             native_depth, native_confidence, generated_count = self._native_targets(
                 batch, temporal_mode, geometry
             )
-            depth = geometry.map_da3_output_to_student(native_depth)
-            confidence = geometry.map_da3_output_to_student(native_confidence)
-        depth = depth.unsqueeze(1)
-        confidence = confidence.unsqueeze(1)
-        non_padding = batch.get("non_padding_mask")
-        if non_padding is None or non_padding.shape != depth.shape:
-            raise ValueError("mono non-padding mask shape mismatch")
-        valid = torch.isfinite(depth) & (depth > 0) & non_padding
-        if not torch.isfinite(confidence.masked_select(non_padding)).all():
-            raise ValueError("DA3 confidence contains NaN/Inf in image content")
-        if torch.any(valid.sum(dim=(2, 3, 4, 5)) == 0):
-            raise ValueError("DA3 produced a mono sample with no valid depth")
-        batch["da3_relative_depth"] = depth
-        batch["da3_confidence"] = confidence
-        batch["valid_mask"] = valid
+            depth, confidence, _ = attach_da3_student_targets(
+                batch,
+                native_depth,
+                native_confidence,
+                process_res=self.teacher.process_res,
+                process_res_method=self.teacher.process_res_method,
+            )
+        non_padding = batch["non_padding_mask"]
         if depth.is_cuda:
             torch.cuda.synchronize(depth.device)
         seconds = time.perf_counter() - started

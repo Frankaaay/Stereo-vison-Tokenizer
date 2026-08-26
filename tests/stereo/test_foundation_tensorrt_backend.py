@@ -282,12 +282,20 @@ class FoundationTensorRTBackendTest(unittest.TestCase):
                     foundation_stereo_backend=backend,
                     foundation_stereo_checkpoint_sha256=CHECKPOINT_SHA256,
                     foundation_stereo_valid_iters=32,
+                    las2_h_checkpoint_sha256=CHECKPOINT_SHA256,
+                    las2_h_valid_iters=4,
+                    las2_h_source_sha="d" * 40,
                     foundation_stereo_engine_sha256=(
                         "a" * 64 if backend == "tensorrt" else None
                     ),
                     foundation_stereo_engine_manifest_sha256=(
                         "b" * 64 if backend == "tensorrt" else None
                     ),
+                    single_frame_source_index=0,
+                    stereo_disparity_min_px=0.5,
+                    stereo_disparity_max_px=112.0,
+                    stereo_lr_error_abs_threshold_px=1.0,
+                    stereo_lr_error_relative_threshold=0.05,
                 )
 
             pytorch = OnlineFoundationGTCallback(args("pytorch"))
@@ -304,6 +312,29 @@ class FoundationTensorRTBackendTest(unittest.TestCase):
             self.assertEqual(metadata["engine_sha256"], "a" * 64)
             self.assertEqual(metadata["target_representation"], "pixel_disparity_px")
             self.assertEqual(metadata["tensor_shape"], [3, 1, 4, 256, 256])
+            self.assertEqual(metadata["single_frame_source_index"], 0)
+            self.assertEqual(metadata["disparity_min_px"], 0.5)
+            self.assertEqual(metadata["lr_error_relative_threshold"], 0.05)
+
+            changed_source_frame = args("pytorch")
+            changed_source_frame.single_frame_source_index = 2
+            changed_threshold = args("pytorch")
+            changed_threshold.stereo_lr_error_relative_threshold = 0.1
+            self.assertNotEqual(
+                pytorch.cache_namespace,
+                OnlineFoundationGTCallback(changed_source_frame).cache_namespace,
+            )
+            self.assertNotEqual(
+                pytorch.cache_namespace,
+                OnlineFoundationGTCallback(changed_threshold).cache_namespace,
+            )
+            las2 = OnlineFoundationGTCallback(args("las2_h"))
+            changed_las2_source = args("las2_h")
+            changed_las2_source.las2_h_source_sha = "e" * 40
+            self.assertNotEqual(
+                las2.cache_namespace,
+                OnlineFoundationGTCallback(changed_las2_source).cache_namespace,
+            )
 
     def test_runner_source_has_no_cpu_or_numpy_data_path(self):
         source = inspect.getsource(FoundationStereoTensorRTRunner)

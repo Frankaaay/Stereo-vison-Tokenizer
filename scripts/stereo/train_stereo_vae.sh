@@ -40,12 +40,14 @@ FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
 FOUNDATION_BACKEND_ARGS=()
 if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
   : "${LAS2_H_REPO:?set the LiteAnyStereo repository}"
+  : "${LAS2_H_SOURCE_SHA:?set the full LiteAnyStereo source Git SHA}"
   : "${LAS2_H_CHECKPOINT:?set the LAS2-H checkpoint}"
   : "${LAS2_H_CHECKPOINT_SHA256:?set the LAS2-H checkpoint SHA256}"
   LAS2_H_VALID_ITERS="${LAS2_H_VALID_ITERS:-4}"
   LAS2_H_MAX_DISP="${LAS2_H_MAX_DISP:-192}"
   FOUNDATION_BACKEND_ARGS=(
     --las2_h_repo "${LAS2_H_REPO}"
+    --las2_h_source_sha "${LAS2_H_SOURCE_SHA}"
     --las2_h_checkpoint "${LAS2_H_CHECKPOINT}"
     --las2_h_checkpoint_sha256 "${LAS2_H_CHECKPOINT_SHA256}"
     --las2_h_valid_iters "${LAS2_H_VALID_ITERS}"

@@ -11,7 +11,7 @@ from stereo_tokenizer.data import HyMonoSmokeDataset
 
 
 class HyMonoSmokeDatasetTest(unittest.TestCase):
-    def _dataset(self, root: Path):
+    def _dataset(self, root: Path, *, source_index=0):
         rgb_root = root / "rgb"
         rgb_root.mkdir()
         cache_path = rgb_root / "sample.npz"
@@ -58,7 +58,11 @@ class HyMonoSmokeDatasetTest(unittest.TestCase):
             "".join(json.dumps(record) + "\n" for record in records),
             encoding="utf-8",
         )
-        return HyMonoSmokeDataset(manifest, root)
+        return HyMonoSmokeDataset(
+            manifest,
+            root,
+            single_frame_source_index=source_index,
+        )
 
     def test_single_and_four_modes_keep_true_mono_shapes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +85,18 @@ class HyMonoSmokeDatasetTest(unittest.TestCase):
         self.assertEqual(single["mode_id"], "mono/single_frame")
         self.assertEqual(four["mode_id"], "mono/four_frame")
         self.assertTrue(torch.equal(single["frame_index"], torch.tensor([10])))
+
+    def test_single_mode_uses_configured_source_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = self._dataset(Path(directory), source_index=2)
+            single = dataset.get_mode_item(0, "single_frame")
+
+        self.assertTrue(torch.equal(single["frame_index"], torch.tensor([16])))
+        content = single["video"][0, 0, :, 0, 55:200]
+        torch.testing.assert_close(
+            content,
+            torch.full_like(content, 60.0 / 255.0 - 0.5),
+        )
 
 
 if __name__ == "__main__":

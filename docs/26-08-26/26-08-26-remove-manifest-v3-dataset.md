@@ -42,15 +42,14 @@ RGB cache, GT cache, checkpoint, or training output.
 The old standalone step profiler referenced by the handoff was already removed
 in commit `81ccce7`; no additional profiler deletion was needed here.
 
-## Cache provenance limitation
+## Cache provenance follow-up
 
-The retained online cache namespace records teacher backend/checkpoint/iteration
-provenance, but its current key does not encode every target-semantic input. In
-particular, `single_frame_source_index`, disparity range, and LR-consistency
-thresholds are not all part of the cache key. Existing cache contents therefore
-must only be reused with the exact configuration that created them. Expanding
-the schema would invalidate the current namespace and is intentionally outside
-this route-removal change.
+Follow-up final review replaced the retained v3 cache contract with
+`stereo-online-foundation-gt-v4`. The namespace and metadata now encode LAS2
+source SHA, `single_frame_source_index`, disparity range, and LR-consistency
+thresholds in addition to teacher/backend artifacts. Old v3 cache contents are
+intentionally not reused. DA3 cache also moved from v2 to v3 so its single-frame
+source index is part of provenance. See `26-08-26-final-review-p1-fixes.md`.
 
 No `cache_only` mode, lazy-teacher lifecycle, new public interface, or data
 format was introduced.

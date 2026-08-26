@@ -39,19 +39,40 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("metric_depth", source)
         self.assertIn('choices=["train", "val", "test"]', source)
         self.assertIn('choices=["single_frame", "four_frame", "both"]', source)
+        self.assertIn('choices=["mono", "stereo", "both"]', source)
+        self.assertIn("from stereo_tokenizer.mode_sampling import MODE_IDS", source)
         self.assertIn("FoundationStereoOnlineTeacher", source)
+        self.assertIn("DepthAnything3OnlineTeacher", source)
+        self.assertIn("HyMonoDataset", source)
+        self.assertIn("--mono_eval_manifest", source)
+        self.assertIn("relative_target_from_da3(", source)
+        self.assertIn("_exact_mono_rank_indices", source)
         self.assertIn('choices=("las2_h", "pytorch", "tensorrt")', source)
         self.assertNotIn("stereo_data_backend", source)
         self.assertNotIn("stereo_train_manifest", source)
         self.assertNotIn("stereo_val_manifest", source)
         self.assertIn("_exact_lerobot_rank_indices", source)
         self.assertIn("dist.all_reduce", source)
-        self.assertIn("metrics[\"sample_count\"] != expected", source)
+        self.assertIn("metrics[\"sample_count\"] != len(dataset)", source)
         self.assertIn("save_case_visualization", source)
         self.assertIn("save_depth_case_visualization", source)
         self.assertIn('depth_filename = f"depth-case-{slot:02d}.png"', source)
-        self.assertIn('"depth_file": depth_filename', source)
+        self.assertIn('"depth_file": f"{eye_mode}/{depth_filename}"', source)
+        self.assertIn("def evaluate_eye_mode(", source)
+        main_source = source[source.index("def main():") :]
+        self.assertLess(
+            main_source.index("preflight_teacher_assets(args, eye_modes)"),
+            main_source.index("initialize_distributed(args)"),
+        )
+        self.assertLess(
+            main_source.index("build_eval_dataset(args, eye_mode)"),
+            main_source.index("initialize_distributed(args)"),
+        )
+        self.assertNotIn(
+            "visualizations require --eval_temporal_mode=both", source
+        )
         self.assertIn("fixed_episode_subset_indices", source)
+        self.assertIn("fixed_eval_case_indices", source)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):
         source = (
@@ -74,6 +95,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             '--single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}"',
             source,
         )
+        self.assertIn("${LAS2_H_SOURCE_SHA:?", source)
+        self.assertIn('--las2_h_source_sha "${LAS2_H_SOURCE_SHA}"', source)
         self.assertNotIn("single_frame_loss_weight", source)
         self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--use_vae", source)
@@ -156,6 +179,12 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn('os.environ.get("LOCAL_RANK", "0")', train)
         self.assertIn("profile_memory=True", train)
         self.assertIn("record_shapes=True", train)
+        self.assertNotIn('torch.__version__ >= "2.1.0"', attention)
+        self.assertIn(
+            "dropout_p=self.p_dropout if self.training else 0.0",
+            attention,
+        )
+        self.assertIn("sdpa_mask = sdpa_mask.masked_fill(", attention)
         self.assertIn("TORCH_PROFILE_OUTPUT_DIR", launcher)
         callbacks = (
             ROOT / "stereo_tokenizer" / "modules" / "callbacks.py"

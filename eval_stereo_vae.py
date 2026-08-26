@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from argparse import Namespace
@@ -15,19 +16,27 @@ from torch.utils.data import default_collate
 from tqdm import tqdm
 
 from stereo_tokenizer import StereoVAE
-from stereo_tokenizer.data import StereoDataModule
+from stereo_tokenizer.data import HyMonoDataset, StereoDataModule
 from stereo_tokenizer.lerobot_data import fixed_episode_subset_indices
+from stereo_tokenizer.mode_sampling import MODE_IDS
 from stereo_tokenizer.modules.relative_depth import (
     relative_prediction_from_raw,
+    relative_target_from_da3,
     relative_target_from_foundation_stereo,
 )
 from stereo_tokenizer.online_gt import (
+    DepthAnything3OnlineTeacher,
     FoundationStereoOnlineTeacher,
+    attach_da3_student_targets,
+    sha256_file,
+    stereo_supervision_valid_mask,
+    validate_git_teacher_assets,
     validate_tensorrt_engine_assets,
 )
 
 
-VIEW_NAMES = ("head", "lefthand", "righthand")
+STEREO_VIEW_NAMES = ("head", "lefthand", "righthand")
+MONO_VIEW_NAMES = ("cam_high",)
 CHECKPOINT_SEMANTIC_FIELDS = (
     "resolution",
     "image_channels",
@@ -54,7 +63,6 @@ CHECKPOINT_SEMANTIC_FIELDS = (
     "ff_mult",
     "stereo_num_views",
     "stereo_num_frames",
-    "single_frame_source_index",
     "stereo_search_radii",
     "stereo_search_direction",
     "relative_depth_epsilon",
@@ -63,6 +71,35 @@ CHECKPOINT_SEMANTIC_FIELDS = (
     "stereo_lr_error_abs_threshold_px",
     "stereo_lr_error_relative_threshold",
 )
+
+
+def requested_eye_modes(args):
+    if args.eval_eye_mode == "both":
+        return ("mono", "stereo")
+    return (args.eval_eye_mode,)
+
+
+def requested_temporal_modes(args):
+    if args.eval_temporal_mode == "both":
+        return ("single_frame", "four_frame")
+    return (args.eval_temporal_mode,)
+
+
+def requested_mode_ids(args):
+    eyes = set(requested_eye_modes(args))
+    temporal_modes = set(requested_temporal_modes(args))
+    mode_ids = tuple(
+        mode_id
+        for mode_id in MODE_IDS
+        if mode_id.split("/", maxsplit=1)[0] in eyes
+        and mode_id.split("/", maxsplit=1)[1] in temporal_modes
+    )
+    expected_count = len(eyes) * len(temporal_modes)
+    if len(mode_ids) != expected_count or any(
+        mode_id not in MODE_IDS for mode_id in mode_ids
+    ):
+        raise ValueError("requested evaluation modes do not match MODE_IDS")
+    return mode_ids
 
 
 def build_parser():
@@ -107,15 +144,32 @@ def build_parser():
         "--foundation_stereo_engine_manifest_sha256", type=str, default=None
     )
     parser.add_argument("--las2_h_repo", type=str, default=None)
+    parser.add_argument("--las2_h_source_sha", type=str, default=None)
     parser.add_argument("--las2_h_checkpoint", type=str, default=None)
     parser.add_argument("--las2_h_checkpoint_sha256", type=str, default=None)
     parser.add_argument("--las2_h_valid_iters", type=int, default=4)
     parser.add_argument("--las2_h_max_disp", type=int, default=192)
+    parser.add_argument("--mono_eval_manifest", type=str, default=None)
+    parser.add_argument("--da3_repo", type=str, default=None)
+    parser.add_argument("--da3_source_sha", type=str, default=None)
+    parser.add_argument("--da3_checkpoint", type=str, default=None)
+    parser.add_argument("--da3_checkpoint_sha256", type=str, default=None)
+    parser.add_argument("--da3_process_res", type=int, default=504)
+    parser.add_argument(
+        "--da3_process_res_method",
+        choices=("upper_bound_resize",),
+        default="upper_bound_resize",
+    )
+    parser.add_argument(
+        "--da3_confidence_mask_mode",
+        choices=("finite_positive_non_padding",),
+        default="finite_positive_non_padding",
+    )
     parser.add_argument("--visualization_dir", type=Path, default=None)
     parser.add_argument("--num_visualizations", type=int, default=0)
     parser.add_argument(
         "--eval_eye_mode",
-        choices=["mono", "stereo"],
+        choices=["mono", "stereo", "both"],
         default="stereo",
     )
     parser.add_argument(
@@ -127,95 +181,136 @@ def build_parser():
 
 
 def validate_args(args):
-    geometry = {
-        "stereo_disparity_min_px": args.stereo_disparity_min_px,
-        "stereo_disparity_max_px": args.stereo_disparity_max_px,
-        "stereo_lr_error_abs_threshold_px": (
-            args.stereo_lr_error_abs_threshold_px
-        ),
-        "stereo_lr_error_relative_threshold": (
-            args.stereo_lr_error_relative_threshold
-        ),
-    }
-    missing_geometry = [name for name, value in geometry.items() if value is None]
-    if missing_geometry:
-        raise ValueError(
-            "evaluation requires " + ", ".join(missing_geometry)
+    requested_mode_ids(args)
+    eye_modes = requested_eye_modes(args)
+    if "stereo" in eye_modes:
+        geometry = {
+            "stereo_disparity_min_px": args.stereo_disparity_min_px,
+            "stereo_disparity_max_px": args.stereo_disparity_max_px,
+            "stereo_lr_error_abs_threshold_px": (
+                args.stereo_lr_error_abs_threshold_px
+            ),
+            "stereo_lr_error_relative_threshold": (
+                args.stereo_lr_error_relative_threshold
+            ),
+        }
+        missing_geometry = [
+            name for name, value in geometry.items() if value is None
+        ]
+        if missing_geometry:
+            raise ValueError(
+                "stereo evaluation requires " + ", ".join(missing_geometry)
+            )
+        if not 0 <= args.stereo_disparity_min_px < args.stereo_disparity_max_px:
+            raise ValueError("invalid disparity supervision range")
+        if args.stereo_lr_error_abs_threshold_px < 0:
+            raise ValueError("absolute LR threshold must be non-negative")
+        if args.stereo_lr_error_relative_threshold < 0:
+            raise ValueError("relative LR threshold must be non-negative")
+    if "mono" in eye_modes:
+        required = {
+            "mono_eval_manifest": args.mono_eval_manifest,
+            "mono_cache_root": args.mono_cache_root,
+            "da3_repo": args.da3_repo,
+            "da3_source_sha": args.da3_source_sha,
+            "da3_checkpoint": args.da3_checkpoint,
+            "da3_checkpoint_sha256": args.da3_checkpoint_sha256,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError("mono DA3 evaluation requires " + ", ".join(missing))
+        for name, value, length in (
+            ("da3_source_sha", args.da3_source_sha, 40),
+            ("da3_checkpoint_sha256", args.da3_checkpoint_sha256, 64),
+        ):
+            if len(value) != length:
+                raise ValueError(f"{name} must be a full hexadecimal digest")
+            try:
+                int(value, 16)
+            except ValueError as error:
+                raise ValueError(f"{name} must be hexadecimal") from error
+        if args.da3_process_res != 504:
+            raise ValueError("DA3-BASE evaluation process resolution is frozen to 504")
+        if args.da3_confidence_mask_mode != "finite_positive_non_padding":
+            raise ValueError("formal DA3 evaluation forbids confidence thresholding")
+    if "stereo" in eye_modes:
+        teacher_sha256 = (
+            args.las2_h_checkpoint_sha256
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
         )
-    if not 0 <= args.stereo_disparity_min_px < args.stereo_disparity_max_px:
-        raise ValueError("invalid disparity supervision range")
-    if args.stereo_lr_error_abs_threshold_px < 0:
-        raise ValueError("absolute LR threshold must be non-negative")
-    if args.stereo_lr_error_relative_threshold < 0:
-        raise ValueError("relative LR threshold must be non-negative")
-    teacher_sha256 = (
-        args.las2_h_checkpoint_sha256
-        if args.foundation_stereo_backend == "las2_h"
-        else args.foundation_stereo_checkpoint_sha256
-    )
-    required = {
-        "lerobot_episode_manifest": args.lerobot_episode_manifest,
-        "lerobot_dataset_root": args.lerobot_dataset_root,
-        "lerobot_rectification_audit_sha256": (
-            args.lerobot_rectification_audit_sha256
-        ),
-        "teacher_checkpoint_sha256": teacher_sha256,
-    }
-    if args.foundation_stereo_backend == "las2_h":
-        required.update(
-            {
-                "las2_h_repo": args.las2_h_repo,
-                "las2_h_checkpoint": args.las2_h_checkpoint,
-            }
-        )
-    elif args.foundation_stereo_backend == "pytorch":
-        required.update(
-            {
-                "foundation_stereo_repo": args.foundation_stereo_repo,
-                "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
-            }
-        )
-    else:
-        required.update(
-            {
-                "foundation_stereo_engine": args.foundation_stereo_engine,
-                "foundation_stereo_engine_sha256": (
-                    args.foundation_stereo_engine_sha256
-                ),
-                "foundation_stereo_engine_manifest": (
-                    args.foundation_stereo_engine_manifest
-                ),
-                "foundation_stereo_engine_manifest_sha256": (
-                    args.foundation_stereo_engine_manifest_sha256
-                ),
-            }
-        )
-    missing = [name for name, value in required.items() if not value]
-    if missing:
-        raise ValueError("LeRobot online evaluation requires " + ", ".join(missing))
-    if len(args.lerobot_rectification_audit_sha256) != 64:
-        raise ValueError("a full rectification audit SHA256 is required")
-    if len(teacher_sha256) != 64:
-        raise ValueError("a full online teacher checkpoint SHA256 is required")
-    if args.foundation_stereo_pair_microbatch < 1:
-        raise ValueError("FoundationStereo pair microbatch must be positive")
-    if args.foundation_stereo_backend == "las2_h":
-        if args.las2_h_valid_iters < 1:
-            raise ValueError("LAS2-H valid_iters must be positive")
-        if args.las2_h_max_disp != 192:
-            raise ValueError("LAS2-H max_disp is frozen to 192")
-    elif args.foundation_stereo_backend == "tensorrt":
-        if args.foundation_stereo_valid_iters != 32:
-            raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
-        if args.foundation_stereo_pair_microbatch > 48:
-            raise ValueError("TensorRT pair microbatch exceeds frozen max batch 48")
-        validate_tensorrt_engine_assets(
-            args.foundation_stereo_engine,
-            args.foundation_stereo_engine_sha256,
-            args.foundation_stereo_engine_manifest,
-            args.foundation_stereo_engine_manifest_sha256,
-            args.foundation_stereo_checkpoint_sha256,
-        )
+        required = {
+            "lerobot_episode_manifest": args.lerobot_episode_manifest,
+            "lerobot_dataset_root": args.lerobot_dataset_root,
+            "lerobot_rectification_audit_sha256": (
+                args.lerobot_rectification_audit_sha256
+            ),
+            "teacher_checkpoint_sha256": teacher_sha256,
+        }
+        if args.foundation_stereo_backend == "las2_h":
+            required.update(
+                {
+                    "las2_h_repo": args.las2_h_repo,
+                    "las2_h_source_sha": args.las2_h_source_sha,
+                    "las2_h_checkpoint": args.las2_h_checkpoint,
+                }
+            )
+        elif args.foundation_stereo_backend == "pytorch":
+            required.update(
+                {
+                    "foundation_stereo_repo": args.foundation_stereo_repo,
+                    "foundation_stereo_checkpoint": args.foundation_stereo_checkpoint,
+                }
+            )
+        else:
+            required.update(
+                {
+                    "foundation_stereo_engine": args.foundation_stereo_engine,
+                    "foundation_stereo_engine_sha256": (
+                        args.foundation_stereo_engine_sha256
+                    ),
+                    "foundation_stereo_engine_manifest": (
+                        args.foundation_stereo_engine_manifest
+                    ),
+                    "foundation_stereo_engine_manifest_sha256": (
+                        args.foundation_stereo_engine_manifest_sha256
+                    ),
+                }
+            )
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError(
+                "LeRobot online evaluation requires " + ", ".join(missing)
+            )
+        if len(args.lerobot_rectification_audit_sha256) != 64:
+            raise ValueError("a full rectification audit SHA256 is required")
+        if len(teacher_sha256) != 64:
+            raise ValueError("a full online teacher checkpoint SHA256 is required")
+        if args.foundation_stereo_pair_microbatch < 1:
+            raise ValueError("FoundationStereo pair microbatch must be positive")
+        if args.foundation_stereo_backend == "las2_h":
+            if len(args.las2_h_source_sha) != 40:
+                raise ValueError("LAS2-H requires a full source Git SHA")
+            try:
+                int(args.las2_h_source_sha, 16)
+            except ValueError as error:
+                raise ValueError("LAS2-H source SHA must be hexadecimal") from error
+            if args.las2_h_valid_iters < 1:
+                raise ValueError("LAS2-H valid_iters must be positive")
+            if args.las2_h_max_disp != 192:
+                raise ValueError("LAS2-H max_disp is frozen to 192")
+        elif args.foundation_stereo_backend == "tensorrt":
+            if args.foundation_stereo_valid_iters != 32:
+                raise ValueError("TensorRT FoundationStereo is frozen to 32 iterations")
+            if args.foundation_stereo_pair_microbatch > 48:
+                raise ValueError("TensorRT pair microbatch exceeds frozen max batch 48")
+            validate_tensorrt_engine_assets(
+                args.foundation_stereo_engine,
+                args.foundation_stereo_engine_sha256,
+                args.foundation_stereo_engine_manifest,
+                args.foundation_stereo_engine_manifest_sha256,
+                args.foundation_stereo_checkpoint_sha256,
+            )
     if args.max_batches is not None and args.max_batches <= 0:
         raise ValueError("--max_batches must be positive")
     if args.num_visualizations < 0:
@@ -232,6 +327,81 @@ def validate_args(args):
         raise RuntimeError(f"requested {args.device}, but CUDA is unavailable")
     if not 0 <= args.single_frame_source_index < args.stereo_num_frames:
         raise ValueError("--single_frame_source_index must be in [0, 3]")
+
+
+def preflight_teacher_assets(args, eye_modes):
+    """Validate requested teacher assets before model or CUDA initialization."""
+    if "mono" in eye_modes:
+        validate_git_teacher_assets(
+            args.da3_repo,
+            args.da3_source_sha,
+            args.da3_checkpoint,
+            args.da3_checkpoint_sha256,
+            label="DA3",
+            checkpoint_is_directory=True,
+        )
+    if "stereo" not in eye_modes:
+        return
+    backend = args.foundation_stereo_backend
+    if backend == "las2_h":
+        validate_git_teacher_assets(
+            args.las2_h_repo,
+            args.las2_h_source_sha,
+            args.las2_h_checkpoint,
+            args.las2_h_checkpoint_sha256,
+            label="LAS2-H",
+        )
+    elif backend == "pytorch":
+        repo = Path(args.foundation_stereo_repo).expanduser().resolve()
+        checkpoint = Path(args.foundation_stereo_checkpoint).expanduser().resolve()
+        if not repo.is_dir() or not checkpoint.is_file():
+            raise FileNotFoundError("FoundationStereo repo/checkpoint is missing")
+        if sha256_file(checkpoint) != args.foundation_stereo_checkpoint_sha256:
+            raise ValueError("FoundationStereo checkpoint SHA256 mismatch")
+
+
+def dataset_provenance(args, eye_mode, dataset):
+    if eye_mode == "mono":
+        return {
+            "manifest": str(dataset.manifest_path),
+            "cache_root": str(dataset.cache_root),
+            "sample_count": len(dataset),
+            "video_contract": "[B,1,1,3,T,H,W]",
+        }
+    return {
+        "manifest": str(dataset.manifest_path),
+        "dataset_root": str(dataset.dataset_root),
+        "split": args.eval_split,
+        "sample_count": len(dataset),
+        "rectification_audit_sha256": args.lerobot_rectification_audit_sha256,
+        "video_contract": "[B,3,2,3,T,H,W]",
+    }
+
+
+def teacher_provenance(args, eye_mode):
+    if eye_mode == "mono":
+        return {
+            "family": "depth_anything_3_base",
+            "source_sha": args.da3_source_sha,
+            "checkpoint_sha256": args.da3_checkpoint_sha256,
+            "process_res": args.da3_process_res,
+            "process_res_method": args.da3_process_res_method,
+            "confidence_mask_mode": args.da3_confidence_mask_mode,
+        }
+    return {
+        "family": "foundation_stereo",
+        "backend": args.foundation_stereo_backend,
+        "source_sha": (
+            args.las2_h_source_sha
+            if args.foundation_stereo_backend == "las2_h"
+            else None
+        ),
+        "checkpoint_sha256": (
+            args.las2_h_checkpoint_sha256
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
+        ),
+    }
 
 
 def _checkpoint_model_args(checkpoint, checkpoint_path):
@@ -318,9 +488,43 @@ def _exact_lerobot_rank_indices(dataset, rank, world_size):
     return indices
 
 
-def exact_eval_loader(data_module, args, rank, world_size):
-    dataset = data_module._dataset(False, split=args.eval_split)
-    indices = _exact_lerobot_rank_indices(dataset, rank, world_size)
+def _exact_mono_rank_indices(dataset, rank, world_size):
+    indices = list(range(rank, len(dataset), world_size))
+    if not indices:
+        raise ValueError(f"distributed evaluation rank {rank} received no samples")
+    return indices
+
+
+def build_eval_dataset(args, eye_mode):
+    if eye_mode == "mono":
+        return HyMonoDataset(
+            args.mono_eval_manifest,
+            args.mono_cache_root,
+            single_frame_source_index=args.single_frame_source_index,
+        )
+    if eye_mode == "stereo":
+        data_module = StereoDataModule(args, shuffle=False)
+        dataset = data_module._dataset(False, split=args.eval_split)
+        for record in dataset.records:
+            for video in record["videos"].values():
+                video_path = (
+                    dataset.dataset_root / video["relative_path"]
+                ).resolve()
+                if not video_path.is_relative_to(dataset.dataset_root):
+                    raise ValueError(f"video path escapes dataset root: {video_path}")
+                if not video_path.is_file():
+                    raise FileNotFoundError(video_path)
+        return dataset
+    raise ValueError(f"unsupported eye mode {eye_mode!r}")
+
+
+def exact_eval_loader(args, dataset, eye_mode, rank, world_size):
+    if eye_mode == "mono":
+        indices = _exact_mono_rank_indices(dataset, rank, world_size)
+    elif eye_mode == "stereo":
+        indices = _exact_lerobot_rank_indices(dataset, rank, world_size)
+    else:
+        raise ValueError(f"unsupported eye mode {eye_mode!r}")
     subset = torch_data.Subset(dataset, indices)
     loader = torch_data.DataLoader(
         subset,
@@ -332,10 +536,37 @@ def exact_eval_loader(data_module, args, rank, world_size):
         shuffle=False,
         drop_last=False,
     )
-    return loader, dataset
+    return loader
 
 
-def build_online_teacher(args, device):
+def fixed_eval_case_indices(dataset, count, seed, eye_mode):
+    if eye_mode == "stereo":
+        return fixed_episode_subset_indices(dataset, count, seed=seed)
+    if count < 1 or count > len(dataset):
+        raise ValueError(
+            f"fixed mono subset needs 1..{len(dataset)} samples, got {count}"
+        )
+    return sorted(
+        range(len(dataset)),
+        key=lambda index: hashlib.sha256(
+            f"{seed}:{dataset.records[index]['sample_id']}".encode("utf-8")
+        ).digest(),
+    )[:count]
+
+
+def build_online_teacher(args, eye_mode, device):
+    if eye_mode == "mono":
+        return DepthAnything3OnlineTeacher(
+            args.da3_repo,
+            args.da3_source_sha,
+            args.da3_checkpoint,
+            args.da3_checkpoint_sha256,
+            device=device,
+            process_res=args.da3_process_res,
+            process_res_method=args.da3_process_res_method,
+        )
+    if eye_mode != "stereo":
+        raise ValueError(f"unsupported eye mode {eye_mode!r}")
     backend = args.foundation_stereo_backend
     valid_iters = (
         args.las2_h_valid_iters
@@ -366,6 +597,7 @@ def build_online_teacher(args, device):
         engine_manifest=args.foundation_stereo_engine_manifest,
         engine_manifest_sha256=args.foundation_stereo_engine_manifest_sha256,
         las2_h_repo=args.las2_h_repo,
+        las2_h_source_sha=args.las2_h_source_sha,
         las2_h_checkpoint=args.las2_h_checkpoint,
         las2_h_checkpoint_sha256=args.las2_h_checkpoint_sha256,
         las2_h_valid_iters=args.las2_h_valid_iters,
@@ -373,35 +605,59 @@ def build_online_teacher(args, device):
     )
 
 
-def attach_online_targets(args, teacher, batch):
+def attach_online_targets(args, eye_mode, teacher, batch):
+    if eye_mode == "mono":
+        native_depth, native_confidence = teacher.infer_processed(
+            batch["da3_images"]
+        )
+        attach_da3_student_targets(
+            batch,
+            native_depth,
+            native_confidence,
+            process_res=args.da3_process_res,
+            process_res_method=args.da3_process_res_method,
+        )
+        return
+    if eye_mode != "stereo":
+        raise ValueError(f"unsupported eye mode {eye_mode!r}")
     disparity, residual, base_valid = teacher.infer(batch["video"])
-    threshold = torch.maximum(
-        residual.new_tensor(args.stereo_lr_error_abs_threshold_px),
-        args.stereo_lr_error_relative_threshold * disparity,
-    )
     batch["disparity"] = disparity
-    batch["valid_mask"] = (
-        base_valid
-        & torch.isfinite(disparity)
-        & torch.isfinite(residual)
-        & (disparity >= args.stereo_disparity_min_px)
-        & (disparity <= args.stereo_disparity_max_px)
-        & (residual <= threshold)
+    batch["valid_mask"] = stereo_supervision_valid_mask(
+        disparity,
+        residual,
+        base_valid,
+        disparity_min_px=args.stereo_disparity_min_px,
+        disparity_max_px=args.stereo_disparity_max_px,
+        lr_error_abs_threshold_px=args.stereo_lr_error_abs_threshold_px,
+        lr_error_relative_threshold=args.stereo_lr_error_relative_threshold,
     )
-
-
-def requested_temporal_modes(args):
-    if args.eval_temporal_mode == "both":
-        return ("four_frame", "single_frame")
-    return (args.eval_temporal_mode,)
-
 
 def batch_for_temporal_mode(batch, mode, source_index):
     if mode == "four_frame":
         return batch
     result = dict(batch)
-    for key in ("video", "disparity", "valid_mask"):
-        result[key] = batch[key][..., source_index : source_index + 1, :, :]
+    for key in (
+        "video",
+        "disparity",
+        "da3_relative_depth",
+        "da3_confidence",
+        "valid_mask",
+        "non_padding_mask",
+    ):
+        if key in batch:
+            result[key] = batch[key][..., source_index : source_index + 1, :, :]
+    if "da3_images" in batch:
+        result["da3_images"] = batch["da3_images"][
+            :, source_index : source_index + 1
+        ]
+    eye_modes = result.get("eye_mode", ())
+    if isinstance(eye_modes, str):
+        result["temporal_mode"] = "single_frame"
+        result["mode_id"] = f"{eye_modes}/single_frame"
+    else:
+        eye_modes = list(eye_modes)
+        result["temporal_mode"] = ["single_frame"] * len(eye_modes)
+        result["mode_id"] = [f"{eye_mode}/single_frame" for eye_mode in eye_modes]
     return result
 
 
@@ -462,41 +718,77 @@ def _robust_range(tensor, valid, low=0.02, high=0.98):
     return value_min, value_max
 
 
+def _batch_teacher_kind(batch):
+    values = batch.get("teacher_kind", ())
+    if isinstance(values, str):
+        values = (values,)
+    values = list(values)
+    if not values or any(value != values[0] for value in values):
+        raise ValueError("evaluation batch must contain one teacher kind")
+    return values[0]
+
+
+def _relative_target_from_batch(batch, relative_depth_epsilon):
+    teacher_kind = _batch_teacher_kind(batch)
+    if teacher_kind == "foundation_stereo":
+        return relative_target_from_foundation_stereo(
+            batch["disparity"],
+            batch["valid_mask"],
+            batch["fx"],
+            batch["baseline_m"],
+            epsilon=relative_depth_epsilon,
+        )
+    if teacher_kind == "da3":
+        return relative_target_from_da3(
+            batch["da3_relative_depth"],
+            batch["valid_mask"],
+            epsilon=relative_depth_epsilon,
+        )
+    raise ValueError(f"unsupported evaluation teacher kind {teacher_kind!r}")
+
+
 def save_depth_case_visualization(
-    output_path, batch, outputs, source_index, relative_depth_epsilon
+    output_path,
+    batch,
+    outputs,
+    source_index,
+    relative_depth_epsilon,
+    view_names,
 ):
     four = outputs.get("four_frame")
     single = outputs.get("single_frame")
-    if four is None or single is None:
-        raise ValueError("depth comparison requires both temporal modes")
+    if not outputs:
+        raise ValueError("no temporal output to visualize")
 
-    target = relative_target_from_foundation_stereo(
-        batch["disparity"],
-        batch["valid_mask"],
-        batch["fx"],
-        batch["baseline_m"],
-        epsilon=relative_depth_epsilon,
-    )
-    four_relative, _ = relative_prediction_from_raw(
-        four.raw_relative_log_depth, batch["valid_mask"]
-    )
-    single_batch = batch_for_temporal_mode(batch, "single_frame", source_index)
-    single_target = relative_target_from_foundation_stereo(
-        single_batch["disparity"],
-        single_batch["valid_mask"],
-        single_batch["fx"],
-        single_batch["baseline_m"],
-        epsilon=relative_depth_epsilon,
-    )
-    single_relative, _ = relative_prediction_from_raw(
-        single.raw_relative_log_depth, single_batch["valid_mask"]
-    )
+    target = None
+    four_relative = None
+    if four is not None:
+        target = _relative_target_from_batch(batch, relative_depth_epsilon)
+        four_relative, _ = relative_prediction_from_raw(
+            four.raw_relative_log_depth, batch["valid_mask"]
+        )
+    single_batch = None
+    single_target = None
+    single_relative = None
+    if single is not None:
+        single_batch = batch_for_temporal_mode(
+            batch, "single_frame", source_index
+        )
+        single_target = _relative_target_from_batch(
+            single_batch, relative_depth_epsilon
+        )
+        single_relative, _ = relative_prediction_from_raw(
+            single.raw_relative_log_depth, single_batch["valid_mask"]
+        )
 
     cell = 192
     label_width = 205
     header_height = 85
     columns = 4
-    rows = len(VIEW_NAMES) * 4
+    rows_per_view = 4 if four is not None and single is not None else (
+        3 if four is not None else 1
+    )
+    rows = len(view_names) * rows_per_view
     canvas = Image.new(
         "RGB",
         (label_width + columns * cell, header_height + rows * cell),
@@ -505,54 +797,80 @@ def save_depth_case_visualization(
     draw = ImageDraw.Draw(canvas)
     draw.text((12, 10), f"sample: {batch['sample_id'][0]}", fill="black")
     draw.text((12, 30), "relative log-depth; black = invalid", fill="black")
-    for column, label in enumerate(("t0", "t1", "t2", "t3")):
+    headers = (
+        ("t0", "t1", "t2", "t3")
+        if four is not None
+        else (f"GT t{source_index}", "single prediction", "single error", "valid mask")
+    )
+    for column, label in enumerate(headers):
         draw.text((label_width + column * cell + 8, 62), label, fill="black")
 
-    for view_index, view_name in enumerate(VIEW_NAMES):
-        valid = batch["valid_mask"][0, view_index, 0]
-        gt = target.relative_log_depth[0, view_index, 0]
-        pred_four = four_relative[0, view_index, 0]
-        single_valid = single_batch["valid_mask"][0, view_index, 0, 0]
-        gt_single = single_target.relative_log_depth[0, view_index, 0, 0]
-        pred_single = single_relative[0, view_index, 0, 0]
-        depth_min, depth_max = _robust_range(gt, valid)
-        four_error = (pred_four - gt).abs()
-        single_error = (pred_single - gt_single).abs()
-        combined_errors = torch.cat(
-            (four_error[valid], single_error[single_valid])
-        )
-        error_max = max(float(torch.quantile(combined_errors.float(), 0.98)), 1e-3)
-
-        first_row = view_index * 4
-        labels = (
-            f"{view_name} GT log-ratio [{depth_min:.2f},{depth_max:.2f}]",
-            f"{view_name} four prediction",
-            f"{view_name} four abs log error [0,{error_max:.2f}]",
-            f"{view_name} single: GT / pred / error / mask",
-        )
-        for offset, label in enumerate(labels):
+    for view_index, view_name in enumerate(view_names):
+        first_row = view_index * rows_per_view
+        if four is not None:
+            valid = batch["valid_mask"][0, view_index, 0]
+            gt = target.relative_log_depth[0, view_index, 0]
+            pred_four = four_relative[0, view_index, 0]
+            depth_min, depth_max = _robust_range(gt, valid)
+            four_error = (pred_four - gt).abs()
+            error_values = [four_error[valid]]
+            if single is not None:
+                single_valid = single_batch["valid_mask"][0, view_index, 0, 0]
+                gt_single = single_target.relative_log_depth[0, view_index, 0, 0]
+                pred_single = single_relative[0, view_index, 0, 0]
+                single_error = (pred_single - gt_single).abs()
+                error_values.append(single_error[single_valid])
+            error_max = max(
+                float(torch.quantile(torch.cat(error_values).float(), 0.98)),
+                1e-3,
+            )
+            labels = (
+                f"{view_name} GT log-ratio [{depth_min:.2f},{depth_max:.2f}]",
+                f"{view_name} four prediction",
+                f"{view_name} four abs log error [0,{error_max:.2f}]",
+            )
+            for offset, label in enumerate(labels):
+                draw.text(
+                    (8, header_height + (first_row + offset) * cell + 8),
+                    label,
+                    fill="black",
+                )
+            for frame_index in range(4):
+                x = label_width + frame_index * cell
+                images = (
+                    _heatmap_image(gt[frame_index], valid[frame_index], depth_min, depth_max),
+                    _heatmap_image(pred_four[frame_index], valid[frame_index], depth_min, depth_max),
+                    _heatmap_image(four_error[frame_index], valid[frame_index], 0.0, error_max),
+                )
+                for offset, image in enumerate(images):
+                    canvas.paste(
+                        image.resize((cell, cell)),
+                        (x, header_height + (first_row + offset) * cell),
+                    )
+            if single is None:
+                continue
+            single_row = first_row + 3
             draw.text(
-                (8, header_height + (first_row + offset) * cell + 8),
-                label,
+                (8, header_height + single_row * cell + 8),
+                f"{view_name} single: GT / pred / error / mask",
                 fill="black",
             )
-
-        for frame_index in range(4):
-            x = label_width + frame_index * cell
-            gt_image = _heatmap_image(
-                gt[frame_index], valid[frame_index], depth_min, depth_max
-            ).resize((cell, cell))
-            pred_image = _heatmap_image(
-                pred_four[frame_index], valid[frame_index], depth_min, depth_max
-            ).resize((cell, cell))
-            error_image = _heatmap_image(
-                four_error[frame_index], valid[frame_index], 0.0, error_max
-            ).resize((cell, cell))
-            canvas.paste(gt_image, (x, header_height + first_row * cell))
-            canvas.paste(pred_image, (x, header_height + (first_row + 1) * cell))
-            canvas.paste(error_image, (x, header_height + (first_row + 2) * cell))
-
-        single_row_y = header_height + (first_row + 3) * cell
+        else:
+            single_valid = single_batch["valid_mask"][0, view_index, 0, 0]
+            gt_single = single_target.relative_log_depth[0, view_index, 0, 0]
+            pred_single = single_relative[0, view_index, 0, 0]
+            depth_min, depth_max = _robust_range(gt_single, single_valid)
+            single_error = (pred_single - gt_single).abs()
+            error_max = max(
+                float(torch.quantile(single_error[single_valid].float(), 0.98)),
+                1e-3,
+            )
+            single_row = first_row
+            draw.text(
+                (8, header_height + single_row * cell + 8),
+                f"{view_name} single t{source_index}",
+                fill="black",
+            )
         single_images = (
             _heatmap_image(gt_single, single_valid, depth_min, depth_max),
             _heatmap_image(pred_single, single_valid, depth_min, depth_max),
@@ -564,7 +882,7 @@ def save_depth_case_visualization(
         for column, image in enumerate(single_images):
             canvas.paste(
                 image.resize((cell, cell)),
-                (label_width + column * cell, single_row_y),
+                (label_width + column * cell, header_height + single_row * cell),
             )
     canvas.save(output_path)
 
@@ -575,12 +893,20 @@ def save_case_visualization(
     episode_id,
     video,
     outputs,
+    view_names,
+    source_index,
 ):
+    if not outputs:
+        raise ValueError("no temporal output to visualize")
+    four = outputs.get("four_frame")
+    single = outputs.get("single_frame")
     cell = 256
     label_width = 150
     header_height = 70
-    columns = 5
-    rows = len(VIEW_NAMES) * 2
+    columns = 5 if four is not None and single is not None else (
+        4 if four is not None else 1
+    )
+    rows = len(view_names) * 2
     canvas = Image.new(
         "RGB",
         (label_width + columns * cell, header_height + rows * cell),
@@ -589,24 +915,27 @@ def save_case_visualization(
     draw = ImageDraw.Draw(canvas)
     draw.text((12, 10), f"sample: {sample_id}", fill="black")
     draw.text((12, 30), f"episode: {episode_id}", fill="black")
-    headers = ("t0", "t1", "t2", "t3", "single t0")
+    if four is not None and single is not None:
+        headers = ("t0", "t1", "t2", "t3", f"single t{source_index}")
+    elif four is not None:
+        headers = ("t0", "t1", "t2", "t3")
+    else:
+        headers = (f"single t{source_index}",)
     for column, label in enumerate(headers):
         draw.text((label_width + column * cell + 8, 48), label, fill="black")
 
-    four = outputs.get("four_frame")
-    single = outputs.get("single_frame")
-    for view_index, view_name in enumerate(VIEW_NAMES):
+    for view_index, view_name in enumerate(view_names):
         input_row = view_index * 2
         recon_row = input_row + 1
         draw.text((8, header_height + input_row * cell + 8), f"{view_name} input", fill="black")
         draw.text((8, header_height + recon_row * cell + 8), f"{view_name} recon", fill="black")
-        for frame_index in range(4):
-            source = _rgb_image(video[0, view_index, 0, :, frame_index])
-            canvas.paste(
-                source,
-                (label_width + frame_index * cell, header_height + input_row * cell),
-            )
-            if four is not None:
+        if four is not None:
+            for frame_index in range(4):
+                source = _rgb_image(video[0, view_index, 0, :, frame_index])
+                canvas.paste(
+                    source,
+                    (label_width + frame_index * cell, header_height + input_row * cell),
+                )
                 reconstruction = _rgb_image(
                     four.rgb[0, view_index, :, frame_index]
                 )
@@ -617,41 +946,61 @@ def save_case_visualization(
                         header_height + recon_row * cell,
                     ),
                 )
-        if single is not None:
+        if single is not None and four is not None:
+            source = _rgb_image(video[0, view_index, 0, :, source_index])
+            canvas.paste(
+                source,
+                (label_width + 4 * cell, header_height + input_row * cell),
+            )
             reconstruction = _rgb_image(single.rgb[0, view_index, :, 0])
             canvas.paste(
                 reconstruction,
                 (label_width + 4 * cell, header_height + recon_row * cell),
             )
+        elif single is not None:
+            source = _rgb_image(video[0, view_index, 0, :, source_index])
+            reconstruction = _rgb_image(single.rgb[0, view_index, :, 0])
+            canvas.paste(
+                source,
+                (label_width, header_height + input_row * cell),
+            )
+            canvas.paste(
+                reconstruction,
+                (label_width, header_height + recon_row * cell),
+            )
     canvas.save(output_path)
 
 
-def empty_accumulator(device):
+def empty_accumulator(device, view_count):
     return {
         "sample_count": torch.zeros((), dtype=torch.long, device=device),
         "rgb_abs_sum": torch.zeros((), dtype=torch.float64, device=device),
         "rgb_count": torch.zeros((), dtype=torch.long, device=device),
-        "relative_log_abs_sum": torch.zeros(3, dtype=torch.float64, device=device),
-        "valid_count": torch.zeros(3, dtype=torch.long, device=device),
-        "relative_log_sq_sum": torch.zeros(3, dtype=torch.float64, device=device),
+        "relative_log_abs_sum": torch.zeros(
+            view_count, dtype=torch.float64, device=device
+        ),
+        "valid_count": torch.zeros(view_count, dtype=torch.long, device=device),
+        "relative_log_sq_sum": torch.zeros(
+            view_count, dtype=torch.float64, device=device
+        ),
     }
 
 
 def update_metrics(accumulator, batch, output, relative_depth_epsilon):
     rgb_target = batch["video"][:, :, 0]
+    expected_views = int(accumulator["valid_count"].numel())
+    if int(rgb_target.shape[1]) != expected_views:
+        raise ValueError(
+            f"evaluation accumulator expects {expected_views} views, "
+            f"batch contains {int(rgb_target.shape[1])}"
+        )
     rgb_error = (output.rgb - rgb_target).abs()
     accumulator["sample_count"] += rgb_target.shape[0]
     accumulator["rgb_abs_sum"] += rgb_error.double().sum()
     accumulator["rgb_count"] += rgb_error.numel()
 
     valid = batch["valid_mask"]
-    target = relative_target_from_foundation_stereo(
-        batch["disparity"],
-        valid,
-        batch["fx"],
-        batch["baseline_m"],
-        epsilon=relative_depth_epsilon,
-    )
+    target = _relative_target_from_batch(batch, relative_depth_epsilon)
     prediction, _ = relative_prediction_from_raw(
         output.raw_relative_log_depth, valid
     )
@@ -669,7 +1018,9 @@ def update_metrics(accumulator, batch, output, relative_depth_epsilon):
     )
 
 
-def finalize_metrics(accumulator):
+def finalize_metrics(accumulator, view_names):
+    if len(view_names) != int(accumulator["valid_count"].numel()):
+        raise ValueError("view names disagree with evaluation accumulator")
     if accumulator["sample_count"].item() == 0:
         raise ValueError("evaluation loader produced no samples")
     if torch.any(accumulator["valid_count"] == 0):
@@ -680,9 +1031,10 @@ def finalize_metrics(accumulator):
         "rgb_l1": float(
             (accumulator["rgb_abs_sum"] / accumulator["rgb_count"]).item()
         ),
+        "valid_pixels": int(accumulator["valid_count"].sum().item()),
         "views": {},
     }
-    for view_index, view_name in enumerate(VIEW_NAMES):
+    for view_index, view_name in enumerate(view_names):
         result["views"][view_name] = {
             "valid_pixels": int(accumulator["valid_count"][view_index].item()),
             "relative_log_l1": float(
@@ -701,21 +1053,26 @@ def finalize_metrics(accumulator):
     return result
 
 
-def main():
-    args = build_parser().parse_args()
-    validate_args(args)
-    device, rank, world_size = initialize_distributed(args)
-    model = load_model(args, device)
-    data_module = StereoDataModule(args, shuffle=False)
-    loader, lerobot_dataset = exact_eval_loader(
-        data_module, args, rank, world_size
-    )
-    teacher = build_online_teacher(args, device)
-    modes = requested_temporal_modes(args)
-    accumulators = {mode: empty_accumulator(device) for mode in modes}
-
+def evaluate_eye_mode(
+    args,
+    eye_mode,
+    temporal_modes,
+    dataset,
+    teacher,
+    model,
+    device,
+    rank,
+    world_size,
+):
+    """Evaluate one native data/teacher contract across requested time modes."""
+    loader = exact_eval_loader(args, dataset, eye_mode, rank, world_size)
+    view_names = MONO_VIEW_NAMES if eye_mode == "mono" else STEREO_VIEW_NAMES
+    accumulators = {
+        temporal_mode: empty_accumulator(device, len(view_names))
+        for temporal_mode in temporal_modes
+    }
     with torch.inference_mode():
-        progress = tqdm(loader, disable=rank != 0)
+        progress = tqdm(loader, disable=rank != 0, desc=eye_mode)
         for batch_index, batch in enumerate(progress):
             if args.max_batches is not None and batch_index >= args.max_batches:
                 break
@@ -725,106 +1082,121 @@ def main():
                 else value
                 for key, value in batch.items()
             }
-            attach_online_targets(args, teacher, tensor_batch)
-            for mode in modes:
+            attach_online_targets(args, eye_mode, teacher, tensor_batch)
+            for temporal_mode in temporal_modes:
                 mode_batch = batch_for_temporal_mode(
-                    tensor_batch, mode, args.single_frame_source_index
+                    tensor_batch,
+                    temporal_mode,
+                    args.single_frame_source_index,
                 )
                 with torch.autocast(
-                    device_type="cuda",
+                    device_type=device.type,
                     dtype=torch.bfloat16,
                     enabled=args.bf16,
                 ):
                     output = model(
                         mode_batch["video"],
-                        eye_mode=args.eval_eye_mode,
-                        temporal_mode=mode,
+                        eye_mode=eye_mode,
+                        temporal_mode=temporal_mode,
                         sample_posterior=False,
                     )
                 update_metrics(
-                    accumulators[mode],
+                    accumulators[temporal_mode],
                     mode_batch,
                     output,
                     args.relative_depth_epsilon,
                 )
-
     for accumulator in accumulators.values():
         reduce_accumulator(accumulator, world_size)
-
-    metrics_by_mode = {
-        mode: finalize_metrics(accumulator)
-        for mode, accumulator in accumulators.items()
-    }
+    dataset_metadata = dataset_provenance(args, eye_mode, dataset)
+    teacher_metadata = teacher_provenance(args, eye_mode)
+    metrics_by_mode = {}
+    for temporal_mode, accumulator in accumulators.items():
+        mode_id = f"{eye_mode}/{temporal_mode}"
+        if mode_id not in MODE_IDS:
+            raise ValueError(f"unsupported mode ID {mode_id!r}")
+        metrics = finalize_metrics(accumulator, view_names)
+        metrics["dataset"] = dataset_metadata
+        metrics["teacher"] = teacher_metadata
+        metrics_by_mode[mode_id] = metrics
     if args.max_batches is None:
-        expected = len(lerobot_dataset)
-        for mode, metrics in metrics_by_mode.items():
-            if metrics["sample_count"] != expected:
+        for mode_id, metrics in metrics_by_mode.items():
+            if metrics["sample_count"] != len(dataset):
                 raise RuntimeError(
-                    f"{mode} evaluated {metrics['sample_count']} samples, "
-                    f"expected exact split size {expected}"
+                    f"{mode_id} evaluated {metrics['sample_count']} samples, "
+                    f"expected exact split size {len(dataset)}"
                 )
 
     visualization_records = []
     if args.num_visualizations:
+        eye_directory = args.visualization_dir / eye_mode
         if rank == 0:
-            args.visualization_dir.mkdir(parents=True, exist_ok=False)
+            eye_directory.mkdir(parents=False, exist_ok=False)
         if world_size > 1:
             dist.barrier()
-        case_indices = fixed_episode_subset_indices(
-            lerobot_dataset,
+        case_indices = fixed_eval_case_indices(
+            dataset,
             args.num_visualizations,
             seed=int(getattr(args, "seed", 1234)),
+            eye_mode=eye_mode,
         )
         local_records = []
         with torch.inference_mode():
             for slot in range(rank, args.num_visualizations, world_size):
-                batch = default_collate([lerobot_dataset[case_indices[slot]]])
+                batch = default_collate([dataset[case_indices[slot]]])
                 tensor_batch = {
                     key: value.to(device, non_blocking=True)
                     if isinstance(value, torch.Tensor)
                     else value
                     for key, value in batch.items()
                 }
-                attach_online_targets(args, teacher, tensor_batch)
+                attach_online_targets(args, eye_mode, teacher, tensor_batch)
                 outputs = {}
-                for mode in modes:
+                for temporal_mode in temporal_modes:
                     mode_batch = batch_for_temporal_mode(
-                        tensor_batch, mode, args.single_frame_source_index
+                        tensor_batch,
+                        temporal_mode,
+                        args.single_frame_source_index,
                     )
                     with torch.autocast(
-                        device_type="cuda",
+                        device_type=device.type,
                         dtype=torch.bfloat16,
                         enabled=args.bf16,
                     ):
-                        outputs[mode] = model(
+                        outputs[temporal_mode] = model(
                             mode_batch["video"],
-                            eye_mode=args.eval_eye_mode,
-                            temporal_mode=mode,
+                            eye_mode=eye_mode,
+                            temporal_mode=temporal_mode,
                             sample_posterior=False,
                         )
                 filename = f"case-{slot:02d}.png"
+                depth_filename = f"depth-case-{slot:02d}.png"
                 save_case_visualization(
-                    args.visualization_dir / filename,
+                    eye_directory / filename,
                     tensor_batch["sample_id"][0],
                     tensor_batch["episode_id"][0],
                     tensor_batch["video"],
                     outputs,
+                    view_names,
+                    args.single_frame_source_index,
                 )
-                depth_filename = f"depth-case-{slot:02d}.png"
                 save_depth_case_visualization(
-                    args.visualization_dir / depth_filename,
+                    eye_directory / depth_filename,
                     tensor_batch,
                     outputs,
                     args.single_frame_source_index,
                     args.relative_depth_epsilon,
+                    view_names,
                 )
                 local_records.append(
                     {
                         "slot": slot,
+                        "eye_mode": eye_mode,
+                        "temporal_modes": list(temporal_modes),
                         "sample_id": tensor_batch["sample_id"][0],
                         "episode_id": tensor_batch["episode_id"][0],
-                        "file": filename,
-                        "depth_file": depth_filename,
+                        "file": f"{eye_mode}/{filename}",
+                        "depth_file": f"{eye_mode}/{depth_filename}",
                     }
                 )
         if world_size > 1:
@@ -837,30 +1209,108 @@ def main():
                 )
         else:
             visualization_records = local_records
+        if rank == 0:
+            (eye_directory / "cases.json").write_text(
+                json.dumps(visualization_records, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+    return metrics_by_mode, visualization_records
 
-    result = {
+
+def build_evaluation_result(
+    args,
+    mode_ids,
+    metrics_by_mode,
+    datasets_metadata,
+    teachers_metadata,
+    visualizations_by_eye,
+    world_size,
+):
+    if tuple(metrics_by_mode) != tuple(mode_ids):
+        raise RuntimeError(
+            f"evaluation produced modes {tuple(metrics_by_mode)}, "
+            f"expected {tuple(mode_ids)}"
+        )
+    return {
         "checkpoint": str(args.stereo_vae_ckpt.expanduser().resolve()),
-        "split": args.eval_split,
         "posterior": "mean",
-        "eye_mode": args.eval_eye_mode,
-        "temporal_mode": args.eval_temporal_mode,
+        "requested_modes": list(mode_ids),
         "source_frame_index": args.single_frame_source_index,
         "precision": "bf16" if args.bf16 else "fp32",
         "world_size": world_size,
         "modes": metrics_by_mode,
-        "visualizations": visualization_records,
+        "datasets": datasets_metadata,
+        "teachers": teachers_metadata,
+        "visualizations": visualizations_by_eye,
     }
+
+
+def main():
+    args = build_parser().parse_args()
+    validate_args(args)
+    eye_modes = requested_eye_modes(args)
+    temporal_modes = requested_temporal_modes(args)
+    mode_ids = requested_mode_ids(args)
+    preflight_teacher_assets(args, eye_modes)
+    datasets = {
+        eye_mode: build_eval_dataset(args, eye_mode) for eye_mode in eye_modes
+    }
+    if args.num_visualizations:
+        for eye_mode, dataset in datasets.items():
+            if args.num_visualizations > len(dataset):
+                raise ValueError(
+                    f"{eye_mode} has only {len(dataset)} samples, cannot save "
+                    f"{args.num_visualizations} visualizations"
+                )
+
+    device, rank, world_size = initialize_distributed(args)
+    model = load_model(args, device)
+    if args.num_visualizations:
+        if rank == 0:
+            args.visualization_dir.mkdir(parents=True, exist_ok=False)
+        if world_size > 1:
+            dist.barrier()
+
+    metrics_by_mode = {}
+    visualizations_by_eye = {}
+    for eye_mode in eye_modes:
+        teacher = build_online_teacher(args, eye_mode, device)
+        eye_metrics, eye_visualizations = evaluate_eye_mode(
+            args,
+            eye_mode,
+            temporal_modes,
+            datasets[eye_mode],
+            teacher,
+            model,
+            device,
+            rank,
+            world_size,
+        )
+        metrics_by_mode.update(eye_metrics)
+        visualizations_by_eye[eye_mode] = eye_visualizations
+        del teacher
+
+    result = build_evaluation_result(
+        args,
+        mode_ids,
+        metrics_by_mode,
+        {
+            eye_mode: dataset_provenance(args, eye_mode, datasets[eye_mode])
+            for eye_mode in eye_modes
+        },
+        {
+            eye_mode: teacher_provenance(args, eye_mode)
+            for eye_mode in eye_modes
+        },
+        visualizations_by_eye,
+        world_size,
+    )
     if rank == 0:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        if args.num_visualizations:
-            (args.visualization_dir / "cases.json").write_text(
-                json.dumps(visualization_records, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
         print(json.dumps(result, indent=2, sort_keys=True))
     if world_size > 1:
         dist.barrier()

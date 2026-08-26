@@ -394,19 +394,57 @@ class Attention(nn.Module):
         q = q * self.q_scale
         k = k * self.k_scale
 
-        if hasattr(F, "scaled_dot_product_attention") and torch.__version__ >= "2.1.0":
+        if hasattr(F, "scaled_dot_product_attention"):
             # Note: the original paper did *not* use SDPA, it's a free boost!
-            if exists(mask):
-                mask = F.pad(mask, (self.num_null_kv, 0), value=True)
-                mask = rearrange(mask, 'b j -> b 1 1 j')
-            
+            sdpa_mask = None
             if self.spatial_pos == "rel" and is_spatial:
                 h, w = int(math.sqrt(N)), int(math.sqrt(N))
                 attn_bias = self.spatial_rel_pos_bias(h, w, device=x.device)
                 attn_bias = F.pad(attn_bias, (self.num_null_kv, 0), value=0.)
-            
+                sdpa_mask = attn_bias.to(dtype=q.dtype).unsqueeze(0)
+
+            if exists(mask):
+                key_valid = F.pad(
+                    mask, (self.num_null_kv, 0), value=True
+                )
+                key_valid = rearrange(key_valid, 'b j -> b 1 1 j')
+                if sdpa_mask is None:
+                    sdpa_mask = key_valid
+                else:
+                    sdpa_mask = sdpa_mask.expand(
+                        q.shape[0], -1, -1, -1
+                    ).masked_fill(
+                        ~key_valid, torch.finfo(q.dtype).min
+                    )
+
+            use_is_causal = self.causal
+            if self.causal and sdpa_mask is not None:
+                query_length = q.shape[-2]
+                key_length = k.shape[-2]
+                causal_valid = torch.ones(
+                    query_length,
+                    key_length,
+                    dtype=torch.bool,
+                    device=q.device,
+                ).tril(diagonal=self.num_null_kv)
+                if sdpa_mask.dtype == torch.bool:
+                    sdpa_mask = sdpa_mask & causal_valid
+                else:
+                    sdpa_mask = sdpa_mask.masked_fill(
+                        ~causal_valid, torch.finfo(q.dtype).min
+                    )
+                use_is_causal = False
+
             # query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.p_dropout, is_causal=self.causal, scale=self.scale)
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=sdpa_mask,
+                dropout_p=self.p_dropout if self.training else 0.0,
+                is_causal=use_is_causal,
+                scale=self.scale,
+            )
         
         else:
             sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
