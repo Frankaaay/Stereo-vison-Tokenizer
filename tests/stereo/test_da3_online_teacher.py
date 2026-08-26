@@ -11,10 +11,33 @@ from torch.utils.data import default_collate
 
 from stereo_tokenizer.data import HyMonoSmokeDataset
 from stereo_tokenizer.geometry import GeometryMapping
-from stereo_tokenizer.online_gt import OnlineDepthAnything3GTCallback
+from stereo_tokenizer.online_gt import (
+    DepthAnything3OnlineTeacher,
+    OnlineDepthAnything3GTCallback,
+)
 
 
 class GeometryMappingTest(unittest.TestCase):
+    def test_da3_teacher_passes_empty_export_feature_layers(self):
+        calls = []
+
+        class FakeModel:
+            def __call__(self, image, *, export_feat_layers):
+                calls.append(export_feat_layers)
+                shape = (image.shape[0], image.shape[1], *image.shape[-2:])
+                return SimpleNamespace(
+                    depth=torch.ones(shape),
+                    depth_conf=torch.ones(shape),
+                )
+
+        teacher = object.__new__(DepthAnything3OnlineTeacher)
+        teacher.device = torch.device("cpu")
+        teacher.model = FakeModel()
+        depth, confidence = teacher.infer_processed(torch.zeros(1, 1, 3, 28, 28))
+        self.assertEqual(calls, [[]])
+        self.assertEqual(depth.shape, (1, 1, 28, 28))
+        self.assertEqual(confidence.shape, (1, 1, 28, 28))
+
     def test_rectified_480x640_student_geometry(self):
         mapping = GeometryMapping.create((480, 640))
         self.assertEqual(mapping.student_resized_hw, (192, 256))

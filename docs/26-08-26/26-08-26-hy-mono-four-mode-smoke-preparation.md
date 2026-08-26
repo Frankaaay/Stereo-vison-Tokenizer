@@ -344,7 +344,7 @@ GPU smoke 完成前不进入 400-step overfit。
   `RuntimeError: LeRobot MP4 loading requires PyAV in the training runtime`。这不是 CUDA
   OOM、DDP、teacher 或 geometry 错误；WandB offline run 已正常创建。
 
-### H200-2 两 rank BS24 smoke v3（进行中）
+### H200-2 两 rank BS24 smoke v3（失败）
 
 - 用户确认后，在同一 task-private overlay 中固定安装 `av==16.0.1`；版本取自 Frank-owned
   `/data/home/frank/.conda/envs/omnitokenizer-e2` 的已存在 Python 3.12 环境。unified runtime
@@ -364,3 +364,14 @@ GPU smoke 完成前不进入 400-step overfit。
   DDP 初始化，GPU 0/1 已建立 CUDA context；无 traceback，尚无首个 step/heartbeat。
 - ETA（11:16 +08:00 初估）：没有真实 step 吞吐，训练主体仍估计约 5--20 分钟；checkpoint、
   exit code 与结果完整性核验再预留约 5 分钟。本轮不继续轮询。
+- 实际完成：11:17:32 +08:00，exit code 1，运行约 70 秒；没有 step timing 或 checkpoint，
+  tmux/训练进程退出后 8 张 GPU 均恢复为 0 MiB。
+- v3 已成功越过 PyAV/DataLoader，失败发生在首个 mono batch 的 DA3 teacher forward。
+  冻结 DA3 API 的 `export_feat_layers` 默认值为 `None`，API 将该值位置传递给底层模型，
+  覆盖底层原本的空列表默认值；DINOv2 随后执行
+  `if i in export_feat_layers`，报
+  `TypeError: argument of type 'NoneType' is not iterable`。
+- 项目 wrapper 原调用为 `self.model(image)`。最小修复改为显式
+  `self.model(image, export_feat_layers=[])`，不修改冻结 DA3 source；新增定向测试以 fake
+  model 强制要求该 keyword，并断言实际收到空列表。提交前本地 `py_compile` 与
+  `git diff --check` 已通过；H200-2 tensor suite 在推送同步后执行。

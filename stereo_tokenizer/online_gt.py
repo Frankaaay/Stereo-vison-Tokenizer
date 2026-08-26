@@ -985,7 +985,7 @@ class DepthAnything3OnlineTeacher:
         if image.shape[-2] % 14 or image.shape[-1] % 14:
             raise ValueError("DA3 processed image dimensions must be divisible by 14")
         image = image.to(self.device, non_blocking=True)
-        output = self.model(image)
+        output = self.model(image, export_feat_layers=[])
         depth = output.depth.float()
         confidence = output.depth_conf.float()
         expected = (image.shape[0], image.shape[1], *image.shape[-2:])
