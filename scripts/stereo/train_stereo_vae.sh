@@ -18,11 +18,24 @@ set -euo pipefail
 : "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
 : "${SINGLE_FRAME_SOURCE_INDEX:?set the current source frame index}"
 
+GAN_ENABLED="${GAN_ENABLED:-0}"
+IMAGE_GAN_WEIGHT="${IMAGE_GAN_WEIGHT:-0}"
+VIDEO_GAN_WEIGHT="${VIDEO_GAN_WEIGHT:-0}"
+GAN_FEAT_WEIGHT="${GAN_FEAT_WEIGHT:-0}"
+DISCRIMINATOR_ITER_START="${DISCRIMINATOR_ITER_START:-50000}"
+GAN_ARGS=()
+if [[ "${GAN_ENABLED}" == "1" ]]; then
+  GAN_ARGS+=(--gan_enabled)
+elif [[ "${GAN_ENABLED}" != "0" ]]; then
+  echo "GAN_ENABLED must be 0 or 1" >&2
+  exit 2
+fi
+
 MODE_UPDATE_RATIO="${MODE_UPDATE_RATIO:-1:1:1:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  if [[ "${PER_DEVICE_BATCH_SIZE}" != "24" || "${GRAD_ACCUMULATES}" != "1" ]]; then
-    echo "four-mode training is frozen to per-device BS24 and GA1" >&2
+  if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
+    echo "four-mode training requires GRAD_ACCUMULATES=1" >&2
     exit 2
   fi
   if [[ "${MODE_UPDATE_RATIO}" != "1:1:1:1" ]]; then
@@ -164,6 +177,8 @@ if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
   : "${DA3_CHECKPOINT:?set the pinned DA3-BASE checkpoint directory}"
   : "${DA3_CHECKPOINT_SHA256:?set the DA3-BASE model.safetensors SHA256}"
   MODE_UPDATES_PER_EPOCH="${MODE_UPDATES_PER_EPOCH:-${MAX_STEPS}}"
+  MIXED_MONO_SAMPLE_LIMIT="${MIXED_MONO_SAMPLE_LIMIT:-48}"
+  MIXED_STEREO_SAMPLE_LIMIT="${MIXED_STEREO_SAMPLE_LIMIT:-48}"
   if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS || MODE_UPDATES_PER_EPOCH % 4 != 0 )); then
     echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS and be divisible by four" >&2
     exit 2
@@ -173,7 +188,8 @@ if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
     --mono_train_manifest "${MONO_SMOKE_MANIFEST}"
     --mono_val_manifest "${MONO_SMOKE_MANIFEST}"
     --mono_cache_root "${MONO_SMOKE_CACHE_ROOT}"
-    --mixed_stereo_sample_limit 48
+    --mixed_mono_sample_limit "${MIXED_MONO_SAMPLE_LIMIT}"
+    --mixed_stereo_sample_limit "${MIXED_STEREO_SAMPLE_LIMIT}"
     --mode_schedule_seed "${MODE_SCHEDULE_SEED:-1234}"
     --mode_updates_per_epoch "${MODE_UPDATES_PER_EPOCH}"
     --da3_repo "${DA3_REPO}"
@@ -244,9 +260,10 @@ python3 train_stereo_vae.py \
   --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
-  --image_gan_weight 0 \
-  --video_gan_weight 0 \
-  --gan_feat_weight 0 \
+  --image_gan_weight "${IMAGE_GAN_WEIGHT}" \
+  --video_gan_weight "${VIDEO_GAN_WEIGHT}" \
+  --gan_feat_weight "${GAN_FEAT_WEIGHT}" \
+  --discriminator_iter_start "${DISCRIMINATOR_ITER_START}" \
   --recon_loss_type l1 \
   --smooth_l1_beta 1.0 \
   --batch_size "${PER_DEVICE_BATCH_SIZE}" \
@@ -265,6 +282,7 @@ python3 train_stereo_vae.py \
   --default_root_dir "${OUTPUT_ROOT}" \
   --devices "${GPU_COUNT}" \
   --bf16 \
+  "${GAN_ARGS[@]}" \
   "${WANDB_ARGS[@]}" \
   "${MEDIA_ARGS[@]}" \
   "${TIMING_ARGS[@]}" \

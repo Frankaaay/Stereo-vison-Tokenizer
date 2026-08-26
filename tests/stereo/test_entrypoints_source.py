@@ -71,7 +71,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             source,
         )
         self.assertNotIn("single_frame_loss_weight", source)
-        self.assertNotIn("--gan_enabled", source)
+        self.assertIn('GAN_ENABLED="${GAN_ENABLED:-0}"', source)
+        self.assertIn("GAN_ARGS+=(--gan_enabled)", source)
         self.assertNotIn("--use_vae", source)
 
     def test_step_profiler_preserves_the_accepted_training_contract(self):
@@ -240,9 +241,13 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "MONO_SMOKE_MANIFEST",
             "MODE_UPDATES_PER_EPOCH",
             "DA3_CHECKPOINT_SHA256",
-            "--mixed_stereo_sample_limit 48",
+            "MIXED_MONO_SAMPLE_LIMIT",
+            "MIXED_STEREO_SAMPLE_LIMIT",
+            '--mixed_mono_sample_limit "${MIXED_MONO_SAMPLE_LIMIT}"',
+            '--mixed_stereo_sample_limit "${MIXED_STEREO_SAMPLE_LIMIT}"',
         ):
             self.assertIn(token, launcher)
+        self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)
         self.assertIn('"val/mixed/total_loss"', train)
         self.assertIn("OnlineDepthAnything3GTCallback", train)
         self.assertIn("mode_occurrences_before", train)

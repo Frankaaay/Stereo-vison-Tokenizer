@@ -24,6 +24,15 @@ CACHE_SCHEMA = "stereo-online-foundation-gt-v3"
 TENSORRT_ENGINE_MANIFEST_SCHEMA = "foundation-stereo-tensorrt-engine-v1"
 TENSORRT_BINDING_ROLES = ("left", "right", "disparity")
 
+DA3_CHECKPOINT_IGNORED_MISSING_KEYS = (
+    "head.scratch.output_conv2_aux.1.2.weight",
+    "head.scratch.output_conv2_aux.1.2.bias",
+    "head.scratch.output_conv2_aux.2.2.weight",
+    "head.scratch.output_conv2_aux.2.2.bias",
+    "head.scratch.output_conv2_aux.3.2.weight",
+    "head.scratch.output_conv2_aux.3.2.bias",
+)
+
 
 class _UnavailableOpen3D(types.ModuleType):
     """Import-only stub for FoundationStereo's unused point-cloud helpers."""
@@ -1088,6 +1097,34 @@ class OnlineFoundationGTCallback(Callback):
         self._prepare_batch(trainer, pl_module, batch, "val")
 
 
+def _load_da3_inference_model(checkpoint: Path):
+    """仅加载 DA3 推理网络，避免引入未使用的 3D 导出依赖。"""
+    from depth_anything_3.cfg import create_object
+    from omegaconf import OmegaConf
+    from safetensors.torch import load_file
+
+    config_path = checkpoint / "config.json"
+    weights_path = checkpoint / "model.safetensors"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("model_name") != "da3-base" or not isinstance(config.get("config"), dict):
+        raise ValueError("unsupported DA3 checkpoint config")
+
+    model = create_object(OmegaConf.create(config["config"]))
+    state = load_file(str(weights_path), device="cpu")
+    if not state or any(not key.startswith("model.") for key in state):
+        raise ValueError("DA3 checkpoint keys must use the model. prefix")
+    state = {key.removeprefix("model."): value for key, value in state.items()}
+    incompatible = model.load_state_dict(state, strict=False)
+    missing = tuple(incompatible.missing_keys)
+    unexpected = tuple(incompatible.unexpected_keys)
+    if missing != DA3_CHECKPOINT_IGNORED_MISSING_KEYS or unexpected:
+        raise RuntimeError(
+            "DA3 checkpoint structure mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return model.eval()
+
+
 class DepthAnything3OnlineTeacher:
     """Pinned DA3-BASE teacher preserving N=1/N=4 view grouping."""
 
@@ -1133,9 +1170,7 @@ class DepthAnything3OnlineTeacher:
         source_root = self.repo / "src"
         if str(source_root) not in sys.path:
             sys.path.insert(0, str(source_root))
-        from depth_anything_3.api import DepthAnything3
-
-        self.model = DepthAnything3.from_pretrained(str(self.checkpoint))
+        self.model = _load_da3_inference_model(self.checkpoint)
         self.model.to(self.device).eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
@@ -1147,7 +1182,16 @@ class DepthAnything3OnlineTeacher:
         if image.shape[-2] % 14 or image.shape[-1] % 14:
             raise ValueError("DA3 processed image dimensions must be divisible by 14")
         image = image.to(self.device, non_blocking=True)
-        output = self.model(image, export_feat_layers=[])
+        autocast_enabled = image.device.type == "cuda"
+        autocast_dtype = (
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+        with torch.autocast(
+            device_type=image.device.type,
+            dtype=autocast_dtype,
+            enabled=autocast_enabled,
+        ):
+            output = self.model(image, export_feat_layers=[])
         depth = output.depth.float()
         confidence = output.depth_conf.float()
         expected = (image.shape[0], image.shape[1], *image.shape[-2:])

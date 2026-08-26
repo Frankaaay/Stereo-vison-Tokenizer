@@ -3,11 +3,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-from stereo_tokenizer.data import HyMonoSmokeDataset
+from stereo_tokenizer.data import HyMonoSmokeDataset, ModeSubset, StereoDataModule
 
 
 class HyMonoSmokeDatasetTest(unittest.TestCase):
@@ -81,6 +82,32 @@ class HyMonoSmokeDatasetTest(unittest.TestCase):
         self.assertEqual(single["mode_id"], "mono/single_frame")
         self.assertEqual(four["mode_id"], "mono/four_frame")
         self.assertTrue(torch.equal(single["frame_index"], torch.tensor([10])))
+
+
+    def test_training_mono_subset_is_deterministic_and_strictly_nested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = self._dataset(root)
+
+            def subset(limit):
+                args = SimpleNamespace(
+                    mono_train_manifest=str(dataset.manifest_path),
+                    mono_val_manifest=str(dataset.manifest_path),
+                    mono_cache_root=str(dataset.cache_root),
+                    mixed_mono_sample_limit=limit,
+                    four_mode_mixed_training=True,
+                )
+                return StereoDataModule(args)._mono_dataset(train=True)
+
+            subset_12 = subset(12)
+            subset_6 = subset(6)
+
+        self.assertIsInstance(subset_12, ModeSubset)
+        self.assertEqual(len(subset_12), 12)
+        self.assertEqual(len(subset_6), 6)
+        self.assertEqual(subset_12.indices, list(range(12)))
+        self.assertEqual(subset_6.indices, list(range(6)))
+        self.assertEqual(subset_12.indices[:6], subset_6.indices)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -12,9 +13,63 @@ from torch.utils.data import default_collate
 from stereo_tokenizer.data import HyMonoSmokeDataset
 from stereo_tokenizer.geometry import GeometryMapping
 from stereo_tokenizer.online_gt import (
+    DA3_CHECKPOINT_IGNORED_MISSING_KEYS,
     DepthAnything3OnlineTeacher,
+    _load_da3_inference_model,
     OnlineDepthAnything3GTCallback,
 )
+
+
+class DA3InferenceLoaderTest(unittest.TestCase):
+    def test_loader_uses_network_only_without_importing_high_level_api(self):
+        calls = {}
+
+        class FakeModel:
+            def load_state_dict(self, state, strict):
+                calls["state"] = state
+                calls["strict"] = strict
+                return SimpleNamespace(
+                    missing_keys=list(DA3_CHECKPOINT_IGNORED_MISSING_KEYS),
+                    unexpected_keys=[],
+                )
+
+            def eval(self):
+                calls["eval"] = True
+                return self
+
+        fake_model = FakeModel()
+        package = ModuleType("depth_anything_3")
+        package.__path__ = []
+        cfg = ModuleType("depth_anything_3.cfg")
+        cfg.create_object = lambda config: calls.setdefault("config", config) and fake_model
+        omega = ModuleType("omegaconf")
+        omega.OmegaConf = SimpleNamespace(create=lambda config: config)
+        safe = ModuleType("safetensors.torch")
+        safe.load_file = lambda path, device: {"model.backbone.weight": torch.ones(1)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            (checkpoint / "config.json").write_text(
+                json.dumps({"model_name": "da3-base", "config": {"net": "fake"}}),
+                encoding="utf-8",
+            )
+            (checkpoint / "model.safetensors").touch()
+            with patch.dict(
+                "sys.modules",
+                {
+                    "depth_anything_3": package,
+                    "depth_anything_3.cfg": cfg,
+                    "omegaconf": omega,
+                    "safetensors.torch": safe,
+                },
+            ):
+                model = _load_da3_inference_model(checkpoint)
+
+        self.assertIs(model, fake_model)
+        self.assertEqual(calls["config"], {"net": "fake"})
+        self.assertEqual(tuple(calls["state"]), ("backbone.weight",))
+        self.assertFalse(calls["strict"])
+        self.assertTrue(calls["eval"])
 
 
 class GeometryMappingTest(unittest.TestCase):
