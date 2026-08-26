@@ -1,6 +1,5 @@
 from .lpips import LPIPS
 from .stereo_fusion import StereoFusion, StereoFusionOutput
-from .stereo_geometry import DepthOutput, disparity_to_depth
 from .relative_depth import (
     RelativeDepthTarget,
     center_relative_log_depth,
@@ -19,7 +18,6 @@ from .stereo_losses import (
 )
 
 __all__ = [
-    "DepthOutput",
     "LPIPS",
     "MaskedViewLoss",
     "RelativeDepthTarget",
@@ -28,7 +26,6 @@ __all__ = [
     "StereoLossBreakdown",
     "StereoReconstructionKLLoss",
     "center_relative_log_depth",
-    "disparity_to_depth",
     "masked_relative_gradient_loss",
     "masked_smooth_l1_relative_depth_loss",
     "posterior_kl_loss",

@@ -75,7 +75,6 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --enc_block ttww \
   --dec_block tttt \
   --twod_window_size 8 \
-  --temporal_patch_size 4 \
   --spatial_pos rope \
   --spatial_depth 4 \
   --temporal_depth 4 \
@@ -91,7 +90,6 @@ exec /usr/bin/time -v "${PYTHON_BIN}" profile_stereo_step.py \
   --single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}" \
   --stereo_search_radii 7 7 7 \
   --stereo_search_direction left \
-  --stereo_mode stereo \
   --rgb_weight 1.0 \
   --relative_depth_weight 1.0 \
   --relative_gradient_weight 0.1 \

@@ -214,7 +214,6 @@ python3 train_stereo_vae.py \
   --image_channels 3 \
   --patch_embed linear \
   --patch_size 16 \
-  --temporal_patch_size 4 \
   --spatial_depth 4 \
   --temporal_depth 4 \
   --embedding_dim 512 \
@@ -233,7 +232,6 @@ python3 train_stereo_vae.py \
   --single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}" \
   --stereo_search_radii 7 7 7 \
   --stereo_search_direction left \
-  --stereo_mode stereo \
   --stereo_disparity_min_px 0.5 \
   --stereo_disparity_max_px 112.0 \
   --stereo_lr_error_abs_threshold_px 1.0 \

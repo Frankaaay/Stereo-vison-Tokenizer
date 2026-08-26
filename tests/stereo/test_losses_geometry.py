@@ -2,7 +2,6 @@ import unittest
 
 import torch
 
-from stereo_tokenizer.modules.stereo_geometry import disparity_to_depth
 from stereo_tokenizer.modules.relative_depth import (
     center_relative_log_depth,
     relative_prediction_from_raw,
@@ -205,20 +204,6 @@ class StereoLossTest(unittest.TestCase):
         values = torch.tensor(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)))
         torch.testing.assert_close(
             posterior_kl_loss(_PosteriorStub(values)), torch.tensor(3.5)
-        )
-
-
-class GeometryTest(unittest.TestCase):
-    def test_metric_depth_and_mask(self) -> None:
-        disparity = torch.full((1, 3, 1, 2, 2, 2), 10.0)
-        disparity[..., 0, 0] = 0.0
-        fx = torch.tensor(((100.0, 200.0, 300.0),))
-        baseline = torch.tensor(((0.1, 0.1, 0.1),))
-        output = disparity_to_depth(disparity, fx, baseline)
-        self.assertFalse(output.valid_mask[..., 0, 0].any())
-        torch.testing.assert_close(
-            output.depth[0, :, 0, :, 0, 1],
-            torch.tensor(((1.0, 1.0), (2.0, 2.0), (3.0, 3.0))),
         )
 
 

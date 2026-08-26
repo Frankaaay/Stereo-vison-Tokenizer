@@ -32,7 +32,6 @@ class StructuredStereoEncoderTest(unittest.TestCase):
             spatial_pos="rope",
             patch_embed="linear",
             patch_size=8,
-            temporal_patch_size=4,
             spatial_depth=2,
             temporal_depth=1,
             causal_in_peg=True,

@@ -6,7 +6,6 @@ from beartype import beartype
 from typing import Tuple
 
 from einops import rearrange, repeat
-from einops.layers.torch import Rearrange
 from timm.models.layers import trunc_normal_
 
 def exists(val):
@@ -77,76 +76,6 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
-
-
-class Pooling(nn.Module):
-    def __init__(self, pool_type, dim):
-        super().__init__()
-        if pool_type == "a":
-            self.pool = nn.AvgPool2d(kernel_size=2)
-        
-        elif pool_type == "m":
-            self.pool = nn.MaxPool2d(kernel_size=2)
-        
-        elif pool_type == "l":
-            self.pool = nn.Linear(4 * dim, dim)
-
-        else:
-            raise NotImplementedError
-        
-        self.pool_type = pool_type
-
-    def forward(self, x):
-        # B N C
-        B, N, C= x.shape
-        if self.pool_type in ["a", "m"]:
-            H, W = int(math.sqrt(N)), int(math.sqrt(N))
-            x = x.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-            x = self.pool(x)
-            x = x.view(B, C, -1).transpose(1, 2).contiguous()
-        
-        else:
-            x = x.view(B, N//4, -1)
-            x = self.pool(x)
-
-        return x
-
-
-class Up(nn.Module):
-    def __init__(self, up_type, dim):
-        super().__init__()
-        if up_type == "n":
-            self.up = nn.Upsample(scale_factor=2, mode='nearest')
-        
-        elif up_type == "r":
-            self.up = nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                Rearrange('b c h w -> b (h w) c'),
-                nn.Linear(dim, dim)
-            )
-            
-        else:
-            raise NotImplementedError
-        
-        self.up_type = up_type
-
-    def forward(self, x):
-        # B N C
-        B, N, C= x.shape
-        if self.up_type == "n":
-            H, W = int(math.sqrt(N)), int(math.sqrt(N))
-            x = x.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-            x = self.up(x)
-            x = x.view(B, C, -1).transpose(1, 2).contiguous()
-        
-        else:
-            #x = self.up(x) # B, N, 4c
-            #x = x.view(B, N * 4, -1)
-            H, W = int(math.sqrt(N)), int(math.sqrt(N))
-            x = x.view(B, H, W, -1).permute(0, 3, 1, 2).contiguous() # B, C, H, W
-            x = self.up(x) # B, (2H 2W), C
-        
-        return x
 
 
 class GEGLU(nn.Module):
@@ -663,27 +592,9 @@ class Transformer(nn.Module):
                     FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
                 ]))
             
-            # various pooling methods: B, N, C
-            elif block[i] in ['a', 'm', 'l']:
-                self.layers.append(nn.ModuleList([
-                    None,
-                    Pooling(block[i], dim),
-                    None,
-                    FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
-                ]))
-
-            elif block[i] in ['n', 'r']:
-                self.layers.append(nn.ModuleList([
-                    None,
-                    Up(block[i], dim),
-                    None,
-                    FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
-                ]))
-
             else:
                 raise NotImplementedError
 
-        self.block = block
         self.norm_out = LayerNorm(dim)
 
     @beartype
@@ -697,7 +608,7 @@ class Transformer(nn.Module):
         is_spatial=True
     ):
         
-        for blk, (peg, self_attn, cross_attn, ff) in zip(self.block, self.layers):
+        for peg, self_attn, cross_attn, ff in self.layers:
             if exists(peg):
                 x = peg(x, shape=video_shape) + x
 
@@ -713,12 +624,4 @@ class Transformer(nn.Module):
                                mask=cross_attn_context_mask) + x
 
             x = ff(x) + x
-
-            # deal with downsampling:
-            if blk in ['a', 'm', 'l']:
-                video_shape = (video_shape[0], video_shape[1], video_shape[2]//2, video_shape[3]//2) # video_shape: B, T, H, W
-            
-            elif blk in ['n', 'r']:
-                video_shape = (video_shape[0], video_shape[1], int(video_shape[2]*2), int(video_shape[3]*2))
-        
         return self.norm_out(x)

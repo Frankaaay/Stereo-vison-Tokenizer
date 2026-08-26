@@ -106,7 +106,6 @@ class StereoVAE(pl.LightningModule):
         self.latent_channels = args.latent_channels
         self.stereo_num_views = args.stereo_num_views
         self.stereo_num_frames = args.stereo_num_frames
-        self.stereo_mode = args.stereo_mode
         self.resolution = args.resolution
         self.patch_size = args.patch_size
 
@@ -118,7 +117,6 @@ class StereoVAE(pl.LightningModule):
             spatial_pos=args.spatial_pos,
             patch_embed=args.patch_embed,
             patch_size=args.patch_size,
-            temporal_patch_size=args.temporal_patch_size,
             defer_temporal_pool=args.defer_temporal_pool,
             defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
@@ -146,7 +144,6 @@ class StereoVAE(pl.LightningModule):
             spatial_pos=args.spatial_pos,
             patch_embed=args.patch_embed,
             patch_size=args.patch_size,
-            temporal_patch_size=args.temporal_patch_size,
             defer_temporal_pool=args.defer_temporal_pool,
             defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
@@ -451,18 +448,6 @@ class StereoVAE(pl.LightningModule):
         self.mode_samples = mode_samples
         self.batch_updates = batch_updates
         self._micro_step = 0
-
-    @property
-    def latent_shape(self):
-        height = self.resolution // self.patch_size
-        width = self.resolution // self.patch_size
-        return (
-            self.stereo_num_views,
-            self.latent_channels,
-            1,
-            height,
-            width,
-        )
 
     @staticmethod
     def _flatten_view_videos(video: torch.Tensor) -> torch.Tensor:
@@ -1403,7 +1388,6 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--enc_block", type=str, default="tttt")
         parser.add_argument("--dec_block", type=str, default="tttt")
         parser.add_argument("--twod_window_size", type=int, default=4)
-        parser.add_argument("--temporal_patch_size", type=int, default=4)
         parser.add_argument("--defer_temporal_pool", action="store_true")
         parser.add_argument("--defer_spatial_pool", action="store_true")
         parser.add_argument(
@@ -1447,11 +1431,6 @@ class StereoVAE(pl.LightningModule):
             choices=["left", "right"],
             default="left",
         )
-        parser.add_argument(
-            "--stereo_mode",
-            choices=["mono", "stereo"],
-            default="stereo",
-        )
         parser.add_argument("--rgb_weight", type=float, required=True)
         parser.add_argument("--relative_depth_weight", type=float, required=True)
         parser.add_argument("--relative_gradient_weight", type=float, required=True)
@@ -1473,7 +1452,7 @@ class _StereoEncoderOutput:
 
 class StereoEncoder(nn.Module):
     def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
-                    image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
+                    image_channel=3, patch_size=16, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
                     dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False,
@@ -1741,7 +1720,7 @@ class StereoDecodeOutput:
 
 class StereoDecoder(nn.Module):
     def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
-                    image_channel=3, patch_size=16, temporal_patch_size=2, defer_temporal_pool=False, defer_spatial_pool=False,
+                    image_channel=3, patch_size=16, defer_temporal_pool=False, defer_spatial_pool=False,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
                     dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
