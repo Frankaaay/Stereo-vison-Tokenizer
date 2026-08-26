@@ -89,7 +89,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "SINGLE_FRAME_SOURCE_INDEX",
         ):
             self.assertIn(f"${{{name}:?", source)
-        self.assertIn("python3 train_stereo_vae.py", source)
+        self.assertIn('TRAIN_LAUNCHER=(python3)', source)
+        self.assertIn('"${TRAIN_LAUNCHER[@]}" train_stereo_vae.py', source)
         self.assertIn("--latent_channels 48", source)
         self.assertIn(
             '--single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}"',
@@ -218,6 +219,37 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
         self.assertIn("use_distributed_sampler=False", train)
         self.assertNotIn("max_time=", train)
+
+    def test_train_launcher_has_fail_closed_optional_ib_mode(self) -> None:
+        launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
+            encoding="utf-8"
+        )
+        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        probe = (ROOT / "scripts/stereo/check_ib_collective.py").read_text(
+            encoding="utf-8"
+        )
+        for token in (
+            'DISTRIBUTED_MODE="${DISTRIBUTED_MODE:-single}"',
+            'NUM_NODES="${NUM_NODES:-1}"',
+            "WORLD_SIZE=$((NUM_NODES * GPU_COUNT))",
+            "--nproc_per_node",
+            "--node_rank",
+            "--master_addr",
+            "--master_port",
+            '--num_nodes "${NUM_NODES}"',
+            '--distributed_mode "${DISTRIBUTED_MODE}"',
+            "NCCL_IB_DISABLE=0",
+            "NCCL_SOCKET_IFNAME",
+            "NCCL_IB_HCA",
+            'grep -q "NET/IB"',
+        ):
+            self.assertIn(token, launcher)
+        self.assertIn('choices=("single", "ib")', train)
+        self.assertIn("validate_distributed_runtime_args(args)", train)
+        self.assertIn("{1, 2, 4, 8, 16}", train)
+        self.assertIn('backend="nccl"', probe)
+        self.assertIn("dist.all_reduce", probe)
+        self.assertIn("dist.all_gather_object", probe)
 
     def test_four_mode_smoke_wires_da3_and_average_checkpoint(self) -> None:
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(

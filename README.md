@@ -418,7 +418,46 @@ nvidia-smi
 
 启动前确认所选 GPU 没有其他进程和显存占用。不要自动 kill 不属于本次任务的进程。
 
-## 8. 四模式最小可运行 smoke
+## 8. 单机与双机 IB 模式
+
+训练 launcher 默认保持单机语义：
+
+```bash
+export DISTRIBUTED_MODE=single
+export NUM_NODES=1
+```
+
+单机模式不要求 `NODE_RANK`、`MASTER_ADDR` 或 `MASTER_PORT`。`GPU_COUNT` 仍表示本机
+可见 GPU 数。双机 H200 使用显式、fail-closed 的 IB 模式；两端必须使用同一代码 SHA、
+配置和端口，并分别设置 node rank：
+
+```bash
+export DISTRIBUTED_MODE=ib
+export NUM_NODES=2
+export GPU_COUNT=2
+export NODE_RANK=0                 # h200-1；h200-2 使用 1
+export MASTER_ADDR=214.30.239.40   # 启动前重新核对 h200-1 bond0
+export MASTER_PORT=<UNIQUE_PORT>
+export GLOBAL_BATCH_SIZE=96        # 2 nodes * 2 GPUs * BS24 * GA1
+```
+
+IB 模式使用 `bond0` 完成 rendezvous，并将 NCCL HCA限制为
+`mlx5_0:1` 到 `mlx5_7:1`。每台节点在各自 node-local `OUTPUT_ROOT` 写入 NCCL 日志；
+launcher 只有在日志出现真实 `NET/IB` transport 时才返回成功，不允许静默回退 Socket。
+
+`GPU_COUNT` 是每节点卡数，因此完整 batch合同为：
+
+| nodes x GPUs/node | world size | BS/device | GA | global batch |
+| --- | ---: | ---: | ---: | ---: |
+| 1 x 8 | 8 | 24 | 1 | 192 |
+| 2 x 1 | 2 | 24 | 1 | 48 |
+| 2 x 2 | 4 | 24 | 1 | 96 |
+| 2 x 8 | 16 | 24 | 1 | 384 |
+
+正式训练前先用 `scripts/stereo/check_ib_collective.py` 完成双机 collective gate。
+关闭 IB 后仍可使用现有单机单卡或单机 DDP；不同 world size之间不得 strict resume。
+
+## 9. 四模式最小可运行 smoke
 
 下面是已经验证过的 2 GPU H200 配置。输出目录必须使用一个从未存在过的新路径：
 
@@ -498,7 +537,7 @@ LPIPS `vgg.pth`。离线服务器应提前在同版本环境中完成一次下�
 48 条 source 会在每个 local batch 内重复，因此只能验证 8-rank DDP/显存/执行稳定性，
 不能把它解释成 192 个唯一样本的吞吐。
 
-## 9. 开启在线 GT cache
+## 10. 开启在线 GT cache
 
 smoke 成功后，小数据 overfit 可使用新的仓库外 cache root：
 
@@ -512,7 +551,7 @@ SHA、checkpoint、`SINGLE_FRAME_SOURCE_INDEX`、disparity range 和 LR threshol
 namespace/metadata；DA3 cache schema v3 同样编码 source frame、source/checkpoint 和
 preprocess。任一语义变化都会进入新 namespace，旧 stereo v3 / DA3 v2 cache 不会被复用。
 
-## 10. 恢复训练
+## 11. 恢复训练
 
 resume 必须保持原 checkpoint 的代码语义、world size、BS24、GA1、seed、数据、teacher
 权重和四模式 schedule。使用新的 output root，并把 `MAX_STEPS` 设为新的总目标 step：
@@ -531,7 +570,7 @@ bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
 程序会严格读取 `stereo_update_counters`，校验 schedule seed、已完成的 mode prefix 和
 下一 mode；缺少这些字段的旧 checkpoint 不允许推断式恢复。
 
-## 11. Stereo-only LAS2-H 训练
+## 12. Stereo-only LAS2-H 训练
 
 若只训练 LeRobot stereo 的 single/four-frame 路径，不需要 Hy cache 或 DA3：
 
@@ -545,14 +584,14 @@ export GLOBAL_BATCH_SIZE=192
 export MAX_STEPS=<TOTAL_UPDATES>
 export OUTPUT_ROOT=$RUN_ROOT/stereo-only-$(date +%Y%m%d-%H%M%S)
 
-# 其余 LeRobot、LAS2-H、loss、LR、checkpoint 和 logging 变量沿用第 8 节。
+# 其余 LeRobot、LAS2-H、loss、LR、checkpoint 和 logging 变量沿用第 9 节。
 bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
 ```
 
 正式长任务启动前应单独冻结 `MAX_STEPS`、LR/warmup、验证频率、checkpoint cadence、
 WandB 模式和 output path；不要把四步 smoke 参数直接当作正式训练计划。
 
-## 12. 严格评估
+## 13. 严格评估
 
 评估只接受与 checkpoint architecture 完全一致的 CLI 参数（数据选择参数
 `single_frame_source_index` 除外），并使用 posterior mean 与在线 teacher。以下示例在单
@@ -630,7 +669,7 @@ python eval_stereo_vae.py \
   --persistent_workers 1
 ```
 
-### 12.1 正式 mono + DA3 评估
+### 13.1 正式 mono + DA3 评估
 
 Mono evaluation 直接读取 immutable Hy RGB manifest/cache；不会从 stereo batch 截取眼睛。
 Dataset 输出严格为 `[B,1,1,3,T,256,256]`，DA3 接收未带 Student padding 的原始比例
@@ -708,7 +747,7 @@ Mono `metrics.json` 对 `cam_high` 报告 RGB L1、有效 depth pixels、centere
 relative-log-depth L1/RMSE，并记录 DA3 source/checkpoint/process provenance。可视化支持
 `single_frame`、`four_frame` 或 `both`，只渲染实际请求的输出。
 
-### 12.2 一次运行全部四种模式
+### 13.2 一次运行全部四种模式
 
 `--eval_eye_mode` 接受 `mono|stereo|both`，`--eval_temporal_mode` 接受
 `single_frame|four_frame|both`，二者按笛卡尔积展开，并复用训练侧 `MODE_IDS`。例如：
@@ -744,7 +783,7 @@ universe 画成伪配对。
 `metrics.json`、程序 exit code 0、精确 sample count、有限指标和可视化图片共同构成
 评估成功；仅看到进程启动不算完成。完整 split 评估时删除 `--max_batches`。
 
-## 13. 输出与 provenance
+## 14. 输出与 provenance
 
 每次训练至少保留：
 
@@ -759,7 +798,7 @@ universe 画成伪配对。
 数据集、teacher 权重、online GT cache、checkpoint、日志和 run output 都不得提交进
 Git。更换服务器时复制这些仓库外资产，或按本 README 重新生成，并重新核对所有 SHA。
 
-## 14. 常见故障
+## 15. 常见故障
 
 - `ModuleNotFoundError: av`：训练环境缺少 `av==16.0.1`；这会在 LeRobot MP4
   DataLoader worker 中失败。
