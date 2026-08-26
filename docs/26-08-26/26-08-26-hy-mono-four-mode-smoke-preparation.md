@@ -458,3 +458,28 @@ GPU smoke 完成前不进入 400-step overfit。
   合集为 48，且所有 ranks 的 mode schedule 一致。
 - 提交前本地 `py_compile`/`git diff --check` 后推送；H200-2 定向与完整 suite 通过、8 卡
   实时空闲且独立 output 不存在后才启动。
+
+### H200-2 8 卡 BS24 fresh smoke（成功）
+
+- 8-rank 合同提交：`f4cfaca98dd8ddcacb45217558113f1e48ef06d5`；H200-2 新增
+  sampler 定向测试为 `1 passed`，完整 `tests/stereo` 为
+  `121 passed, 4 warnings in 5.94s`。
+- output：`/data/home/frank/experiments/stereo_hy_four_mode_smoke4_8gpu_bs24_h2002_v1`
+- tmux：`stereo-hy-fourmode-smoke4-8gpu-bs24-v1-260826`
+- launcher SHA256：`90ef406d3ae9b49b605d4231f867b529dea34a124ddff433a2efc004b49ef1db`
+- 12:01:37 +08:00 启动；8 ranks、BS24/device、GA1、global batch 192。训练 4/4、
+  validation 4/4 后正常退出，exit code 0，`val/mixed/total_loss=1.620`，日志
+  traceback 数为 0，结束后 8 张 GPU 均释放。
+- `step_timings.json` 为 world size 8、BS24/device；四种 mode 各 1 个 update：
+  stereo/four-frame `24.681 s`、mono/single-frame `1.015 s`、mono/four-frame
+  `0.555 s`、stereo/single-frame `5.994 s`；四步均值 `8.061 s`。固定 48-source
+  在 global batch 内重复 4 次，因此这些 timing 只用于 8 卡执行稳定性，不代表 192 个
+  唯一样本吞吐。
+- 跨 8 ranks 的最大 peak allocated：stereo/four-frame `115,973,905,920 B`、
+  mono/four-frame `37,073,724,416 B`、stereo/single-frame `27,101,352,448 B`、
+  mono/single-frame `10,210,859,520 B`；最大 reserved 为 `133,475,336,192 B`。
+- 三个 checkpoint 均可读取；`last.ckpt` 为 `global_step=4`，四种 mode 各 1 update、
+  各 192 global samples，four/single-frame updates 为 2/2，BS24/device、GA1、
+  seed 1234、world size 8。
+- run manifest SHA256：`fc9e3ba58f3886655f02ea6dd150bfb0c3b700bcf8d103ebf9255ea8de6d142a`；
+  resolved config SHA256：`de0b09651731f7306d4ac107b1af99c797a84c5c94f103746c9991ec327e8a26`。
