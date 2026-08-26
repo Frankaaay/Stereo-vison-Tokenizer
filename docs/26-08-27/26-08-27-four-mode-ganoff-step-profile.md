@@ -87,3 +87,39 @@ remains identical to the GAN-off baseline: fresh initialization, seed 1234,
 The GAN-on result, memory safety decision, optional focused trace, comparison
 with the colleague medians, and final artifact paths will be appended after the
 run finishes.
+
+## H200-2 strict A/B rerun
+
+Status: **in progress**, launched at 2026-08-27 01:23:27 +08:00.
+
+- Node: H200-2
+- Branch / experiment commit: `hezhou-las2-h` /
+  `bfab545de058e354376a6d1599a3d6b97eb2debe`
+- Computational baseline: the main training paths are unchanged from
+  `80cba3661dc6de4d6967e1edf5a69823dc9d4e5e`; the experiment commit only adds
+  explicit opt-in GAN launcher arguments and its source-contract test.
+- Runtime: `/data/home/frank/runtime/stereo-tokenizer-unified-v1`
+- PyAV overlay: `/data/home/frank/runtime/stereo-tokenizer-wandb-overlay-v1`,
+  providing `av==16.0.1`
+- Output:
+  `/data/home/frank/experiments/stereo_four_mode_gan_ab_h2002_20260827_v1`
+- tmux: `stereo-fourmode-gan-ab-h2002-260827`
+- Launcher log: `launcher.log`
+- GAN-off run/log: `ganoff_seed1234/run.log`
+- GAN-on run/log: `ganon_seed1234/run.log`
+
+The H200-2 launcher first repeats the 28-update GAN-off baseline, then performs
+the 28-update GAN-on run from a fresh initialization with weights `1/1/1` and
+discriminator start update 0. This preserves a within-node strict A/B after the
+requested move from H200-1. The H200-2 stereo manifest SHA256 matches H200-1,
+but the node-local mono smoke manifest differs (`5f69331a...` versus
+`b265c08f...`); therefore H200-1 results are a cross-node/data reference rather
+than the primary strict control.
+
+Startup health check found the tmux, launcher, and eight ranks alive in
+initialization, with all eight GPUs opened, and no immediate traceback, OOM,
+NCCL error, or NaN. No measured step throughput existed yet. Initial ETA at
+01:24 +08:00, based on the completed H200-1 28-update baseline and the reported
+roughly 0.2--2.0 second GAN-on step range: 4--10 minutes for both test bodies,
+and 7--15 minutes including validation, output finalization, result aggregation,
+and the memory-safety decision for focused tracing.
