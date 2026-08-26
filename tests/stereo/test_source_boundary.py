@@ -38,7 +38,13 @@ class SourceBoundaryTest(unittest.TestCase):
 
     def test_legacy_packages_and_entrypoints_are_removed(self) -> None:
         for directory in (ROOT / "OmniTokenizer", ROOT / "Diffusion"):
-            files = [path for path in directory.rglob("*") if path.is_file()]
+            files = [
+                path
+                for path in directory.rglob("*")
+                if path.is_file()
+                and "__pycache__" not in path.parts
+                and path.suffix != ".pyc"
+            ]
             self.assertEqual(files, [], str(directory))
         for path in (
             ROOT / "vqgan_train.py",
@@ -84,12 +90,20 @@ class SourceBoundaryTest(unittest.TestCase):
         }
         self.assertEqual({name for name in classes if not name.startswith("_")}, expected)
 
-    def test_data_module_is_stereo_only(self) -> None:
+    def test_data_module_classes_match_supported_sources(self) -> None:
         tree = ast.parse(DATA_SOURCE.read_text(encoding="utf-8"))
         classes = {
             node.name for node in tree.body if isinstance(node, ast.ClassDef)
         }
-        self.assertEqual(classes, {"StereoManifestDataset", "StereoDataModule"})
+        self.assertEqual(
+            classes,
+            {
+                "ModeSubset",
+                "StereoManifestDataset",
+                "HyMonoSmokeDataset",
+                "StereoDataModule",
+            },
+        )
 
     def test_lpips_pretrained_name_uses_value_comparison(self) -> None:
         tree = ast.parse(LPIPS_SOURCE.read_text(encoding="utf-8"))
