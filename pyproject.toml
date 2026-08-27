@@ -9,6 +9,7 @@ dependencies = [
     "einops",
     "huggingface-hub",
     "imageio",
+    "ipywidgets>=8.0.4",
     "joblib",
     "numpy==1.26.2",
     "omegaconf",

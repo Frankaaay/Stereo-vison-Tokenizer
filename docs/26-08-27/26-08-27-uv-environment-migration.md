@@ -27,6 +27,7 @@
 - PyTorch Lightning：`2.5.6`
 - NumPy：`1.26.2`
 - xFormers：`0.0.31.post1`
+- ipywidgets：`>=8.0.4`
 
 PyTorch 与 torchvision 只从官方 CUDA 12.6 wheel index 解析。LAS2-H 继续使用冻结源码
 目录；DA3 继续检出冻结 SHA，并在 `uv sync` 后用 `uv pip install --no-deps -e` 暴露，
@@ -54,12 +55,19 @@ NumPy ABI。
 - 删除手工维护的 `requirements.txt`，避免出现第三份依赖真相；
 - 更新 `README.md` 的 uv sync、DA3 editable、双环境和目录职责说明；
 - `.gitignore` 忽略误生成的 `.venv/`。
+- H100 环境安装前补充训练 runtime 的直接依赖 `ipywidgets>=8.0.4`，并重新生成根
+  `uv.lock`；Hy exporter 的声明和 lock 保持不变。
 
 ## 本地验证
 
 本地只负责 lock 解析、TOML/lock 一致性、源码静态测试和 diff 检查。完整安装、
 `uv pip check`、CUDA/import 版本打印与源码测试必须在经授权的 Linux GPU runtime 中完成；
 Windows lock 解析不能替代 H100/H200 runtime acceptance。
+
+2026-08-27 以 clean `hezhou-las2-h@1659dc05bca9b75c80b276d396763171dce49443`
+为基线补充 `ipywidgets>=8.0.4`。本地重新生成根 lock 后，必须再次执行根项目与
+Hy exporter 的 `uv lock --check`，并通过 `git diff --check`；H100 端只在本地修改
+commit push 后同步精确 SHA，不在服务器 clone 中直接修改依赖文件。
 
 ## 当前结论与下一步
 
