@@ -1,5 +1,6 @@
 __pycache__/
 **/__pycache__/
+.venv/
 lightning_logs/
 .ipynb_checkpoints/
 *.mp4

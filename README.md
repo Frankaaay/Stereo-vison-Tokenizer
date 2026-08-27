@@ -71,6 +71,7 @@ teacher cache；它不是必须提前离线生成的数据集。缓存只能在 
 sudo apt-get update
 sudo apt-get install -y git git-lfs ffmpeg libgl1 libglib2.0-0 python3.12 python3.12-venv
 nvidia-smi
+uv --version
 ```
 
 ## 3. 目录规划与代码检出
@@ -99,31 +100,37 @@ git rev-parse HEAD
 运行前应记录实际 branch、完整 SHA 和 clean 状态。若要复现某次实验，应再
 `git checkout <FULL_COMMIT_SHA>`，不要依赖分支名推断代码版本。
 
+仓库内目录职责固定为：
+
+- `doc/`：冻结的设计规格、数据合同和长期架构决策；
+- `docs/YY-MM-DD/`：实际实验、调试、运行记录和阶段结论；
+- `environments/`：与根训练环境隔离的辅助 uv project；
+- 根目录 `pyproject.toml` 与 `uv.lock`：训练环境的直接依赖声明和完整锁定结果。
+
+Python environment、数据、teacher、checkpoint、cache 和 run output 都放在仓库外；
+仓库只保存可复现它们的声明、锁文件、代码和记录。
+
 ## 4. 创建训练环境
 
-根目录的 `requirements.txt` 是宽泛依赖集合，不是当前分支已验证的完整锁文件；其中的
-旧 Lightning pin 不能用于这条 Python 3.12 recipe。请按下面的显式版本安装。
+根目录 `pyproject.toml` 是训练环境的唯一直接依赖声明，`uv.lock` 固定完整传递依赖图，
+包括 PyTorch `2.7.1+cu126`、torchvision `0.22.1+cu126`、PyTorch Lightning `2.5.6`
+和 xFormers `0.0.31.post1`。不要手工编辑 `uv.lock`，也不要再从旧
+`requirements.txt` 安装。
+
+实际 venv 仍放在仓库外。`UV_PROJECT_ENVIRONMENT` 必须在每次 sync 前指向目标环境，
+避免在仓库中生成或误用 `.venv`：
 
 ```bash
-python3.12 -m venv "$RUNTIME_ROOT/train"
+cd "$PROJECT_ROOT"
+export UV_PROJECT_ENVIRONMENT="$RUNTIME_ROOT/train"
+uv lock --check
+uv sync --frozen --python 3.12
 source "$RUNTIME_ROOT/train/bin/activate"
-python -m pip install --upgrade pip setuptools wheel
-
-python -m pip install \
-  torch==2.7.1 torchvision==0.22.1 \
-  --index-url https://download.pytorch.org/whl/cu126
-
-python -m pip install \
-  numpy==1.26.2 \
-  pytorch-lightning==2.5.6 \
-  opencv-python==4.11.0.86 \
-  av==16.0.1 \
-  wandb==0.23.1 \
-  pyarrow==23.0.0 \
-  einops timm beartype imageio pillow requests tqdm scipy \
-  pandas joblib open3d trimesh thop transformations \
-  huggingface_hub safetensors omegaconf pytest
 ```
+
+训练 lock 只面向 Linux x86_64，并把 torch/torchvision 显式绑定到官方 CUDA 12.6
+wheel index。uv 可以使用现有 Python 3.12，也可以在缺失时安装 managed Python；最终仍须
+以版本打印和 CUDA preflight 验证实际解释器及 wheel。
 
 ### 4.1 安装 LAS2-H source
 
@@ -151,14 +158,22 @@ git clone https://github.com/ByteDance-Seed/depth-anything-3.git "$DA3_REPO"
 git -C "$DA3_REPO" checkout "$DA3_SOURCE_SHA"
 git -C "$DA3_REPO" status --short
 
-# xformers 版本与 torch 2.7.1 对齐；先固定，再安装 DA3 editable package。
-python -m pip install xformers==0.0.31.post1
-python -m pip install -e "$DA3_REPO"
+# DA3 的第三方依赖和 xformers 已由根 uv.lock 固定；这里只暴露冻结 source。
+uv pip install \
+  --python "$RUNTIME_ROOT/train/bin/python" \
+  --no-deps \
+  -e "$DA3_REPO"
 ```
+
+根项目的 `uv sync` 是 exact sync，之后若再次 sync，会移除这个仓库外 editable package；
+因此每次重建训练环境时都要在 sync 后重新执行上面的 `--no-deps -e`，然后完成 source SHA、
+import 和版本检查。不得去掉 `--no-deps` 让 DA3 再次解析或替换 locked dependency。
 
 安装 DA3 后必须重新核对 PyTorch 没有被依赖解析器替换：
 
 ```bash
+uv pip check --python "$RUNTIME_ROOT/train/bin/python"
+
 python - <<'PY'
 import torch
 import torchvision
@@ -341,13 +356,18 @@ split 在 episode 层完成，不会让同一 episode 的窗口跨 train/val/tes
 
 ### 6.3 Hy mono smoke cache
 
-Hy exporter 需要 `lance`，建议使用独立 CPU 环境，避免它的 NumPy 依赖改变训练环境：
+Hy exporter 使用 `environments/hy-export/pyproject.toml` 与它自己的 `uv.lock`，创建独立
+CPU venv，避免其 NumPy 2.5.2/Lance 依赖改变训练环境的 NumPy 1.26.2 ABI：
 
 ```bash
-python3.12 -m venv "$RUNTIME_ROOT/hy-export"
+export UV_PROJECT_ENVIRONMENT="$RUNTIME_ROOT/hy-export"
+uv lock --check --project "$PROJECT_ROOT/environments/hy-export"
+uv sync \
+  --project "$PROJECT_ROOT/environments/hy-export" \
+  --frozen \
+  --python 3.12
 source "$RUNTIME_ROOT/hy-export/bin/activate"
-python -m pip install --upgrade pip
-python -m pip install pylance==8.0.0 pyarrow==23.0.0 numpy==2.5.2 pillow==12.3.0
+uv pip check --python "$RUNTIME_ROOT/hy-export/bin/python"
 
 export HY_LANCE_ROOT=/data/datasets/hy_lance_overlay
 export MONO_SMOKE_CACHE_ROOT=$WORK_ROOT/preprocessed/hy_mono_cam_high_smoke_v1
@@ -371,6 +391,7 @@ exporter 从 48 个不同 episode 选择四帧窗口，保存 raw uint8 RGB，�
 
 ```bash
 deactivate
+export UV_PROJECT_ENVIRONMENT="$RUNTIME_ROOT/train"
 source "$RUNTIME_ROOT/train/bin/activate"
 ```
 
@@ -382,6 +403,8 @@ source "$RUNTIME_ROOT/train/bin/activate"
 cd "$PROJECT_ROOT"
 git status --short --branch
 git rev-parse HEAD
+uv lock --check
+uv pip check --python "$RUNTIME_ROOT/train/bin/python"
 
 python -m py_compile \
   train_stereo_vae.py eval_stereo_vae.py \
