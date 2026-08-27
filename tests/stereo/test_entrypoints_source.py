@@ -99,10 +99,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("${LAS2_H_SOURCE_SHA:?", source)
         self.assertIn('--las2_h_source_sha "${LAS2_H_SOURCE_SHA}"', source)
         self.assertNotIn("single_frame_loss_weight", source)
-        self.assertNotIn("--gan_enabled", source)
+        self.assertIn('GAN_ENABLED="${GAN_ENABLED:-0}"', source)
+        self.assertIn("GAN_ARGS+=(--gan_enabled)", source)
         self.assertNotIn("--use_vae", source)
-
-        self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--fp16", source)
 
     def test_profile_regions_are_opt_in_and_cover_requested_components(self):
@@ -246,7 +245,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             self.assertIn(token, launcher)
         self.assertIn('choices=("single", "ib")', train)
         self.assertIn("validate_distributed_runtime_args(args)", train)
-        self.assertIn("{1, 2, 4, 8, 16}", train)
+        self.assertIn("_validate_four_mode_batch_contract(args)", train)
         self.assertIn('backend="nccl"', probe)
         self.assertIn("dist.all_reduce", probe)
         self.assertIn("dist.all_gather_object", probe)
@@ -265,9 +264,13 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "MONO_SMOKE_MANIFEST",
             "MODE_UPDATES_PER_EPOCH",
             "DA3_CHECKPOINT_SHA256",
-            "--mixed_stereo_sample_limit 48",
+            "MIXED_MONO_SAMPLE_LIMIT",
+            "MIXED_STEREO_SAMPLE_LIMIT",
+            '--mixed_mono_sample_limit "${MIXED_MONO_SAMPLE_LIMIT}"',
+            '--mixed_stereo_sample_limit "${MIXED_STEREO_SAMPLE_LIMIT}"',
         ):
             self.assertIn(token, launcher)
+        self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)
         self.assertIn('"val/mixed/total_loss"', train)
         self.assertIn("OnlineDepthAnything3GTCallback", train)
         self.assertIn("mode_occurrences_before", train)

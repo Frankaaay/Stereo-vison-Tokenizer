@@ -322,11 +322,20 @@ class StereoDataModule(pl.LightningDataModule):
         )
         if manifest is None:
             return None
-        return HyMonoSmokeDataset(
+        dataset = HyMonoSmokeDataset(
             manifest,
             self.args.mono_cache_root,
             single_frame_source_index=self.args.single_frame_source_index,
         )
+        mixed = bool(getattr(self.args, "four_mode_mixed_training", False))
+        if train and mixed:
+            limit = int(self.args.mixed_mono_sample_limit)
+            if limit < 1 or limit > len(dataset):
+                raise ValueError(
+                    "mixed mono sample limit must be in [1, dataset size]"
+                )
+            dataset = ModeSubset(dataset, range(limit))
+        return dataset
 
     def _dataset(self, train: bool, split: str | None = None):
         if not bool(getattr(self.args, "four_mode_mixed_training", False)):
@@ -456,5 +465,6 @@ class StereoDataModule(pl.LightningDataModule):
             "--lerobot_maximum_timestamp_error_s", type=float, default=0.05
         )
         parser.add_argument("--lerobot_val_sample_limit", type=int, default=512)
+        parser.add_argument("--mixed_mono_sample_limit", type=int, default=48)
         parser.add_argument("--mixed_stereo_sample_limit", type=int, default=48)
         return parser

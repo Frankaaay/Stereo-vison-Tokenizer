@@ -424,6 +424,34 @@ def validate_distributed_runtime_args(args, environ=None):
             )
 
 
+def _validate_four_mode_batch_contract(args):
+    if args.grad_accumulates != 1:
+        raise ValueError("four-mode training requires grad_accumulates=1")
+    if args.batch_size < 1:
+        raise ValueError("four-mode batch size must be positive")
+    world_size = args.devices * args.num_nodes
+    if world_size < 1:
+        raise ValueError("four-mode DDP world size must be positive")
+    limits = {
+        "mono": int(args.mixed_mono_sample_limit),
+        "stereo": int(args.mixed_stereo_sample_limit),
+    }
+    for source, limit in limits.items():
+        if limit < world_size:
+            raise ValueError(
+                f"{source} sample limit must be at least the DDP world size"
+            )
+        if limit % world_size:
+            raise ValueError(
+                f"{source} sample limit must be divisible by DDP world size"
+            )
+        rank_local_samples = limit // world_size
+        if args.batch_size > rank_local_samples:
+            raise ValueError(
+                "four-mode batch size cannot exceed rank-local source samples"
+            )
+
+
 def validate_runtime_args(args):
     if args.sequence_length != 4:
         raise ValueError("StereoVAE training requires sequence_length=4")
@@ -437,8 +465,7 @@ def validate_runtime_args(args):
                 "four-mode training currently requires "
                 "--single_frame_source_index=0"
             )
-        if args.batch_size != 24 or args.grad_accumulates != 1:
-            raise ValueError("four-mode training is frozen to BS24 and GA1")
+        _validate_four_mode_batch_contract(args)
         if args.mode_updates_per_epoch < 4 or args.mode_updates_per_epoch % 4:
             raise ValueError("mode_updates_per_epoch must be a positive multiple of 4")
         if args.mode_schedule_start_update < 0:
@@ -621,16 +648,6 @@ def validate_runtime_args(args):
     if args.num_nodes < 1:
         raise ValueError("--num_nodes must be positive")
     validate_distributed_runtime_args(args)
-    if (
-        args.four_mode_mixed_training
-        and args.devices * args.num_nodes not in {1, 2, 4, 8, 16}
-    ):
-        raise ValueError(
-            "the fixed 48-sample four-mode smoke supports 1, 2, 4, 8, or 16 "
-            "DDP ranks"
-        )
-    if args.four_mode_mixed_training and args.mixed_stereo_sample_limit != 48:
-        raise ValueError("the fixed four-mode smoke requires 48 stereo samples")
     if args.max_steps < 1:
         raise ValueError("--max_steps must be positive")
     if args.checkpoint_every_n_steps < 1:
