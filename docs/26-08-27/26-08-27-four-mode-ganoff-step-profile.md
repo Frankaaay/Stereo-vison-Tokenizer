@@ -175,3 +175,55 @@ Initial ETA at 10:46 +08:00 remains 4--10 minutes for both test bodies and
 7--15 minutes including validation, result aggregation, and the focused-trace
 memory-safety decision. No steady-state step existed at the health snapshot, so
 this is still a history-based estimate rather than a measured-throughput ETA.
+
+### H200-2 v2 result and fixed-data diagnosis
+
+The v2 GAN-off process exited 137 before the first update and GAN-on did not
+start. This was not an OOM: DataLoader workers showed that the reused H200-1
+episode manifest referenced H200-2-missing video shards, while other referenced
+videos had no decodable frame at their target timestamps. Representative errors
+were missing files under shards `1572`, `1839`, and `1958`, and timestamp decode
+failures under shards `0405`, `0654`, and `0750`. No `step_timings.json` was
+produced.
+
+H200-2 already had a locally built episode manifest at
+`/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1/h200_2_local_manifest_v1.jsonl`
+with 48,529 episodes. The four-mode loader deterministically selects 48 distinct
+train episodes/windows from it for seed 1234. Because the mono smoke also has 48
+samples and every rank receives six source indices, one stereo-mode update and
+one mono-mode update each cover the complete 48-sample source set (with local
+BS24 repetition).
+
+For v3, those actually selected 48 stereo episodes were materialized as:
+
+- Manifest:
+  `inputs/stereo_fixed_48_seed1234.jsonl`
+- Summary/audit:
+  `inputs/stereo_fixed_48_seed1234_summary.json`
+- Manifest SHA256:
+  `82ba78ceef0c3a86a7772d4f378cfc622ef8d1e55795475d881e1f6d6d865a2c`
+- Contract: 48 distinct episodes, 48 selected windows, seed 1234,
+  `single_frame_source_index=0`
+- Validation: all 48 selected windows successfully decoded six-camera
+  four-frame input with native shape `[3,2,3,4,256,256]`; this also covers the
+  source-index-0 frame required by stereo/single.
+
+### H200-2 v3 equal-count A/B
+
+Status: **in progress**, launched at 2026-08-27 11:45:58 +08:00.
+
+- Output:
+  `/data/home/frank/experiments/stereo_four_mode_gan_ab_h2002_20260827_v3`
+- tmux: `stereo-fourmode-gan-ab-h2002-260827-v3`
+- Code: `hezhou-las2-h@bfab545de058e354376a6d1599a3d6b97eb2debe`
+- LAS2-H: Frank-owned clean clone at exact `8c97bd4c...`
+- Order: fresh 28-update GAN-off, then fresh 28-update GAN-on
+- GAN-on weights: image/video/feature matching `1/1/1`, discriminator start 0
+- Shared source counts: mono 48, stereo 48
+
+Startup health check found the tmux, launcher, and eight ranks alive in GAN-off
+initialization with no immediate missing-file, decode, dirty-source, OOM, NCCL,
+NaN, or traceback error. No steady step existed yet. Initial ETA at 11:46 +08:00
+is 4--10 minutes for both bodies and 7--15 minutes including result aggregation
+and the focused-trace memory-safety decision, based on the H200-1 baseline and
+the colleague GAN-on timing range.
