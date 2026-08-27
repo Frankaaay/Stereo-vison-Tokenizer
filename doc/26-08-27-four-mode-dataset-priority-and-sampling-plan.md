@@ -233,3 +233,86 @@ export LAS2_H_MAX_DISP=192
 泛化命名，不能据此判断实际运行的是 FoundationStereo。最终运行事实必须读取
 `resolved_config.json` 和 run metadata 中的 `online_gt.backend`；正式 LAS2-H 实验必须为
 `las2_h`。
+
+## 8. H200 x8、GAN-off 下的 P0+P1 一遍工期估算
+
+### 8.1 计算口径
+
+本节只使用 2026-08-27 的 H200 x8、global batch 192、GAN-off 稳态实测：
+
+| mode | 中位 step time | global sample-executions/s |
+| --- | ---: | ---: |
+| mono/single | 157.96 ms | 1,215.5 |
+| mono/four | 530.04 ms | 362.2 |
+| stereo/single | 353.65 ms | 542.9 |
+| stereo/four | 1,457.48 ms | 131.7 |
+
+当前 LeRobot 正式窗口合同是 30 FPS、`frame_offsets=[0,3,6,9]`、
+`START_STRIDE=12`，所以每条连续相机时间线每小时约产生：
+
+```text
+30 * 3600 / 12 = 9,000 windows/hour
+```
+
+这里的“一遍”定义为：每个 unique window 被分配给一个 temporal mode 执行一次；不是让
+`single` 和 `four` 各自都再完整看一遍。同一数据集的多个相机流如果都独立枚举，则必须按
+相机流数增加 unique windows，不能仍按原始 episode 小时数计算。
+
+正式三阶段比例在完整训练区间上的积分为：
+
+```text
+mono/single   = 35%
+mono/four     = 35%
+stereo/single = 15%
+stereo/four   = 15%
+```
+
+由实测 step time 得到加权平均 `512.47 ms/step`，即约 `374.66` global
+sample-executions/s。其中 mono 覆盖速度约 `262.26 windows/s`，stereo 执行速度约
+`112.40 windows/s`。
+
+### 8.2 当前可量化数据量
+
+| 口径 | 时长 | 说明 |
+| --- | ---: | --- |
+| P0 合计 | 23,994.3 h | 按表中发布/首批小时口径求和 |
+| 已量化 P1（不含 EgoSuite） | 至少 2,443.6 h | UR5-Dex 7.3 + RoboCasa365 2,200 + RoboMME 21.3 + Deform360 至少 215 |
+| P0 + 已量化 P1（不含 EgoSuite） | 至少 26,437.9 h | HuMI 全量、UMI-3D、MIKASA、WatchAct 未知时长未计入 |
+| 再计入 EgoSuite 100K 分阶段目标 | 至少 126,437.9 h | 100K 是目标/发布口径，不等于当前已经全部落盘可训 |
+
+### 8.3 估算结果
+
+| 场景 | H200 x8 理想训练时间 | 含义 |
+| --- | ---: | --- |
+| P0 + 已量化 P1，不含 EgoSuite，保持正式分阶段混合 | **约 10.50 天** | mono 数据完整覆盖一遍，同时按阶段比例持续抽 stereo |
+| 再计入 EgoSuite 100K，保持正式分阶段混合 | **约 50.22 天** | 当前最适合作为“全部 P0+P1 一遍”的预算下限 |
+| P0 + 已量化 P1，只跑 mono 且 single/four 各占一半 | 约 4.93 天 | 纯吞吐下限，不是建议的正式训练 |
+| 再计入 EgoSuite 100K，只跑 mono | 约 23.60 天 | 纯吞吐下限，会完全停止 stereo 分支更新 |
+
+正式混合的 50.22 天不是“所有数据已知后的精确 ETA”，而是单条代表时间线口径的计算下限。
+它尚未计入：未知时长的四个 P1 数据集、每个数据集的多相机独立流放大、损坏/过滤后的有效时长变化、
+checkpoint/validation/重启，以及正式数据解码相对 smoke cache 的 I/O 差异。可用下式在 manifest 统计后
+直接更新：
+
+```text
+formal_days = unique_mono_windows / 262.26 / 86400
+            = effective_mono_camera_hours * 9000 / 262.26 / 86400
+```
+
+因此每增加 10,000 个有效 mono camera-hours，正式分阶段混合约增加 **3.97 天**。
+
+### 8.4 双目池覆盖和重复率
+
+按 single/four 各占一半单独遍历 stereo pool，HiFi head 的 2,000 pair-hours 约需
+**0.98 天**；若左右手两组 P1 也通过门禁，三组共 6,000 pair-hours 约需 **2.95 天**。
+ABC ZED-X 和 Daimon DataDex 的真实 stereo 子集时长仍未知，暂时不能加入精确总数。
+
+在正式三阶段积分比例下，mono/stereo 总执行数为 70/30。覆盖 26,437.9 个 mono
+timeline-hours 时，会执行相当于约 11,330.5 stereo pair-hours；计入 EgoSuite 100K 后则约
+54,187.7 pair-hours。即使把 ABC 的全部 3,590.7 h、Daimon 的全部 1,000 h 和 HiFi 三组
+pair 的 6,000 h 都当作可用双目，当前候选上界也只有 10,590.7 pair-hours；因此前一个
+11,330.5 pair-hours 预算已经足够让当前表内 stereo P0+P1 至少覆盖一遍。若合格 stereo pool
+只有 HiFi head 的 2,000 pair-hours，等效重复约
+5.67x / 27.09x；即使三组 HiFi 共 6,000 pair-hours 都合格，也约为 1.89x / 9.03x。
+这说明正式训练必须记录每个 stereo dataset 的 repeat factor，并在 ABC/DataDex 子集时长落盘后
+重新决定 stereo 上限；不能用简单 concatenate 让训练尾段变成无控制的重复采样。
