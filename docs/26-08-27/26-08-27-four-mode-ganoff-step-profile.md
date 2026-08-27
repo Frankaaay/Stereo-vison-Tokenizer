@@ -227,3 +227,38 @@ NaN, or traceback error. No steady step existed yet. Initial ETA at 11:46 +08:00
 is 4--10 minutes for both bodies and 7--15 minutes including result aggregation
 and the focused-trace memory-safety decision, based on the H200-1 baseline and
 the colleague GAN-on timing range.
+
+The v3 GAN-off attempt then exited 1 before its first update because the
+materialized manifest contained only the 48 selected `train` episodes, while
+Lightning constructs the validation loader before entering the fit loop. Every
+rank failed closed with `ValueError: manifest contains no val episodes`.
+GAN-on did not start and no timing file was produced. The 48-sample decode audit
+remains valid, but that manifest cannot be used directly by the current combined
+train/validation entrypoint without adding a separately valid val split.
+
+### H200-1 direct GAN-on A/B
+
+Status: **in progress**, launched at 2026-08-27 12:07:38 +08:00.
+
+Because the original H200-1 GAN-off baseline is already complete with the exact
+node-local stereo/mono data, the H200-1 retry runs only one fresh 28-update
+GAN-on body and compares it directly with that baseline.
+
+- Output:
+  `/data/home/frank/experiments/stereo_four_mode_ganon_profile_h2001_20260827_v1`
+- tmux: `stereo-fourmode-ganon-h2001-260827-v1`
+- Code: `hezhou-las2-h@bfab545de058e354376a6d1599a3d6b97eb2debe`
+- Runtime/overlay: `stereo-tokenizer-unified-v1` plus
+  `stereo-tokenizer-profile-overlay-v1` (`av==16.0.1`)
+- Data/seed/order: identical to the completed H200-1 GAN-off baseline
+- GAN-on: image/video/feature matching `1/1/1`, discriminator start 0
+- Schedule: 28 updates, first 8 warm-up, final 20 giving 5 samples per mode
+
+Pre-launch snapshot found all eight H200-1 GPUs at 0 MiB with no compute
+process. The user explicitly authorized ignoring a possible root process on
+GPU0; none was present at launch. Startup health check found the tmux, launcher,
+and all eight ranks alive in initialization, with no immediate traceback, OOM,
+NCCL error, NaN, dirty-source error, or data error. No steady step existed yet.
+Initial ETA at 12:08 +08:00 is 3--7 minutes for the 28-update GAN-on body and
+5--12 minutes including validation, result aggregation, comparison, and the
+focused-trace memory-safety decision.
