@@ -30,7 +30,7 @@
   commit、位置和不创建的具体 blocker，并等待用户明确同意；未收到同意不得继续任何创建动作。
 - 发现目标分支有未提交修改、被其他 worktree 占用、无法 fast-forward 或不适合直接修改时，必须
   保持现场并询问用户；禁止自行通过新 branch/worktree 绕过。
-- 以上约束适用于本地、H800、B300、H200、跳板机及所有用户账户，优先级高于本文其他任何
+- 以上约束适用于本地、H800、B300、H100、H200、跳板机及所有用户账户，优先级高于本文其他任何
   branch/worktree 工作流建议。
 
 ## 服务器与登录身份
@@ -41,6 +41,23 @@
   - 两个 alias 都通过 `jump-h200-qinghua`；跳板机也使用 `frank`。
 - SSH HostName、端口、密钥和 ProxyJump 以调用方的 `~/.ssh/config` 为唯一来源。仓库文档只使用 alias，不硬编码公网地址。
 - 代码中的逻辑节点 ID 是 `h200-qinghua-1` 和 `h200-qinghua-2`，不要与 SSH alias `h200-1` 和 `h200-2` 混淆。
+
+## H100 Slurm 集群
+
+- 对 H100 的任何检查、环境配置、测试、训练、日志读取或存储操作开始前，必须完整阅读：
+  [`docs/26-08-27/26-08-27-h100-cluster-guide.md`](docs/26-08-27/26-08-27-h100-cluster-guide.md)。
+- 本节同时适用于本地 Windows 通过 `ssh h100` 操作，以及 Codex SSH 中直接运行在 H100 的任务。
+  SSH 地址、端口、用户名和密钥只允许保存在调用方的 `~/.ssh/config` 或受控凭据存储中，禁止写入仓库。
+- 指南是运行环境和操作方法的参考，不构成对安装、远端修改、提交或取消 Slurm 作业、覆盖产物、删除文件
+  或扩大资源规模的自动授权。当前用户指令和本 `AGENTS.md` 的授权、安全及 Git 约束优先；发现实质冲突时停止并报告。
+- 易变事实必须在操作前实时核对，包括 `whoami`、`hostname`、Git branch/HEAD/worktree、Slurm 队列与分配、
+  数据和 checkpoint 路径、依赖、GPU 资源以及输出目录。不得用指南中的历史描述覆盖实时证据。
+- H100 登录节点只允许编辑、轻量检查、环境管理、提交作业和读取日志；所有 GPU、训练、评估、预处理及
+  重型 CPU/内存测试都必须通过 Slurm。不得直接 SSH 到无活跃作业的计算节点或绕过 Slurm 占用资源。
+- 本地 Codex 负责源码修改、最小验证、commit 和 push；H100 Codex 只在服务器 clean clone 中同步已推送的
+  精确 SHA，并负责环境检查以及通过 Slurm 执行已授权测试。H100 Codex 不得直接修改、commit 或 push 源码。
+- 未经用户明确授权，不得使用 Codex Hand off 在 H100 创建或复用 branch/worktree。需要修改源码、Git 状态不符、
+  关键环境/数据/checkpoint 缺失、资源不可用或输出可能被覆盖时，停止并把证据交回本地任务。
 
 ## H200 仓库与 worktree
 
@@ -169,7 +186,7 @@ git -C /data/home/frank/projects/Stereo-vison-Tokenizer \
 - 修改前先检查 `git status --short --branch`、当前分支和 HEAD。
 - 仓库代码、脚本、配置、测试和对应 `docs/` 的开发修改必须在用户明确指定的本地目标
   分支和现有 worktree 中完成；未经用户明确授权不得为此新建 branch/worktree。不得直接在
-  B300、H800、H200 等服务器 clone/worktree 中编辑、commit 或 push 源码。
+  B300、H800、H100、H200 等服务器 clone/worktree 中编辑、commit 或 push 源码。
 - 标准流程固定为：本地目标 worktree 修改与最小验证 -> 本地 commit -> push 到
   `origin` -> 服务器只读核对 status/branch/HEAD -> 服务器 fetch 后以 fast-forward
   方式更新到已推送的精确 SHA -> 在服务器运行测试、评估或训练。服务器上的运行产物、
