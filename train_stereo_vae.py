@@ -301,6 +301,9 @@ def build_parser():
     parser.add_argument("--video_log_every_n_steps", type=int, default=1500)
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--num_nodes", type=int, default=1)
+    parser.add_argument(
+        "--distributed_mode", choices=("single", "ib"), default="single"
+    )
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
     parser.add_argument("--resume_from_checkpoint", type=Path, default=None)
@@ -372,6 +375,53 @@ def build_parser():
     parser = StereoVAE.add_model_specific_args(parser)
     parser = StereoDataModule.add_data_specific_args(parser)
     return parser
+
+
+def validate_distributed_runtime_args(args, environ=None):
+    environ = os.environ if environ is None else environ
+    expected_world_size = args.devices * args.num_nodes
+    if args.distributed_mode == "single":
+        if args.num_nodes != 1:
+            raise ValueError("single distributed mode requires num_nodes=1")
+    elif args.distributed_mode == "ib":
+        if args.num_nodes != 2:
+            raise ValueError("ib distributed mode requires num_nodes=2")
+        missing = [
+            name
+            for name in ("NODE_RANK", "MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE")
+            if not environ.get(name)
+        ]
+        if missing:
+            raise ValueError(
+                "ib distributed mode requires environment variables "
+                + ", ".join(missing)
+            )
+        try:
+            node_rank = int(environ["NODE_RANK"])
+            launcher_world_size = int(environ["WORLD_SIZE"])
+            local_world_size = int(environ.get("LOCAL_WORLD_SIZE", args.devices))
+        except ValueError as error:
+            raise ValueError("distributed rank and world sizes must be integers") from error
+        if not 0 <= node_rank < args.num_nodes:
+            raise ValueError("NODE_RANK is outside the configured node range")
+        if launcher_world_size != expected_world_size:
+            raise ValueError(
+                "torchrun WORLD_SIZE does not match devices times num_nodes"
+            )
+        if local_world_size != args.devices:
+            raise ValueError("torchrun LOCAL_WORLD_SIZE does not match devices")
+    else:
+        raise ValueError(f"unsupported distributed mode {args.distributed_mode}")
+
+    if environ.get("WORLD_SIZE"):
+        try:
+            launcher_world_size = int(environ["WORLD_SIZE"])
+        except ValueError as error:
+            raise ValueError("WORLD_SIZE must be an integer") from error
+        if launcher_world_size != expected_world_size:
+            raise ValueError(
+                "launcher WORLD_SIZE does not match devices times num_nodes"
+            )
 
 
 def validate_runtime_args(args):
@@ -570,12 +620,14 @@ def validate_runtime_args(args):
         raise ValueError("--devices must be positive")
     if args.num_nodes < 1:
         raise ValueError("--num_nodes must be positive")
+    validate_distributed_runtime_args(args)
     if (
         args.four_mode_mixed_training
-        and args.devices * args.num_nodes not in {1, 2, 8}
+        and args.devices * args.num_nodes not in {1, 2, 4, 8, 16}
     ):
         raise ValueError(
-            "the fixed 48-sample four-mode smoke supports 1, 2, or 8 DDP ranks"
+            "the fixed 48-sample four-mode smoke supports 1, 2, 4, 8, or 16 "
+            "DDP ranks"
         )
     if args.four_mode_mixed_training and args.mixed_stereo_sample_limit != 48:
         raise ValueError("the fixed four-mode smoke requires 48 stereo samples")
@@ -694,12 +746,25 @@ def write_online_gt_run_metadata(args):
                 ),
             }
         )
+    distributed = {
+        "mode": args.distributed_mode,
+        "num_nodes": args.num_nodes,
+        "devices_per_node": args.devices,
+        "expected_world_size": args.num_nodes * args.devices,
+        "node_rank": os.environ.get("NODE_RANK"),
+        "master_addr": os.environ.get("MASTER_ADDR"),
+        "master_port": os.environ.get("MASTER_PORT"),
+        "nccl_socket_ifname": os.environ.get("NCCL_SOCKET_IFNAME"),
+        "nccl_ib_hca": os.environ.get("NCCL_IB_HCA"),
+        "nccl_ib_disable": os.environ.get("NCCL_IB_DISABLE"),
+    }
     run_manifest = {
-        "schema": "stereo-vae-online-gt-run-v1",
+        "schema": "stereo-vae-online-gt-run-v2",
         "code_sha": code_sha,
         "resolved_config_sha256": hashlib.sha256(
             resolved_serialized.encode("utf-8")
         ).hexdigest(),
+        "distributed": distributed,
         "online_gt": online_gt,
     }
     if args.four_mode_mixed_training:

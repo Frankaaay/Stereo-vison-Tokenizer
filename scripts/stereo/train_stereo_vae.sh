@@ -18,6 +18,38 @@ set -euo pipefail
 : "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
 : "${SINGLE_FRAME_SOURCE_INDEX:?set the current source frame index}"
 
+DISTRIBUTED_MODE="${DISTRIBUTED_MODE:-single}"
+NUM_NODES="${NUM_NODES:-1}"
+case "${DISTRIBUTED_MODE}" in
+  single)
+    if [[ "${NUM_NODES}" != "1" ]]; then
+      echo "single distributed mode requires NUM_NODES=1" >&2
+      exit 2
+    fi
+    ;;
+  ib)
+    if [[ "${NUM_NODES}" != "2" ]]; then
+      echo "ib distributed mode requires NUM_NODES=2" >&2
+      exit 2
+    fi
+    : "${NODE_RANK:?set NODE_RANK=0 on h200-1 and NODE_RANK=1 on h200-2}"
+    : "${MASTER_ADDR:?set the h200-1 bond0 address}"
+    : "${MASTER_PORT:?set a unique rendezvous port}"
+    if [[ "${NODE_RANK}" != "0" && "${NODE_RANK}" != "1" ]]; then
+      echo "ib distributed mode requires NODE_RANK=0 or 1" >&2
+      exit 2
+    fi
+    if [[ ! "${MASTER_PORT}" =~ ^[0-9]+$ ]]; then
+      echo "MASTER_PORT must be numeric" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "DISTRIBUTED_MODE must be single or ib" >&2
+    exit 2
+    ;;
+esac
+
 MODE_UPDATE_RATIO="${MODE_UPDATE_RATIO:-1:1:1:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
@@ -108,7 +140,8 @@ ONLINE_GT_ARGS+=(
   --online_gt_cache_root "${ONLINE_GT_CACHE_ROOT:-}"
   --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
 )
-EXPECTED_GLOBAL_BATCH_SIZE=$((GPU_COUNT * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
+WORLD_SIZE=$((NUM_NODES * GPU_COUNT))
+EXPECTED_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
 if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
   echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
   exit 2
@@ -181,7 +214,27 @@ if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
 fi
 
-python3 train_stereo_vae.py \
+TRAIN_LAUNCHER=(python3)
+if [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
+  mkdir -p "${OUTPUT_ROOT}"
+  export NODE_RANK MASTER_ADDR MASTER_PORT
+  export NCCL_IB_DISABLE=0
+  export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-=bond0}"
+  export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1}"
+  export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+  export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
+  export NCCL_DEBUG_FILE="${NCCL_DEBUG_FILE:-${OUTPUT_ROOT}/nccl-%h-%p.log}"
+  TRAIN_LAUNCHER=(
+    torchrun
+    --nnodes "${NUM_NODES}"
+    --nproc_per_node "${GPU_COUNT}"
+    --node_rank "${NODE_RANK}"
+    --master_addr "${MASTER_ADDR}"
+    --master_port "${MASTER_PORT}"
+  )
+fi
+
+"${TRAIN_LAUNCHER[@]}" train_stereo_vae.py \
   "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
   "${MIXED_MODE_ARGS[@]}" \
@@ -238,9 +291,24 @@ python3 train_stereo_vae.py \
   --checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-500}" \
   --default_root_dir "${OUTPUT_ROOT}" \
   --devices "${GPU_COUNT}" \
+  --num_nodes "${NUM_NODES}" \
+  --distributed_mode "${DISTRIBUTED_MODE}" \
   --bf16 \
   "${WANDB_ARGS[@]}" \
   "${MEDIA_ARGS[@]}" \
   "${TIMING_ARGS[@]}" \
   "${PROFILE_ARGS[@]}" \
   "${RESUME_ARGS[@]}"
+
+if [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
+  shopt -s nullglob
+  NCCL_LOGS=("${OUTPUT_ROOT}"/nccl-*.log)
+  if (( ${#NCCL_LOGS[@]} == 0 )); then
+    echo "ib run produced no NCCL debug logs" >&2
+    exit 3
+  fi
+  if ! grep -q "NET/IB" "${NCCL_LOGS[@]}"; then
+    echo "NCCL logs do not prove NET/IB transport; refusing success" >&2
+    exit 3
+  fi
+fi
