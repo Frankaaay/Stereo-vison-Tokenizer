@@ -129,3 +129,49 @@ no foreign process was signaled. Isolated worktrees removed that race for `v2`.
 The result proves the selected two-node `mlx5_7` NCCL/GDRDMA path. It does not
 yet prove multi-rail scaling, 2x2 or 2x8 rank behavior, model memory, four-mode
 training, checkpointing, resume, or full-training throughput.
+
+### Two-node 16-rank IB collective
+
+After both clusters were reported idle, a fresh read-only snapshot confirmed
+all 16 H200 GPUs at 0 MiB with no compute process, all `mlx5_0` through
+`mlx5_7` ports `Active/LinkUp/InfiniBand`, clean identical worktrees at
+`45891c52ebef5bb0b6ba714b49eb8fb7ccf2f68b`, an unused rendezvous port, and a
+new output path. The authorized probe then used eight ranks per node:
+
+```text
+output root on each node:
+/data/home/frank/experiments/stereo_ib_collective_2node_8gpu_20260827_v1
+master: 214.30.239.40:29643
+world size: 16
+CUDA_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+NCCL_SOCKET_IFNAME: =bond0
+NCCL_IB_HCA: mlx5_0:1,...,mlx5_7:1
+```
+
+Both launch sessions exited `0`. Rank 0 gathered all global ranks 0 through 15
+with the expected host/local-rank mapping and every rank reported
+`all_reduce_sum=136.0`, equal to `1+...+16`. Each node produced eight NCCL logs.
+The logs on both nodes show:
+
+- `Using network IB`;
+- bidirectional cross-node channels `via NET/IB/.../GDRDMA`;
+- `NET/IB : Using` with all eight physical devices `mlx5_0:1` through
+  `mlx5_7:1`;
+- GPU Direct RDMA enabled for every physical HCA.
+
+The first transport summary appeared only after a long c10d initialization:
+hostname reverse-lookup warning `err=-3` repeated for several minutes before
+all ranks entered NCCL. The collective nevertheless completed within the
+bounded run and returned success. This is a startup-latency issue to diagnose
+before formal training, not an IB data-path failure.
+
+No probe process remained and all 16 GPUs returned to 0 MiB. The command to
+terminate the probe was issued only after the sessions had already exited; it
+reported every exact probe PID as absent, so no process was signaled. A separate
+H200-2 workload appeared after preflight and was left untouched.
+
+This result proves 8+8 rank initialization, complete rank mapping, access to all
+eight native HCA devices, and a correct NCCL/GDRDMA collective. Because the
+payload was one scalar, it does not establish aggregate multi-rail bandwidth,
+large-message scaling, model memory, training stability, checkpoint/resume, or
+full-data throughput.
