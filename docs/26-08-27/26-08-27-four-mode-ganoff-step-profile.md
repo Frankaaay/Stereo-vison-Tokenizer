@@ -10,8 +10,9 @@ logging.
 
 ## Status
 
-GAN-off profiling completed successfully. A strict GAN-on wall-time A/B is
-being prepared on the same node/runtime/data contract.
+GAN-off profiling and the strict H200-1 GAN-on wall-time A/B both completed
+successfully. The GAN-on run exited 0 after 28 updates; no OOM, NaN, DDP hang,
+or traceback occurred.
 
 - Branch / commit: `hezhou-las2-h` / `80cba3661dc6de4d6967e1edf5a69823dc9d4e5e`
 - Node: H200-1, 8 x H200, BS24/device, global batch 192, GA1, BF16
@@ -84,9 +85,7 @@ remains identical to the GAN-off baseline: fresh initialization, seed 1234,
 8 GPUs, BS24/device, BF16, 28 updates, first eight warm-up updates, deterministic
 1:1:1:1 mode order, no Kineto for wall time, no W&B/media, and no online cache.
 
-The GAN-on result, memory safety decision, optional focused trace, comparison
-with the colleague medians, and final artifact paths will be appended after the
-run finishes.
+The final result and trace decision are recorded below.
 
 ## H200-2 strict A/B rerun
 
@@ -238,7 +237,7 @@ train/validation entrypoint without adding a separately valid val split.
 
 ### H200-1 direct GAN-on A/B
 
-Status: **in progress**, launched at 2026-08-27 12:07:38 +08:00.
+Status: **completed successfully**, launched at 2026-08-27 12:07:38 +08:00.
 
 Because the original H200-1 GAN-off baseline is already complete with the exact
 node-local stereo/mono data, the H200-1 retry runs only one fresh 28-update
@@ -262,3 +261,99 @@ NCCL error, NaN, dirty-source error, or data error. No steady step existed yet.
 Initial ETA at 12:08 +08:00 is 3--7 minutes for the 28-update GAN-on body and
 5--12 minutes including validation, result aggregation, comparison, and the
 focused-trace memory-safety decision.
+
+### H200-1 final GAN-on wall-time result
+
+The run completed all 28 updates with exit code 0. Updates 1--8 were discarded
+as warm-up; the remaining 20 updates provide five samples per mode. Throughput
+uses the required `192 / step_seconds` definition.
+
+| Mode | Median (ms) | Mean (ms) | P90 (ms) | Samples/s |
+| --- | ---: | ---: | ---: | ---: |
+| mono/single | 168.24 | 171.79 | 179.68 | 1141.26 |
+| mono/four | 1079.82 | 1082.57 | 1090.90 | 177.81 |
+| stereo/single | 382.79 | 383.40 | 385.11 | 501.58 |
+| stereo/four | 3044.42 | 3049.36 | 3059.45 | 63.07 |
+
+The equal-mode mean of the four medians is 1168.82 ms/step, corresponding to
+164.27 sample-executions/s. The mean over all 20 steady updates is 1171.78
+ms/step, corresponding to 163.85 sample-executions/s. Peak CUDA allocated
+memory was 115,218,265,600 bytes (107.31 GiB), and peak reserved memory was
+126,617,649,152 bytes (117.92 GiB).
+
+### Strict A/B and colleague comparison
+
+`GAN total delta` below is exactly `GAN-on median - GAN-off median`. It is the
+complete wall-time cost of the enabled GAN path, including generator
+adversarial/feature-matching work, discriminator work, extra backward/DDP, and
+optimizer work. It must not be labelled VAE time.
+
+| Mode | GAN-off (ms) | GAN-on (ms) | GAN total delta | Delta | Colleague GAN-on (ms) | Ours - colleague | Difference |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mono/single | 157.96 | 168.24 | +10.28 ms | +6.51% | 208.9 | -40.66 ms | -19.47% |
+| mono/four | 530.04 | 1079.82 | +549.78 ms | +103.73% | 715.1 | +364.72 ms | +51.00% |
+| stereo/single | 353.65 | 382.79 | +29.14 ms | +8.24% | 452.9 | -70.11 ms | -15.48% |
+| stereo/four | 1457.48 | 3044.42 | +1586.93 ms | +108.88% | 1984.6 | +1059.82 ms | +53.40% |
+
+The equal-mode mean of medians increased by 544.03 ms (+87.07%). Corresponding
+mixed throughput fell from 307.31 to 164.27 sample-executions/s (-46.55%). The
+result therefore does **not** reproduce the colleague's timing profile or the
+reported stereo/four value near 1984.6 ms. Our single-frame modes are 15--19%
+faster, while both four-frame modes are 51--53% slower. The mode-dependent
+split points to the four-frame GAN path as the main discrepancy, but does not
+by itself identify an individual kernel or loss as the cause.
+
+This remains a controlled GAN-off/on A/B for the current experiment, but not an
+identity reproduction of the colleague run. Known differences are:
+
+- Colleague code `45fec2e341eb83ade04c9a1c88d824e49f3c9b5f`; current computational
+  baseline `80cba3661dc6de4d6967e1edf5a69823dc9d4e5e`, with reversible launcher
+  activation at `bfab545de058e354376a6d1599a3d6b97eb2debe`.
+- Current node/runtime: H200-1, Python 3.12.3, Torch 2.7.1+cu126, Lightning
+  2.5.6, and task-private PyAV 16.0.1 overlay. The colleague runtime/node
+  identity was not recorded in the available report beyond 8 x H200.
+- Current `single_frame_source_index=0`; colleague report used index 2.
+- Current run is fresh initialization with `resume_from_checkpoint=null`;
+  colleague fresh-init/resume/checkpoint state was not recorded.
+- Current wall-time run has Kineto/focused profiling disabled; colleague
+  profiler state was not recorded.
+
+### Focused-trace decision and attribution limit
+
+No GAN-on focused trace was launched. The wall-time run already reserved
+117.92 GiB on a roughly 140.4-GiB H200, while the prior GAN-off stereo/four
+focused trace had reached about 129.5 GB reserved. Profiler overhead on the
+larger GAN graph was therefore not treated as safely bounded at BS24/GPU, and
+the batch was not reduced because that would break the requested comparison.
+The current trace regions also do not separately expose Image GAN, Video GAN,
+feature matching, discriminator backward, and both optimizers.
+
+Consequently, stereo/four can be stated precisely as 1457.48 ms GAN-off,
+3044.42 ms GAN-on, and +1586.93 ms for the complete GAN path. It cannot be
+honestly split further into teacher, VAE encoder/decoder, LPIPS, individual GAN
+losses, backward, DDP, and optimizers from this wall-time A/B. In particular,
+neither `full step - teacher` nor the full GAN delta is VAE time. A finer split
+would require a separate, minimally instrumented profiling experiment and a
+new memory-safety decision.
+
+Final artifacts:
+
+- GAN-off root:
+  `/data/home/frank/experiments/stereo_four_mode_ganoff_profile_h2001_20260827_v1`
+- GAN-off timings/config/log:
+  `baseline_seed1234/step_timings.json`, `baseline_seed1234/resolved_config.json`,
+  and `baseline_seed1234/run.log`
+- GAN-on root:
+  `/data/home/frank/experiments/stereo_four_mode_ganon_profile_h2001_20260827_v1`
+- GAN-on timings/config/manifest/log:
+  `ganon_seed1234/step_timings.json`, `ganon_seed1234/resolved_config.json`,
+  `ganon_seed1234/run_manifest.json`, and `ganon_seed1234/run.log`
+- GAN-on launcher exit and run exit:
+  `launcher_exit_code.txt` and `ganon_seed1234/exit_code.txt`, both `0`
+
+### Post-experiment cleanup
+
+After the completed result was recorded, the reversible experiment-only
+one-sample runner and its test were removed. The generic launcher was restored
+to explicit GAN-off weights, and its source-contract test was restored. This
+experiment document and all external experiment artifacts are retained.

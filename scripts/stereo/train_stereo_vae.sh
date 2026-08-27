@@ -181,22 +181,6 @@ if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
 fi
 
-GAN_ARGS=()
-GAN_ENABLED="${GAN_ENABLED:-0}"
-if [[ "${GAN_ENABLED}" == "1" ]]; then
-  : "${IMAGE_GAN_WEIGHT:?set the image GAN loss weight}"
-  : "${VIDEO_GAN_WEIGHT:?set the video GAN loss weight}"
-  : "${GAN_FEAT_WEIGHT:?set the GAN feature-matching loss weight}"
-  : "${DISCRIMINATOR_START:?set the discriminator start update}"
-  GAN_ARGS+=(
-    --gan_enabled
-    --discriminator_iter_start "${DISCRIMINATOR_START}"
-  )
-elif [[ "${GAN_ENABLED}" != "0" ]]; then
-  echo "GAN_ENABLED must be 0 or 1" >&2
-  exit 2
-fi
-
 python3 train_stereo_vae.py \
   "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
@@ -234,9 +218,9 @@ python3 train_stereo_vae.py \
   --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
-  --image_gan_weight "${IMAGE_GAN_WEIGHT:-0}" \
-  --video_gan_weight "${VIDEO_GAN_WEIGHT:-0}" \
-  --gan_feat_weight "${GAN_FEAT_WEIGHT:-0}" \
+  --image_gan_weight 0 \
+  --video_gan_weight 0 \
+  --gan_feat_weight 0 \
   --recon_loss_type l1 \
   --smooth_l1_beta 1.0 \
   --batch_size "${PER_DEVICE_BATCH_SIZE}" \
@@ -259,5 +243,4 @@ python3 train_stereo_vae.py \
   "${MEDIA_ARGS[@]}" \
   "${TIMING_ARGS[@]}" \
   "${PROFILE_ARGS[@]}" \
-  "${GAN_ARGS[@]}" \
   "${RESUME_ARGS[@]}"

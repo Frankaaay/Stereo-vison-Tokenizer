@@ -98,14 +98,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("${LAS2_H_SOURCE_SHA:?", source)
         self.assertIn('--las2_h_source_sha "${LAS2_H_SOURCE_SHA}"', source)
         self.assertNotIn("single_frame_loss_weight", source)
-        self.assertIn('GAN_ENABLED="${GAN_ENABLED:-0}"', source)
-        self.assertIn("--gan_enabled", source)
-        self.assertIn(
-            '--discriminator_iter_start "${DISCRIMINATOR_START}"',
-            source,
-        )
+        self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--use_vae", source)
 
+        self.assertNotIn("--gan_enabled", source)
         self.assertNotIn("--fp16", source)
 
     def test_profile_regions_are_opt_in_and_cover_requested_components(self):
