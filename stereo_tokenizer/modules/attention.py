@@ -436,9 +436,8 @@ class Attention(nn.Module):
         if exists(context):
             context = self.context_norm(context)
 
-        kv_input = default(context, x)
-
         x = self.norm(x)
+        kv_input = default(context, x)
         N = x.shape[1]
 
         q, k, v = self.to_q(x), *self.to_kv(kv_input).chunk(2, dim=-1)
