@@ -148,3 +148,30 @@ Failure artifacts:
 - Resolved config: `ganoff_seed1234/resolved_config.json`
 - Run manifest: `ganoff_seed1234/run_manifest.json`
 - Root-cause log: `ganoff_seed1234/run.log`
+
+### H200-2 v2 relaunch
+
+Status: **in progress**, launched at 2026-08-27 10:45:03 +08:00.
+
+The user authorized a Frank-owned task-private LiteAnyStereo clone so the run
+does not modify or depend on the dirty Hezhou worktree. The clone is:
+
+- Path: `/data/home/frank/runtime/lite-any-stereo-8c97bd4-clean`
+- Owner: `frank`
+- Detached HEAD: `8c97bd4c4da3712c2ac60003a23201dfdb5935f4`
+- Origin: `https://github.com/TomTomTommi/LiteAnyStereo.git`
+- State before launch: clean
+
+The v2 A/B output is
+`/data/home/frank/experiments/stereo_four_mode_gan_ab_h2002_20260827_v2`,
+and tmux is `stereo-fourmode-gan-ab-h2002-260827-v2`. The launcher and A/B
+parameters are unchanged from v1 except that `LAS2_H_REPO` points to the clean
+task-private clone and all artifacts use the new v2 root. Startup health check
+found the tmux, launcher, and all eight ranks alive in GAN-off initialization;
+the first ranks had loaded the teacher onto GPUs 0--1, and the logs contained no
+immediate traceback, dirty-source rejection, OOM, NCCL error, or NaN.
+
+Initial ETA at 10:46 +08:00 remains 4--10 minutes for both test bodies and
+7--15 minutes including validation, result aggregation, and the focused-trace
+memory-safety decision. No steady-state step existed at the health snapshot, so
+this is still a history-based estimate rather than a measured-throughput ETA.
