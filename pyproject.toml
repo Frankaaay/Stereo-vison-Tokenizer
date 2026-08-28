@@ -31,6 +31,7 @@ dependencies = [
     "requests",
     "safetensors",
     "scipy",
+    "socksio",
     "thop",
     "timm",
     "torch==2.7.1",

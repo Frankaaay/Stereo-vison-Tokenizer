@@ -90,6 +90,25 @@ H100 clean clone 必须同步精确 commit，再重新执行 `uv sync --frozen`�
 根项目与 Hy exporter 的 `uv lock --check`、`git diff --check` 均通过；Windows
 只完成 lock/TOML 静态验收，不能替代 H100 的 editable install 与 `uv pip check`。
 
+### H100 自动 SOCKS 代理依赖修复（2026-08-28）
+
+H100 在 DA3 editable、API import 和 `uv pip check` 全部通过后，使用集群自动配置的
+`ALL_PROXY=socks5` 执行 `hf download`。冻结环境中的 `huggingface-hub 1.28.0` 通过
+`httpx 0.28.1` 建立 SOCKS transport，但根 lock 未包含 `socksio`，因此在联网前以
+`ImportError: Using SOCKS proxy, but the 'socksio' package is not installed` 失败。
+当时 LAS2-H 与 DA3 source 均为目标 SHA 且 clean；LAS2-H 权重尚未下载，DA3 权重尚未
+开始，无 Slurm 作业，主仓库 clean。
+
+以 clean `hezhou-las2-h@a26bcf2b2d9af3a4b63317d54fb8ea485b601c66` 为本地修改
+基线，将 `socksio` 作为训练环境直接依赖并重新生成根 `uv.lock`。保留集群自动
+`ALL_PROXY`，不通过取消代理或在 H100 临时手工安装绕过 frozen 合同；Hy exporter
+环境保持不变。H100 同步新 commit 后必须重新 `uv sync --frozen`，先验证 Python 能
+import `socksio`，再重新执行官方 revision 的 `hf download` 与权重 SHA256 校验。
+
+本地根 lock 成功新增 `socksio 1.0.0`，总包数由 176 增至 177；根项目与 Hy exporter
+的 `uv lock --check`、`git diff --check` 均通过。真实 SOCKS 代理联网与权重下载仍须
+在 H100 同步精确 commit 并完成 frozen sync 后验收。
+
 ## 当前结论与下一步
 
 两个 lock 必须通过 `uv lock --check`。本地静态检查通过后，下一步是在新 H100 集群的
