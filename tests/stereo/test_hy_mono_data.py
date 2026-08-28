@@ -112,6 +112,7 @@ class HyMonoSmokeDatasetTest(unittest.TestCase):
                     mono_cache_root=str(dataset.cache_root),
                     mixed_mono_sample_limit=limit,
                     four_mode_mixed_training=True,
+                    single_frame_source_index=0,
                 )
                 return StereoDataModule(args)._mono_dataset(train=True)
 
