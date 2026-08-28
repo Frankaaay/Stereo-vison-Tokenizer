@@ -5,7 +5,8 @@
 - Date: 2026-08-28
 - Local worktree: `C:\Project\Stereo-vison-Tokenizer`
 - Branch / starting HEAD: `hezhou-las2-h` / `5b345206babe63a58acdfcb38f375059885ed8cf`
-- Status: local uncommitted implementation; no branch/worktree creation, commit, push, preprocessing, GPU job, evaluation, or training was started.
+- Implementation commit: `2a3f5b46d3a9200d3b6d09f5548ed84b3279ead6`.
+- Merge integration: preserve the three-source loader while incorporating the independent `d03d966` prefetch and legacy LeRobot copy-elision changes. The legacy video-container default remains 12 because the measured 36-container working set applies to the old six-camera LeRobot workload, not Hy Lance, LIBERO mono, or UMI MCAP.
 - This implementation extends the existing StereoVAE loader. It does not use or import the WAM DataLoader.
 
 ## Data contract
@@ -56,6 +57,9 @@ The removed UMI MCAP throughput benchmark is not a launch gate and no benchmark/
 - Pure-Python deterministic sampler harness: passed for two node-local ranks, equal update counts, and disjoint even/odd local indices.
 - Full pytest was not runnable in the local Windows interpreter because it has neither `pytest` nor `torch`; no remote source copy or environment mutation was made to bypass the project's local-edit/pushed-SHA rule.
 
+Merge verification additionally covers the explicit `prefetch_factor=2` launcher/parser wiring, positive-value validation, the legacy LeRobot NumPy copy elision, the retained cache default of 12, the combined dependency lock, and the three-source entrypoint assertions.
+The 12 source-level entrypoint tests pass after correcting the evaluation assertion to check the inherited parser's runtime use (`args.hy_manifest`) rather than requiring the delegated option registration to be duplicated in `eval_stereo_vae.py`.
+
 ## Remaining launch gates
 
-This local diff is not yet a runnable H200 revision because it has not been reviewed, committed, pushed, or fast-forwarded to either server. Before training, generate and inspect the node-local manifests, install/sync the newly declared `pylance`, `mcap`, and `mcap-protobuf-support` dependencies in the approved runtime, run CPU decode/collation tests against real records, and perform the normal clean-SHA/data/GPU/output preflight. No GPU availability claim is made here.
+Before H200 execution, push the verified merge revision and fast-forward the clean server clone to that exact SHA. Then generate and inspect the node-local manifests, install/sync the newly declared `pylance`, `mcap`, and `mcap-protobuf-support` dependencies in the approved runtime, run CPU decode/collation tests against real records, and perform the normal clean-SHA/data/GPU/output preflight. No GPU availability claim is made here.

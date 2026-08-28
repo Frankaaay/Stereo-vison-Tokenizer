@@ -307,6 +307,7 @@ fi
   --smooth_l1_beta 1.0 \
   --batch_size "${PER_DEVICE_BATCH_SIZE}" \
   --num_workers "${NUM_WORKERS:-8}" \
+  --prefetch_factor "${PREFETCH_FACTOR:-2}" \
   --pin_memory 1 \
   --persistent_workers 1 \
   --train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}" \

@@ -44,7 +44,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("FoundationStereoOnlineTeacher", source)
         self.assertIn("DepthAnything3OnlineTeacher", source)
         self.assertIn("HyLanceMonoDataset", source)
-        self.assertIn("--hy_manifest", source)
+        self.assertIn("args.hy_manifest", source)
         self.assertIn("relative_target_from_da3(", source)
         self.assertIn("_exact_mono_rank_indices", source)
         self.assertIn('choices=("las2_h", "pytorch", "tensorrt")', source)
@@ -156,6 +156,11 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("--peg_backend conv2d_t1_slice", launcher)
         self.assertIn("--pin_memory 1", launcher)
         self.assertIn("--persistent_workers 1", launcher)
+        self.assertIn('--prefetch_factor "${PREFETCH_FACTOR:-2}"', launcher)
+        self.assertIn(
+            '--lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"',
+            launcher,
+        )
         self.assertIn(
             '--train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}"', launcher
         )

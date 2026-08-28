@@ -1883,8 +1883,8 @@ requires-dist = [
     { name = "socksio" },
     { name = "thop" },
     { name = "timm" },
-    { name = "torch", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cu126" },
-    { name = "torchvision", specifier = "==0.22.1", index = "https://download.pytorch.org/whl/cu126" },
+    { name = "torch", specifier = "==2.7.1", index = "https://mirrors.aliyun.com/pytorch-wheels/cu126/" },
+    { name = "torchvision", specifier = "==0.22.1", index = "https://mirrors.aliyun.com/pytorch-wheels/cu126/" },
     { name = "tqdm" },
     { name = "transformations" },
     { name = "trimesh" },
@@ -1945,7 +1945,7 @@ wheels = [
 [[package]]
 name = "torch"
 version = "2.7.1+cu126"
-source = { registry = "https://download.pytorch.org/whl/cu126" }
+source = { registry = "https://mirrors.aliyun.com/pytorch-wheels/cu126/" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
@@ -1971,7 +1971,7 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.7.1%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:63bce0590bc540fc16139e2be0177847585182b8c5e68d7f9213789d1d96c978", upload-time = "2025-06-03T18:29:29Z" },
+    { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.7.1+cu126-cp312-cp312-manylinux_2_28_x86_64.whl" },
 ]
 
 [[package]]
@@ -1992,14 +1992,14 @@ wheels = [
 [[package]]
 name = "torchvision"
 version = "0.22.1+cu126"
-source = { registry = "https://download.pytorch.org/whl/cu126" }
+source = { registry = "https://mirrors.aliyun.com/pytorch-wheels/cu126/" }
 dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "torch" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.22.1%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d6f17966552bb117d931db49bf49f19d2488631ff4c0b68a5215dd8739507b2e", upload-time = "2025-06-03T18:37:27Z" },
+    { url = "https://mirrors.aliyun.com/pytorch-wheels/cu126/torchvision-0.22.1+cu126-cp312-cp312-manylinux_2_28_x86_64.whl" },
 ]
 
 [[package]]

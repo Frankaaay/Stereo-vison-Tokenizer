@@ -445,7 +445,7 @@ class LeRobotStereoDataset(data.Dataset):
                             prepared.transpose(2, 0, 1)
                         )
             fx, baseline = self._output_calibration(record)
-            video = torch.from_numpy(images.copy()).float().div_(255.0).sub_(0.5)
+            video = torch.from_numpy(images).float().div_(255.0).sub_(0.5)
             return {
                 "video": video,
                 "fx": torch.from_numpy(fx),

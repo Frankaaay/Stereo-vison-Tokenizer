@@ -168,6 +168,11 @@ class StereoDataModule(pl.LightningDataModule):
         persistent_workers = bool(getattr(self.args, "persistent_workers", False))
         if persistent_workers and self.args.num_workers == 0:
             raise ValueError("persistent_workers requires num_workers > 0")
+        loader_kwargs = {}
+        if self.args.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = int(
+                getattr(self.args, "prefetch_factor", 2)
+            )
         if isinstance(dataset, MixedModeDataset):
             local_world_size, local_rank = self._local_shard()
             mode_weights = parse_weight_spec(self.args.mode_update_weights, MODE_IDS)
@@ -196,6 +201,7 @@ class StereoDataModule(pl.LightningDataModule):
                 pin_memory=pin_memory,
                 persistent_workers=persistent_workers,
                 collate_fn=_profiled_collate,
+                **loader_kwargs,
             )
         if isinstance(dataset, LeRobotStereoDataset):
             sampler = EpisodeSequentialDistributedSampler(
@@ -222,6 +228,7 @@ class StereoDataModule(pl.LightningDataModule):
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,
             drop_last=train,
+            **loader_kwargs,
         )
 
     def train_dataloader(self):
@@ -240,6 +247,7 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--resolution", type=int, default=256)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=8)
+        parser.add_argument("--prefetch_factor", type=int, default=2)
         parser.add_argument("--pin_memory", type=int, choices=(0, 1), default=1)
         parser.add_argument("--persistent_workers", type=int, choices=(0, 1), default=1)
         parser.add_argument("--train_epoch_repeats", type=int, default=1)
