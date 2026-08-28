@@ -69,6 +69,27 @@ Windows lock 解析不能替代 H100/H200 runtime acceptance。
 Hy exporter 的 `uv lock --check`，并通过 `git diff --check`；H100 端只在本地修改
 commit push 后同步精确 SHA，不在服务器 clone 中直接修改依赖文件。
 
+### H100 DA3 editable metadata 合同修复（2026-08-28）
+
+H100 在根环境完成 `uv sync --frozen` 并以 `--no-deps -e` 暴露冻结 DA3 source 后，
+`uv pip check` 报告 12 项缺失。冻结 DA3 commit 的官方 `pyproject.toml` 对
+`uvicorn`、`moviepy` 和 `typer` 有重复声明；归一化后实际缺少 10 个唯一包：
+
+- `e3nn`、`evo`、`fastapi`、`moviepy==1.0.3`、`pillow-heif`；
+- `plyfile`、`pre-commit`、`pycolmap`、`typer>=0.9.0`、`uvicorn`。
+
+以 clean `hezhou-las2-h@496600f6f9aa8ece79c7779cb8430f4faddc9659` 为本地修改
+基线，将上述依赖纳入根训练环境并重新生成 `uv.lock`。Hy exporter 环境保持不变；
+H100 上不临时手工补包、不忽略 `uv pip check`，也不启动 Slurm 作业。更新 push 后，
+H100 clean clone 必须同步精确 commit，再重新执行 `uv sync --frozen`、DA3
+`uv pip install --no-deps -e` 和 `uv pip check`，以服务器真实 Linux 环境作为最终验收。
+
+本地 lock 解析成功，直接依赖实际锁定为 `e3nn 0.6.0`、`evo 1.37.0`、
+`fastapi 0.141.1`、`moviepy 1.0.3`、`pillow-heif 1.5.0`、`plyfile 1.1.3`、
+`pre-commit 4.6.2`、`pycolmap 4.1.1`、`typer 0.27.1` 和 `uvicorn 0.52.4`。
+根项目与 Hy exporter 的 `uv lock --check`、`git diff --check` 均通过；Windows
+只完成 lock/TOML 静态验收，不能替代 H100 的 editable install 与 `uv pip check`。
+
 ## 当前结论与下一步
 
 两个 lock 必须通过 `uv lock --check`。本地静态检查通过后，下一步是在新 H100 集群的
