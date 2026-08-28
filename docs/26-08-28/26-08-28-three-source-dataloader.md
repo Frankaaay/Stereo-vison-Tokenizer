@@ -131,11 +131,27 @@ Lance table by the immutable identities `episode_index=7123` and requested
 therefore that Hy metadata's global dataset offsets are not Lance physical row
 positions; the window itself does not cross an episode boundary.
 
-The pending local repair changes Hy reads to predicate on episode/frame identity,
+The repair changes Hy reads to predicate on episode/frame identity,
 reject missing or duplicate identities, and restore requested temporal order. It
 also makes pre-Trainer metadata writing reject nonzero Lightning `LOCAL_RANK`
 when global `RANK` is absent, and lets single-node Lightning DDP infer the local
 world size from configured devices when `LOCAL_WORLD_SIZE` is absent. Directed
-regression tests cover all three failures. This repair has only static local
-validation so far; it must be committed, pushed, fast-forwarded to H200-1, and
-run through the targeted CPU tests before any v6 GPU launch.
+regression tests cover all three failures. The commits and H200-1 validation are
+recorded below.
+
+### v6 result and timestamp repair
+
+Commits `ed02d2428d40473190065c0c676fbe85539c1684` and
+`71b7842a2bae78f6e7f8b3b239331110f8f89f4c` were pushed and fast-forwarded to a
+clean H200-1 clone. The server passed 26 directed tests, and the exact v5 failure
+sample decoded successfully with shape `[1,1,3,4,256,256]` and frames
+`[2280,2283,2286,2289]`.
+
+Fresh v6 at `/data/home/frank/experiments/stereo-three-source-40u-h2001-v6`
+then completed 13 real updates before a different Hy check rejected timestamp
+`133.60000610351562` against theoretical `133.6`: the `6.10e-6` difference is
+normal float32 storage rounding but exceeded the fixed `5e-6` absolute
+tolerance. The pending follow-up keeps the absolute tolerance and additionally
+allows float32 machine-precision relative rounding; a directed test accepts the
+observed value and rejects a real 10 ms drift. v6 produced no final timing file
+or checkpoint and must not be resumed.

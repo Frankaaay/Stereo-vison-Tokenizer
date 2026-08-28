@@ -260,6 +260,16 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             raise ValueError("Hy Lance frame identity mismatch")
         return [by_frame[frame_index] for frame_index in requested]
 
+    @staticmethod
+    def _timestamps_match_frame_rate(timestamps, frame_indices, fps):
+        expected = np.asarray(frame_indices, np.float64) / float(fps)
+        return np.allclose(
+            np.asarray(timestamps, np.float64),
+            expected,
+            rtol=np.finfo(np.float32).eps,
+            atol=5e-6,
+        )
+
     def get_mode_item(self, index, temporal_mode):
         record, _, start = self._sample_address(index)
         offsets = self._frame_offsets(temporal_mode)
@@ -282,8 +292,9 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         if [int(row["frame_index"]) for row in rows] != relative.tolist():
             raise ValueError("Hy Lance frame identity mismatch")
         timestamps = np.asarray([float(row["timestamp"]) for row in rows], np.float64)
-        expected = relative.astype(np.float64) / float(record.get("fps", 30.0))
-        if not np.allclose(timestamps, expected, rtol=0, atol=5e-6):
+        if not self._timestamps_match_frame_rate(
+            timestamps, relative, record.get("fps", 30.0)
+        ):
             raise ValueError("Hy timestamps disagree with frame_index/fps")
         rgb = np.stack([self._decode_jpeg(row[self.camera_column]) for row in rows])
         return _mono_sample(

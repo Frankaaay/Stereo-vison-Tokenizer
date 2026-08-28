@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from stereo_tokenizer.data import _load_root_aliases
 from stereo_tokenizer.pretrain_data import HY_SCHEMA, HyLanceMonoDataset
 
@@ -94,6 +96,19 @@ class HyCamHighManifestTest(unittest.TestCase):
                 frame_indices=[3, 9],
                 columns=["episode_index", "frame_index"],
             )
+
+    def test_float32_timestamp_rounding_is_accepted_but_drift_is_rejected(self):
+        rounded = np.asarray([133.6], dtype=np.float32).astype(np.float64)
+        self.assertTrue(
+            HyLanceMonoDataset._timestamps_match_frame_rate(
+                rounded, np.asarray([4008]), 30.0
+            )
+        )
+        self.assertFalse(
+            HyLanceMonoDataset._timestamps_match_frame_rate(
+                np.asarray([133.61]), np.asarray([4008]), 30.0
+            )
+        )
 
 
 if __name__ == "__main__":
