@@ -274,7 +274,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
                 "timestamp",
                 self.camera_column,
             ],
-        ).to_pylist()
+        )
         if [int(row["episode_index"]) for row in rows] != [
             int(record["episode_index"])
         ] * len(rows):
