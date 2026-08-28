@@ -363,6 +363,11 @@ class StereoDataModule(pl.LightningDataModule):
         )
         if persistent_workers and self.args.num_workers == 0:
             raise ValueError("persistent_workers requires num_workers > 0")
+        loader_kwargs = {}
+        if self.args.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = int(
+                getattr(self.args, "prefetch_factor", 2)
+            )
         if isinstance(dataset, MixedModeDataset):
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             rank = dist.get_rank() if dist.is_initialized() else 0
@@ -386,6 +391,7 @@ class StereoDataModule(pl.LightningDataModule):
                 pin_memory=pin_memory,
                 persistent_workers=persistent_workers,
                 collate_fn=_profiled_collate,
+                **loader_kwargs,
             )
         if isinstance(dataset, LeRobotStereoDataset):
             sampler = EpisodeSequentialDistributedSampler(
@@ -412,6 +418,7 @@ class StereoDataModule(pl.LightningDataModule):
             sampler=sampler,
             shuffle=sampler is None and train and self.shuffle,
             drop_last=train,
+            **loader_kwargs,
         )
 
     def train_dataloader(self):
@@ -430,6 +437,7 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--resolution", type=int, default=256)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=8)
+        parser.add_argument("--prefetch_factor", type=int, default=2)
         parser.add_argument("--pin_memory", type=int, choices=(0, 1), default=1)
         parser.add_argument(
             "--persistent_workers", type=int, choices=(0, 1), default=1
@@ -459,7 +467,7 @@ class StereoDataModule(pl.LightningDataModule):
             "--lerobot_rectification_audit_sha256", type=str, default=None
         )
         parser.add_argument(
-            "--lerobot_video_cache_capacity", type=int, default=12
+            "--lerobot_video_cache_capacity", type=int, default=36
         )
         parser.add_argument(
             "--lerobot_maximum_timestamp_error_s", type=float, default=0.05

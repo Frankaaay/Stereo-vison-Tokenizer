@@ -156,6 +156,11 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("--peg_backend conv2d_t1_slice", launcher)
         self.assertIn("--pin_memory 1", launcher)
         self.assertIn("--persistent_workers 1", launcher)
+        self.assertIn('--prefetch_factor "${PREFETCH_FACTOR:-2}"', launcher)
+        self.assertIn(
+            '--lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-36}"',
+            launcher,
+        )
         self.assertIn(
             '--train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}"', launcher
         )

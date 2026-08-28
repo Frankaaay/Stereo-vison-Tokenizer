@@ -136,7 +136,7 @@ DATA_ARGS+=(
   --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
   --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
   --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
-  --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
+  --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-36}"
   --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
   --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
 )
@@ -295,6 +295,7 @@ fi
   --smooth_l1_beta 1.0 \
   --batch_size "${PER_DEVICE_BATCH_SIZE}" \
   --num_workers "${NUM_WORKERS:-8}" \
+  --prefetch_factor "${PREFETCH_FACTOR:-2}" \
   --pin_memory 1 \
   --persistent_workers 1 \
   --train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}" \

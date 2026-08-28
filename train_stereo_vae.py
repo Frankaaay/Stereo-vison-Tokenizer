@@ -639,6 +639,8 @@ def validate_runtime_args(args):
         raise ValueError("online validation sample count is frozen to 512")
     if args.lerobot_video_cache_capacity < 1:
         raise ValueError("LeRobot video cache capacity must be positive")
+    if args.prefetch_factor < 1:
+        raise ValueError("DataLoader prefetch factor must be positive")
     if args.lerobot_maximum_timestamp_error_s <= 0:
         raise ValueError("LeRobot timestamp tolerance must be positive")
     if args.bf16 and args.fp16:
