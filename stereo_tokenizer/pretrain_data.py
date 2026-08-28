@@ -239,13 +239,35 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             raise ValueError(f"Hy cam_high must be [240,424,3], got {rgb.shape}")
         return rgb.transpose(2, 0, 1).copy()
 
+    @staticmethod
+    def _take_episode_frames(lance_dataset, episode_index, frame_indices, columns):
+        requested = [int(value) for value in frame_indices]
+        frame_filter = ", ".join(str(value) for value in requested)
+        rows = lance_dataset.to_table(
+            filter=(
+                f"episode_index = {int(episode_index)} AND "
+                f"frame_index IN ({frame_filter})"
+            ),
+            columns=columns,
+        ).to_pylist()
+        by_frame = {}
+        for row in rows:
+            frame_index = int(row["frame_index"])
+            if frame_index in by_frame:
+                raise ValueError("Hy Lance frame identity is not unique")
+            by_frame[frame_index] = row
+        if set(by_frame) != set(requested):
+            raise ValueError("Hy Lance frame identity mismatch")
+        return [by_frame[frame_index] for frame_index in requested]
+
     def get_mode_item(self, index, temporal_mode):
         record, _, start = self._sample_address(index)
         offsets = self._frame_offsets(temporal_mode)
         relative = np.asarray([start + offset for offset in offsets], np.int64)
-        physical = [int(record["dataset_from_index"]) + int(value) for value in relative]
-        rows = self._dataset(record).take(
-            physical,
+        rows = self._take_episode_frames(
+            self._dataset(record),
+            record["episode_index"],
+            relative,
             columns=[
                 "episode_index",
                 "frame_index",

@@ -1,10 +1,35 @@
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
-from train_stereo_vae import validate_distributed_runtime_args
+from stereo_tokenizer.data import StereoDataModule
+from train_stereo_vae import _is_global_zero_process, validate_distributed_runtime_args
 
 
 class DistributedRuntimeContractTest(unittest.TestCase):
+    def test_lightning_subprocess_without_global_rank_is_not_global_zero(self):
+        self.assertFalse(
+            _is_global_zero_process({"NODE_RANK": "0", "LOCAL_RANK": "3"})
+        )
+        self.assertTrue(
+            _is_global_zero_process({"NODE_RANK": "0", "LOCAL_RANK": "0"})
+        )
+
+    def test_global_rank_takes_precedence(self):
+        self.assertFalse(
+            _is_global_zero_process(
+                {"RANK": "7", "NODE_RANK": "0", "LOCAL_RANK": "0"}
+            )
+        )
+
+    def test_single_node_lightning_falls_back_to_configured_device_count(self):
+        module = object.__new__(StereoDataModule)
+        module.args = SimpleNamespace(devices=8)
+        with mock.patch.dict(
+            "os.environ", {"LOCAL_RANK": "3"}, clear=True
+        ):
+            self.assertEqual(module._local_shard(), (8, 3))
+
     def test_single_mode_requires_one_node(self):
         args = SimpleNamespace(distributed_mode="single", devices=8, num_nodes=2)
         with self.assertRaisesRegex(ValueError, "num_nodes=1"):

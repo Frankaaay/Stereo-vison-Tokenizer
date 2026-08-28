@@ -159,12 +159,21 @@ class StereoDataModule(pl.LightningDataModule):
             raise ValueError("three-source pretraining does not expose a named test split")
         return self._pretrain_dataset(train)
 
-    @staticmethod
-    def _local_shard() -> tuple[int, int]:
+    def _local_shard(self) -> tuple[int, int]:
         """Shard within one node; manifests already select the physical node."""
-        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        if local_world_size < 1 or not 0 <= local_rank < local_world_size:
+        configured_devices = int(getattr(self.args, "devices", 1))
+        local_world_size = int(
+            os.environ.get("LOCAL_WORLD_SIZE", str(configured_devices))
+        )
+        if local_world_size < 1:
+            raise ValueError("invalid LOCAL_RANK/LOCAL_WORLD_SIZE")
+        if "LOCAL_RANK" in os.environ:
+            local_rank = int(os.environ["LOCAL_RANK"])
+        elif dist.is_available() and dist.is_initialized():
+            local_rank = int(dist.get_rank()) % local_world_size
+        else:
+            local_rank = 0
+        if not 0 <= local_rank < local_world_size:
             raise ValueError("invalid LOCAL_RANK/LOCAL_WORLD_SIZE")
         return local_world_size, local_rank
 

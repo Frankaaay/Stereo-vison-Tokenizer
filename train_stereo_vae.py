@@ -762,9 +762,18 @@ def _write_immutable_json(path, payload):
     return serialized
 
 
+def _is_global_zero_process(environ):
+    """Identify rank zero before Lightning initializes the process group."""
+    if "RANK" in environ:
+        return int(environ["RANK"]) == 0
+    return int(environ.get("NODE_RANK", "0")) == 0 and int(
+        environ.get("LOCAL_RANK", "0")
+    ) == 0
+
+
 def write_online_gt_run_metadata(args):
     """Persist resolved backend provenance before an online-teacher run."""
-    if not args.online_gt_enabled or int(os.environ.get("RANK", "0")) != 0:
+    if not args.online_gt_enabled or not _is_global_zero_process(os.environ):
         return
     output_root = Path(args.default_root_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)

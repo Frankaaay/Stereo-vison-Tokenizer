@@ -53,6 +53,48 @@ class HyCamHighManifestTest(unittest.TestCase):
         )
         self.assertEqual(mapping, {"hy_primary": str(self.root.resolve())})
 
+    def test_lance_rows_are_selected_by_episode_and_frame_identity(self):
+        class Table:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def to_pylist(self):
+                return self.rows
+
+        class LanceDataset:
+            def __init__(self):
+                self.filter = None
+                self.rows = [
+                    {"episode_index": 7, "frame_index": 9},
+                    {"episode_index": 7, "frame_index": 3},
+                ]
+
+            def to_table(self, *, filter, columns):
+                self.filter = filter
+                self.columns = columns
+                return Table(self.rows)
+
+        lance_dataset = LanceDataset()
+        rows = HyLanceMonoDataset._take_episode_frames(
+            lance_dataset,
+            episode_index=7,
+            frame_indices=[3, 9],
+            columns=["episode_index", "frame_index"],
+        )
+        self.assertEqual([row["frame_index"] for row in rows], [3, 9])
+        self.assertEqual(
+            lance_dataset.filter,
+            "episode_index = 7 AND frame_index IN (3, 9)",
+        )
+        lance_dataset.rows = [{"episode_index": 7, "frame_index": 3}]
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            HyLanceMonoDataset._take_episode_frames(
+                lance_dataset,
+                episode_index=7,
+                frame_indices=[3, 9],
+                columns=["episode_index", "frame_index"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
