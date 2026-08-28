@@ -43,8 +43,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("from stereo_tokenizer.mode_sampling import MODE_IDS", source)
         self.assertIn("FoundationStereoOnlineTeacher", source)
         self.assertIn("DepthAnything3OnlineTeacher", source)
-        self.assertIn("HyMonoDataset", source)
-        self.assertIn("--mono_eval_manifest", source)
+        self.assertIn("HyLanceMonoDataset", source)
+        self.assertIn("--hy_manifest", source)
         self.assertIn("relative_target_from_da3(", source)
         self.assertIn("_exact_mono_rank_indices", source)
         self.assertIn('choices=("las2_h", "pytorch", "tensorrt")', source)
@@ -250,7 +250,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("dist.all_reduce", probe)
         self.assertIn("dist.all_gather_object", probe)
 
-    def test_four_mode_smoke_wires_da3_and_average_checkpoint(self) -> None:
+    def test_three_source_training_wires_manifests_da3_and_checkpoint(self) -> None:
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
             encoding="utf-8"
         )
@@ -261,13 +261,14 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         )
         for token in (
             "FOUR_MODE_MIXED_TRAINING",
-            "MONO_SMOKE_MANIFEST",
+            "HY_MANIFEST",
+            "LIBERO_MANIFEST",
+            "UMI_MANIFEST",
             "MODE_UPDATES_PER_EPOCH",
             "DA3_CHECKPOINT_SHA256",
-            "MIXED_MONO_SAMPLE_LIMIT",
-            "MIXED_STEREO_SAMPLE_LIMIT",
-            '--mixed_mono_sample_limit "${MIXED_MONO_SAMPLE_LIMIT}"',
-            '--mixed_stereo_sample_limit "${MIXED_STEREO_SAMPLE_LIMIT}"',
+            "NODE_MANIFEST_CONTRACTS",
+            "MODE_UPDATE_WEIGHTS",
+            "MONO_DATASET_WEIGHTS",
         ):
             self.assertIn(token, launcher)
         self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)

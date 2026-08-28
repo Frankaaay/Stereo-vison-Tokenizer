@@ -13,7 +13,13 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.models.layers import trunc_normal_
-from .mode_sampling import MODE_IDS, mode_for_update, mode_occurrences_before
+from .mode_sampling import (
+    MODE_IDS,
+    dataset_for_mode_occurrence,
+    mode_for_update,
+    mode_occurrences_before,
+    parse_weight_spec,
+)
 from .modules import (
     LPIPS,
     StereoFusion,
@@ -247,6 +253,7 @@ class StereoVAE(pl.LightningModule):
         self.batch_updates = 0
         self.last_temporal_mode: Optional[TemporalMode] = None
         self.last_mode_id: Optional[str] = None
+        self.last_dataset_id: Optional[str] = None
         self._validation_mode_sums = None
         self._validation_mode_counts = None
         self.save_hyperparameters("args")
@@ -320,6 +327,9 @@ class StereoVAE(pl.LightningModule):
         return value
 
     def on_save_checkpoint(self, checkpoint) -> None:
+        mode_weight_spec = getattr(self.args, "mode_update_weights", "1:1:1:1")
+        mono_weight_spec = getattr(self.args, "mono_dataset_weights", "9:1")
+        mode_weights = parse_weight_spec(mode_weight_spec, MODE_IDS)
         checkpoint["stereo_update_counters"] = {
             "generator_updates": self.generator_updates,
             "discriminator_updates": self.discriminator_updates,
@@ -329,7 +339,11 @@ class StereoVAE(pl.LightningModule):
             "mode_samples": dict(self.mode_samples),
             "batch_updates": self.batch_updates,
             "mode_contract": list(MODE_IDS),
-            "mode_update_ratio": "1:1:1:1",
+            "mode_update_weights": mode_weights,
+            "mono_dataset_weights": mono_weight_spec,
+            "node_manifest_contracts": getattr(
+                self.args, "node_manifest_contracts", None
+            ),
             "per_device_batch_size": int(self.args.batch_size),
             "grad_accumulates": int(self.grad_accumulates),
             "mode_schedule_seed": int(
@@ -365,8 +379,17 @@ class StereoVAE(pl.LightningModule):
         batch_updates = self._read_checkpoint_counter(counters, "batch_updates")
         if counters.get("mode_contract") != list(MODE_IDS):
             raise ValueError("checkpoint four-mode contract mismatch")
-        if counters.get("mode_update_ratio") != "1:1:1:1":
-            raise ValueError("checkpoint mode update ratio mismatch")
+        mode_weight_spec = getattr(self.args, "mode_update_weights", "1:1:1:1")
+        mono_weight_spec = getattr(self.args, "mono_dataset_weights", "9:1")
+        mode_weights = parse_weight_spec(mode_weight_spec, MODE_IDS)
+        if counters.get("mode_update_weights") != mode_weights:
+            raise ValueError("checkpoint mode update weights mismatch")
+        if counters.get("mono_dataset_weights") != mono_weight_spec:
+            raise ValueError("checkpoint mono dataset weights mismatch")
+        if counters.get("node_manifest_contracts") != getattr(
+            self.args, "node_manifest_contracts", None
+        ):
+            raise ValueError("checkpoint node-local manifest contract mismatch")
         if counters.get("per_device_batch_size") != int(self.args.batch_size):
             raise ValueError("checkpoint per-device batch size mismatch")
         if counters.get("grad_accumulates") != int(self.grad_accumulates):
@@ -416,11 +439,9 @@ class StereoVAE(pl.LightningModule):
             + mode_updates["stereo/single_frame"]
         ):
             raise ValueError("single-frame counter disagrees with mode counters")
-        if mode_updates and max(mode_updates.values()) - min(mode_updates.values()) > 1:
-            raise ValueError("checkpoint mode counters violate 1:1:1:1 scheduling")
         if bool(getattr(self.args, "four_mode_mixed_training", False)):
             expected_mode_updates = mode_occurrences_before(
-                schedule_seed, generator_updates
+                schedule_seed, generator_updates, mode_weights
             )
             if mode_updates != expected_mode_updates:
                 raise ValueError(
@@ -949,13 +970,45 @@ class StereoVAE(pl.LightningModule):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
         if bool(getattr(self.args, "four_mode_mixed_training", False)):
+            mode_weights = parse_weight_spec(
+                getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
+            )
             expected_mode = mode_for_update(
-                int(self.args.mode_schedule_seed), self.generator_updates
+                int(self.args.mode_schedule_seed),
+                self.generator_updates,
+                mode_weights,
             )
             if mode_id != expected_mode:
                 raise RuntimeError(
                     f"seeded mode schedule expected {expected_mode}, got {mode_id}"
                 )
+            dataset_id = self._uniform_batch_metadata(source_batch, "dataset_id")
+            prior_modes = mode_occurrences_before(
+                int(self.args.mode_schedule_seed), self.generator_updates, mode_weights
+            )
+            occurrence = (
+                sum(
+                    count
+                    for prior_mode, count in prior_modes.items()
+                    if prior_mode.startswith("mono/")
+                )
+                if mode_id.startswith("mono/")
+                else prior_modes[mode_id]
+            )
+            expected_dataset = dataset_for_mode_occurrence(
+                int(self.args.mode_schedule_seed),
+                mode_id,
+                occurrence,
+                parse_weight_spec(
+                    getattr(self.args, "mono_dataset_weights", "9:1"),
+                    ("hy", "libero"),
+                ),
+            )
+            if dataset_id != expected_dataset:
+                raise RuntimeError(
+                    f"seeded dataset schedule expected {expected_dataset}, got {dataset_id}"
+                )
+            self.last_dataset_id = dataset_id
         self.last_temporal_mode = temporal_mode
         self.last_mode_id = mode_id
         batch = self._prepare_temporal_batch(
@@ -1013,10 +1066,6 @@ class StereoVAE(pl.LightningModule):
             self.mode_samples[mode_id] += (
                 int(batch["video"].shape[0]) * int(self.trainer.world_size)
             )
-            if bool(getattr(self.args, "four_mode_mixed_training", False)) and (
-                max(self.mode_updates.values()) - min(self.mode_updates.values()) > 1
-            ):
-                raise RuntimeError("four-mode update counts violate 1:1:1:1")
             self.generator_updates += 1
             with profile_region("stereo/update/scheduler"):
                 schedulers[0].step_update(self.generator_updates)

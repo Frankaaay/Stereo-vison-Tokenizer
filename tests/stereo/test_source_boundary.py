@@ -99,8 +99,6 @@ class SourceBoundaryTest(unittest.TestCase):
             classes,
             {
                 "ModeSubset",
-                "HyMonoDataset",
-                "HyMonoSmokeDataset",
                 "StereoDataModule",
             },
         )

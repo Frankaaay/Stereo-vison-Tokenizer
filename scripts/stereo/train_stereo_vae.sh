@@ -63,24 +63,23 @@ elif [[ "${GAN_ENABLED}" != "0" ]]; then
   exit 2
 fi
 
-MODE_UPDATE_RATIO="${MODE_UPDATE_RATIO:-1:1:1:1}"
+MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
+MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
   if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
     echo "four-mode training requires GRAD_ACCUMULATES=1" >&2
     exit 2
   fi
-  if [[ "${MODE_UPDATE_RATIO}" != "1:1:1:1" ]]; then
-    echo "four-mode training requires MODE_UPDATE_RATIO=1:1:1:1" >&2
-    exit 2
-  fi
 fi
 
 DATA_ARGS=()
 ONLINE_GT_ARGS=()
-: "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
-: "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
-: "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
+if [[ "${FOUR_MODE_MIXED_TRAINING}" != "1" ]]; then
+  : "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
+  : "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
+  : "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
+fi
 FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
 FOUNDATION_BACKEND_ARGS=()
 if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
@@ -132,14 +131,16 @@ else
   echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
   exit 2
 fi
-DATA_ARGS+=(
-  --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
-  --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
-  --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
-  --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
-  --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
-  --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
-)
+if [[ "${FOUR_MODE_MIXED_TRAINING}" != "1" ]]; then
+  DATA_ARGS+=(
+    --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
+    --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
+    --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
+    --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
+    --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
+    --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
+  )
+fi
 ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"
 if [[ "${ONLINE_GT_CACHE_ENABLED}" == "1" ]]; then
   : "${ONLINE_GT_CACHE_ROOT:?set a repository-external online GT cache root}"
@@ -180,27 +181,38 @@ fi
 
 MIXED_MODE_ARGS=()
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  : "${MONO_SMOKE_MANIFEST:?set the node-local Hy mono manifest}"
-  : "${MONO_SMOKE_CACHE_ROOT:?set the node-local Hy mono cache root}"
+  : "${HY_MANIFEST:?set the node-local Hy manifest}"
+  : "${HY_ROOT_ALIASES:?set the node-local Hy root-alias JSON}"
+  : "${LIBERO_MANIFEST:?set the node-local LIBERO manifest}"
+  : "${LIBERO_ROOT_ALIASES:?set the node-local LIBERO root-alias JSON}"
+  : "${UMI_MANIFEST:?set the node-local UMI manifest}"
+  : "${UMI_ROOT_ALIASES:?set the node-local UMI root-alias JSON}"
   : "${DA3_REPO:?set the pinned Depth Anything 3 source repository}"
   : "${DA3_SOURCE_SHA:?set the full Depth Anything 3 source SHA}"
   : "${DA3_CHECKPOINT:?set the pinned DA3-BASE checkpoint directory}"
   : "${DA3_CHECKPOINT_SHA256:?set the DA3-BASE model.safetensors SHA256}"
   MODE_UPDATES_PER_EPOCH="${MODE_UPDATES_PER_EPOCH:-${MAX_STEPS}}"
-  MIXED_MONO_SAMPLE_LIMIT="${MIXED_MONO_SAMPLE_LIMIT:-48}"
-  MIXED_STEREO_SAMPLE_LIMIT="${MIXED_STEREO_SAMPLE_LIMIT:-48}"
-  if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS || MODE_UPDATES_PER_EPOCH % 4 != 0 )); then
-    echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS and be divisible by four" >&2
+  if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS )); then
+    echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS" >&2
+    exit 2
+  fi
+  if [[ "${NUM_NODES}" == "2" && -z "${NODE_MANIFEST_CONTRACTS:-}" ]]; then
+    echo "dual-node training requires NODE_MANIFEST_CONTRACTS" >&2
     exit 2
   fi
   MIXED_MODE_ARGS+=(
     --four_mode_mixed_training 1
-    --mono_train_manifest "${MONO_SMOKE_MANIFEST}"
-    --mono_val_manifest "${MONO_SMOKE_MANIFEST}"
-    --mono_cache_root "${MONO_SMOKE_CACHE_ROOT}"
-    --mixed_mono_sample_limit "${MIXED_MONO_SAMPLE_LIMIT}"
-    --mixed_stereo_sample_limit "${MIXED_STEREO_SAMPLE_LIMIT}"
+    --hy_manifest "${HY_MANIFEST}"
+    --hy_root_aliases "${HY_ROOT_ALIASES}"
+    --libero_manifest "${LIBERO_MANIFEST}"
+    --libero_root_aliases "${LIBERO_ROOT_ALIASES}"
+    --umi_manifest "${UMI_MANIFEST}"
+    --umi_root_aliases "${UMI_ROOT_ALIASES}"
+    --umi_episode_cache_capacity "${UMI_EPISODE_CACHE_CAPACITY:-2}"
     --mode_schedule_seed "${MODE_SCHEDULE_SEED:-1234}"
+    --mode_update_weights "${MODE_UPDATE_WEIGHTS}"
+    --mono_dataset_weights "${MONO_DATASET_WEIGHTS}"
+    --node_manifest_contracts "${NODE_MANIFEST_CONTRACTS:-}"
     --mode_updates_per_epoch "${MODE_UPDATES_PER_EPOCH}"
     --da3_repo "${DA3_REPO}"
     --da3_source_sha "${DA3_SOURCE_SHA}"

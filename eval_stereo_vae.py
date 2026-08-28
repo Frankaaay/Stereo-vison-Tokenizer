@@ -16,7 +16,8 @@ from torch.utils.data import default_collate
 from tqdm import tqdm
 
 from stereo_tokenizer import StereoVAE
-from stereo_tokenizer.data import HyMonoDataset, StereoDataModule
+from stereo_tokenizer.data import StereoDataModule, _load_root_aliases
+from stereo_tokenizer.pretrain_data import HyLanceMonoDataset
 from stereo_tokenizer.lerobot_data import fixed_episode_subset_indices
 from stereo_tokenizer.mode_sampling import MODE_IDS
 from stereo_tokenizer.modules.relative_depth import (
@@ -149,7 +150,6 @@ def build_parser():
     parser.add_argument("--las2_h_checkpoint_sha256", type=str, default=None)
     parser.add_argument("--las2_h_valid_iters", type=int, default=4)
     parser.add_argument("--las2_h_max_disp", type=int, default=192)
-    parser.add_argument("--mono_eval_manifest", type=str, default=None)
     parser.add_argument("--da3_repo", type=str, default=None)
     parser.add_argument("--da3_source_sha", type=str, default=None)
     parser.add_argument("--da3_checkpoint", type=str, default=None)
@@ -209,8 +209,8 @@ def validate_args(args):
             raise ValueError("relative LR threshold must be non-negative")
     if "mono" in eye_modes:
         required = {
-            "mono_eval_manifest": args.mono_eval_manifest,
-            "mono_cache_root": args.mono_cache_root,
+            "hy_manifest": args.hy_manifest,
+            "hy_root_aliases": args.hy_root_aliases,
             "da3_repo": args.da3_repo,
             "da3_source_sha": args.da3_source_sha,
             "da3_checkpoint": args.da3_checkpoint,
@@ -497,9 +497,10 @@ def _exact_mono_rank_indices(dataset, rank, world_size):
 
 def build_eval_dataset(args, eye_mode):
     if eye_mode == "mono":
-        return HyMonoDataset(
-            args.mono_eval_manifest,
-            args.mono_cache_root,
+        return HyLanceMonoDataset(
+            args.hy_manifest,
+            _load_root_aliases(args.hy_root_aliases, "--hy_root_aliases"),
+            split=args.eval_split,
             single_frame_source_index=args.single_frame_source_index,
         )
     if eye_mode == "stereo":

@@ -17,7 +17,7 @@ from eval_stereo_vae import (
     finalize_metrics,
     update_metrics,
 )
-from stereo_tokenizer.data import HyMonoDataset, HyMonoSmokeDataset
+from stereo_tokenizer.pretrain_data import HyLanceMonoDataset
 from stereo_tokenizer.geometry import GeometryMapping
 from stereo_tokenizer.online_gt import (
     DA3_CHECKPOINT_IGNORED_MISSING_KEYS,
@@ -237,7 +237,7 @@ class GeometryMappingTest(unittest.TestCase):
             )
 
     def test_dataset_worker_has_no_da3_model_or_forward(self):
-        data_source = inspect.getsource(HyMonoDataset)
+        data_source = inspect.getsource(HyLanceMonoDataset)
         geometry_source = inspect.getsource(GeometryMapping.da3_preprocess)
         self.assertNotIn("DepthAnything3", data_source)
         self.assertNotIn("depth_anything_3", geometry_source)

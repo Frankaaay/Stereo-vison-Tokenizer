@@ -354,46 +354,29 @@ sha256sum "$LEROBOT_EPISODE_MANIFEST" "$PREPROCESS_ROOT/episode_manifest_summary
 split 在 episode 层完成，不会让同一 episode 的窗口跨 train/val/test。manifest 会保存
 视频路径、calibration、rectification audit SHA、预处理合同和 source JSON SHA。
 
-### 6.3 Hy mono smoke cache
+### 6.3 三源 node-local manifests
 
-Hy exporter 使用 `environments/hy-export/pyproject.toml` 与它自己的 `uv.lock`，创建独立
-CPU venv，避免其 NumPy 2.5.2/Lance 依赖改变训练环境的 NumPy 1.26.2 ABI：
-
-```bash
-export UV_PROJECT_ENVIRONMENT="$RUNTIME_ROOT/hy-export"
-uv lock --check --project "$PROJECT_ROOT/environments/hy-export"
-uv sync \
-  --project "$PROJECT_ROOT/environments/hy-export" \
-  --frozen \
-  --python 3.12
-source "$RUNTIME_ROOT/hy-export/bin/activate"
-uv pip check --python "$RUNTIME_ROOT/hy-export/bin/python"
-
-export HY_LANCE_ROOT=/data/datasets/hy_lance_overlay
-export MONO_SMOKE_CACHE_ROOT=$WORK_ROOT/preprocessed/hy_mono_cam_high_smoke_v1
-
-cd "$PROJECT_ROOT"
-python scripts/data/build_hy_mono_smoke_cache.py \
-  --root "$HY_LANCE_ROOT" \
-  --output-root "$MONO_SMOKE_CACHE_ROOT" \
-  --sample-count 48 \
-  --seed 1234 \
-  --fps 30
-
-export MONO_SMOKE_MANIFEST=$MONO_SMOKE_CACHE_ROOT/manifest.jsonl
-sha256sum "$MONO_SMOKE_MANIFEST" "$MONO_SMOKE_CACHE_ROOT/summary.json"
-```
-
-exporter 从 48 个不同 episode 选择四帧窗口，保存 raw uint8 RGB，不提前写 DA3 target。
-相同输入、seed 和输出目录可幂等重跑；若已有文件内容不同则拒绝覆盖。
-
-完成后切回训练环境：
+训练直接读取 Hy Lance、LIBERO LeRobot v2.1 和 UMI raw MCAP。manifest 只保存逻辑
+`root_alias` 与相对路径；每台 H200 用自己的 alias JSON 映射物理根。Hy 只枚举
+`observation_images_cam_high`，不使用腕部相机：
 
 ```bash
-deactivate
-export UV_PROJECT_ENVIRONMENT="$RUNTIME_ROOT/train"
-source "$RUNTIME_ROOT/train/bin/activate"
+python scripts/data/build_pretrain_manifest.py hy \
+  --root hy_primary=/data/shared/hy_embodied/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data \
+  --root hy_rest=/data/shared/hy_embodied_rest/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data \
+  --output "$WORK_ROOT/manifests/hy-h200-2.jsonl"
+
+python scripts/data/build_pretrain_manifest.py libero \
+  --root libero=/data/shared/offline/datasets/libero_mujoco3.3.2 \
+  --output "$WORK_ROOT/manifests/libero-h200-2.jsonl"
+
+python scripts/data/build_pretrain_manifest.py umi \
+  --root umi=/data/shared/datasets/umi_raw_data_260714 \
+  --output "$WORK_ROOT/manifests/umi-h200-2.jsonl"
 ```
+
+H200-1 对其本地物理根重复执行同一命令即可；builder 不硬编码奇偶 table。每个 JSONL
+旁边会生成 summary JSON，记录 episode/window/split 数和 manifest SHA256。
 
 ## 7. 运行前检查
 
@@ -418,8 +401,9 @@ python -m pytest -q tests
 ```bash
 test -f "$LEROBOT_EPISODE_MANIFEST"
 test -d "$LEROBOT_DATASET_ROOT"
-test -f "$MONO_SMOKE_MANIFEST"
-test -d "$MONO_SMOKE_CACHE_ROOT"
+test -f "$HY_MANIFEST"
+test -f "$LIBERO_MANIFEST"
+test -f "$UMI_MANIFEST"
 test -d "$LAS2_H_REPO"
 test -f "$LAS2_H_CHECKPOINT"
 test -d "$DA3_REPO"
@@ -480,7 +464,7 @@ launcher 只有在日志出现真实 `NET/IB` transport 时才返回成功，不
 正式训练前先用 `scripts/stereo/check_ib_collective.py` 完成双机 collective gate。
 关闭 IB 后仍可使用现有单机单卡或单机 DDP；不同 world size之间不得 strict resume。
 
-## 9. 四模式最小可运行 smoke
+## 9. 三数据源四模式最小运行配置
 
 下面是已经验证过的 2 GPU H200 配置。输出目录必须使用一个从未存在过的新路径：
 
@@ -495,7 +479,7 @@ export GLOBAL_BATCH_SIZE=48
 export PER_DEVICE_BATCH_SIZE=24
 export GRAD_ACCUMULATES=1
 export MAX_STEPS=4
-export MODE_UPDATES_PER_EPOCH=4
+export MODE_UPDATES_PER_EPOCH=20
 
 export LEARNING_RATE=1e-4
 export MIN_LEARNING_RATE=1e-4
@@ -509,15 +493,15 @@ export PERCEPTUAL_WEIGHT=1.0
 export SINGLE_FRAME_SOURCE_INDEX=0
 
 export FOUR_MODE_MIXED_TRAINING=1
-export MODE_UPDATE_RATIO=1:1:1:1
+export MODE_UPDATE_WEIGHTS=35:35:15:15
+export MONO_DATASET_WEIGHTS=9:1
 export MODE_SCHEDULE_SEED=1234
-export MONO_SMOKE_MANIFEST
-export MONO_SMOKE_CACHE_ROOT
-
-export LEROBOT_EPISODE_MANIFEST
-export LEROBOT_DATASET_ROOT
-export LEROBOT_RECTIFICATION_AUDIT_SHA256
-export LEROBOT_VAL_SAMPLE_LIMIT=512
+export HY_MANIFEST=$WORK_ROOT/manifests/hy-h200-2.jsonl
+export HY_ROOT_ALIASES='{"hy_primary":"/data/shared/hy_embodied/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data","hy_rest":"/data/shared/hy_embodied_rest/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data"}'
+export LIBERO_MANIFEST=$WORK_ROOT/manifests/libero-h200-2.jsonl
+export LIBERO_ROOT_ALIASES='{"libero":"/data/shared/offline/datasets/libero_mujoco3.3.2"}'
+export UMI_MANIFEST=$WORK_ROOT/manifests/umi-h200-2.jsonl
+export UMI_ROOT_ALIASES='{"umi":"/data/shared/datasets/umi_raw_data_260714"}'
 
 export FOUNDATION_STEREO_BACKEND=las2_h
 export LAS2_H_REPO
@@ -694,13 +678,11 @@ python eval_stereo_vae.py \
 
 ### 13.1 正式 mono + DA3 评估
 
-Mono evaluation 直接读取 immutable Hy RGB manifest/cache；不会从 stereo batch 截取眼睛。
+Mono evaluation 直接读取 Hy cam_high Lance manifest；不会从 stereo batch 截取眼睛。
 Dataset 输出严格为 `[B,1,1,3,T,256,256]`，DA3 接收未带 Student padding 的原始比例
-预处理，输出映射回 Student geometry。一个 manifest 必须只有一种 `source_hw`，从而保证
-DA3 tensor 可以组成 batch。当前 48 条 smoke manifest 可作为最小正式输入：
+预处理，输出映射回 Student geometry。Hy manifest 的唯一视觉字段是 cam_high：
 
 ```bash
-export MONO_EVAL_MANIFEST=$MONO_SMOKE_MANIFEST
 export MONO_EVAL_ROOT=$RUN_ROOT/mono-eval-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$MONO_EVAL_ROOT"
 
@@ -713,8 +695,8 @@ python eval_stereo_vae.py \
   --output_json "$MONO_EVAL_ROOT/metrics.json" \
   --visualization_dir "$MONO_EVAL_ROOT/cases" \
   --num_visualizations 2 \
-  --mono_eval_manifest "$MONO_EVAL_MANIFEST" \
-  --mono_cache_root "$MONO_SMOKE_CACHE_ROOT" \
+  --hy_manifest "$HY_MANIFEST" \
+  --hy_root_aliases "$HY_ROOT_ALIASES" \
   --da3_repo "$DA3_REPO" \
   --da3_source_sha "$DA3_SOURCE_SHA" \
   --da3_checkpoint "$DA3_CHECKPOINT" \
@@ -780,8 +762,8 @@ python eval_stereo_vae.py \
   ... \
   --eval_eye_mode both \
   --eval_temporal_mode both \
-  --mono_eval_manifest "$MONO_EVAL_MANIFEST" \
-  --mono_cache_root "$MONO_SMOKE_CACHE_ROOT" \
+  --hy_manifest "$HY_MANIFEST" \
+  --hy_root_aliases "$HY_ROOT_ALIASES" \
   --da3_repo "$DA3_REPO" \
   --da3_source_sha "$DA3_SOURCE_SHA" \
   --da3_checkpoint "$DA3_CHECKPOINT" \

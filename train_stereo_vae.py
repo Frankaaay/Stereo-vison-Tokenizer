@@ -18,7 +18,11 @@ from torch.profiler import ProfilerActivity
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule
-from stereo_tokenizer.mode_sampling import MODE_IDS, mode_occurrences_before
+from stereo_tokenizer.mode_sampling import (
+    MODE_IDS,
+    mode_occurrences_before,
+    parse_weight_spec,
+)
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
 from stereo_tokenizer.online_gt import (
     OnlineDepthAnything3GTCallback,
@@ -432,24 +436,65 @@ def _validate_four_mode_batch_contract(args):
     world_size = args.devices * args.num_nodes
     if world_size < 1:
         raise ValueError("four-mode DDP world size must be positive")
-    limits = {
-        "mono": int(args.mixed_mono_sample_limit),
-        "stereo": int(args.mixed_stereo_sample_limit),
-    }
-    for source, limit in limits.items():
-        if limit < world_size:
-            raise ValueError(
-                f"{source} sample limit must be at least the DDP world size"
-            )
-        if limit % world_size:
-            raise ValueError(
-                f"{source} sample limit must be divisible by DDP world size"
-            )
-        rank_local_samples = limit // world_size
-        if args.batch_size > rank_local_samples:
-            raise ValueError(
-                "four-mode batch size cannot exceed rank-local source samples"
-            )
+    parse_weight_spec(args.mode_update_weights, MODE_IDS)
+    parse_weight_spec(args.mono_dataset_weights, ("hy", "libero"))
+    if args.num_nodes > 1 and not args.node_manifest_contracts:
+        raise ValueError(
+            "multi-node pretraining requires --node_manifest_contracts with "
+            "the fixed node-rank to manifest mapping"
+        )
+
+
+def _bind_node_manifest_contracts(args):
+    """Bind each physical node rank to immutable manifest content hashes."""
+    if not args.four_mode_mixed_training:
+        return
+    local = {}
+    for dataset_id in ("hy", "libero", "umi"):
+        manifest = getattr(args, f"{dataset_id}_manifest")
+        if not manifest:
+            raise ValueError(f"three-source training requires {dataset_id}_manifest")
+        path = Path(manifest).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        local[dataset_id] = hashlib.sha256(path.read_bytes()).hexdigest()
+    node_rank = str(int(os.environ.get("NODE_RANK", "0")))
+    if args.node_manifest_contracts:
+        candidate = Path(args.node_manifest_contracts).expanduser()
+        raw = (
+            candidate.read_text(encoding="utf-8")
+            if not args.node_manifest_contracts.lstrip().startswith("{")
+            and candidate.is_file()
+            else args.node_manifest_contracts
+        )
+        try:
+            contracts = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError("node_manifest_contracts must be valid JSON") from error
+    else:
+        contracts = {node_rank: local}
+    expected_ranks = {str(rank) for rank in range(int(args.num_nodes))}
+    if not isinstance(contracts, dict) or set(contracts) != expected_ranks:
+        raise ValueError(
+            f"node manifest contracts must contain exactly ranks {sorted(expected_ranks)}"
+        )
+    for rank, mapping in contracts.items():
+        if not isinstance(mapping, dict) or set(mapping) != {"hy", "libero", "umi"}:
+            raise ValueError(f"node {rank} must map hy, libero and umi manifests")
+        if any(
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest.lower())
+            for digest in mapping.values()
+        ):
+            raise ValueError(f"node {rank} manifest hashes must be full SHA256 digests")
+    if contracts[node_rank] != local:
+        raise ValueError(
+            f"node rank {node_rank} manifest files disagree with NODE_MANIFEST_CONTRACTS"
+        )
+    args.node_manifest_contracts = json.dumps(
+        contracts, sort_keys=True, separators=(",", ":")
+    )
 
 
 def validate_runtime_args(args):
@@ -466,8 +511,8 @@ def validate_runtime_args(args):
                 "--single_frame_source_index=0"
             )
         _validate_four_mode_batch_contract(args)
-        if args.mode_updates_per_epoch < 4 or args.mode_updates_per_epoch % 4:
-            raise ValueError("mode_updates_per_epoch must be a positive multiple of 4")
+        if args.mode_updates_per_epoch < 1:
+            raise ValueError("mode_updates_per_epoch must be positive")
         if args.mode_schedule_start_update < 0:
             raise ValueError("mode_schedule_start_update must be non-negative")
         if (
@@ -483,18 +528,21 @@ def validate_runtime_args(args):
                 "mode_updates_per_epoch must cover all remaining updates so the "
                 "stateless resume schedule stays in one data epoch"
             )
-        required_mono = {
-            "mono_train_manifest": args.mono_train_manifest,
-            "mono_val_manifest": args.mono_val_manifest,
-            "mono_cache_root": args.mono_cache_root,
+        required_sources = {
+            "hy_manifest": args.hy_manifest,
+            "hy_root_aliases": args.hy_root_aliases,
+            "libero_manifest": args.libero_manifest,
+            "libero_root_aliases": args.libero_root_aliases,
+            "umi_manifest": args.umi_manifest,
+            "umi_root_aliases": args.umi_root_aliases,
             "da3_repo": args.da3_repo,
             "da3_source_sha": args.da3_source_sha,
             "da3_checkpoint": args.da3_checkpoint,
             "da3_checkpoint_sha256": args.da3_checkpoint_sha256,
         }
-        missing = [name for name, value in required_mono.items() if not value]
+        missing = [name for name, value in required_sources.items() if not value]
         if missing:
-            raise ValueError("four-mode training requires " + ", ".join(missing))
+            raise ValueError("three-source training requires " + ", ".join(missing))
         if not args.online_gt_enabled:
             raise ValueError("four-mode online-teacher smoke requires online GT")
         if args.da3_process_res != 504:
@@ -539,14 +587,17 @@ def validate_runtime_args(args):
         if args.foundation_stereo_backend == "las2_h"
         else args.foundation_stereo_checkpoint_sha256
     )
-    required = {
-        "lerobot_episode_manifest": args.lerobot_episode_manifest,
-        "lerobot_dataset_root": args.lerobot_dataset_root,
-        "lerobot_rectification_audit_sha256": (
-            args.lerobot_rectification_audit_sha256
-        ),
-        "teacher_checkpoint_sha256": teacher_sha256,
-    }
+    required = {"teacher_checkpoint_sha256": teacher_sha256}
+    if not args.four_mode_mixed_training:
+        required.update(
+            {
+                "lerobot_episode_manifest": args.lerobot_episode_manifest,
+                "lerobot_dataset_root": args.lerobot_dataset_root,
+                "lerobot_rectification_audit_sha256": (
+                    args.lerobot_rectification_audit_sha256
+                ),
+            }
+        )
     if args.foundation_stereo_backend == "las2_h":
         required.update(
             {
@@ -587,7 +638,9 @@ def validate_runtime_args(args):
         )
     if not args.online_gt_enabled:
         raise ValueError("LeRobot online training requires --online_gt_enabled=1")
-    if len(args.lerobot_rectification_audit_sha256) != 64:
+    if not args.four_mode_mixed_training and len(
+        args.lerobot_rectification_audit_sha256
+    ) != 64:
         raise ValueError("a full rectification audit SHA256 is required")
     if len(teacher_sha256) != 64:
         raise ValueError("a full online teacher checkpoint SHA256 is required")
@@ -860,12 +913,15 @@ def main():
         if not isinstance(counters, dict):
             raise ValueError("resume checkpoint has no stereo update counters")
         args.mode_schedule_start_update = int(counters["generator_updates"])
+    _bind_node_manifest_contracts(args)
     validate_runtime_args(args)
     if args.resume_from_checkpoint is not None and args.four_mode_mixed_training:
         if counters.get("mode_schedule_seed") != args.mode_schedule_seed:
             raise ValueError("resume checkpoint mode schedule seed mismatch")
         if counters.get("mode_updates") != mode_occurrences_before(
-            args.mode_schedule_seed, args.mode_schedule_start_update
+            args.mode_schedule_seed,
+            args.mode_schedule_start_update,
+            parse_weight_spec(args.mode_update_weights, MODE_IDS),
         ):
             raise ValueError("resume checkpoint counters disagree with next mode")
     write_online_gt_run_metadata(args)
