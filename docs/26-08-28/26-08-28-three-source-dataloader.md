@@ -63,3 +63,12 @@ The 12 source-level entrypoint tests pass after correcting the evaluation assert
 ## Remaining launch gates
 
 Before H200 execution, push the verified merge revision and fast-forward the clean server clone to that exact SHA. Then generate and inspect the node-local manifests, install/sync the newly declared `pylance`, `mcap`, and `mcap-protobuf-support` dependencies in the approved runtime, run CPU decode/collation tests against real records, and perform the normal clean-SHA/data/GPU/output preflight. No GPU availability claim is made here.
+
+## H200-1 CPU execution status
+
+- Run location: `h200-1`, branch `hezhou-las2-h`, starting SHA `72fdfdb9c51d045ac9c0f4989bc2b7e32aefa260`.
+- Runtime: `/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260828/venv`, synchronized from `uv.lock`; Torch 2.7.1+cu126, PyArrow 23.0.0, Lance 10.0.0, MCAP 1.4.0, PyAV 16.0.1, and OpenCV 4.11.0.
+- Output root: `/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260828`.
+- Stage 2 LIBERO completed: 1,712 records, 34,192 windows, manifest SHA256 `7abd9129b3654dd69cd867d99e1434f2070718334e1909b953e7a4da4af126a2`.
+- Stage 2 Hy completed against the H200-1 even-table roots: 57,948 records, 4,478,726 windows, manifest SHA256 `97913f5c98148046e024f1bbebd5eedae7825ddbb85ea62df4f829478947cc83`.
+- Stage 2 UMI initially failed before publication on an accepted episode missing `camera_left_wrist_left`. The builder now rejects incomplete/malformed calibration before opening the MCAP; the task remains in progress until the corrected SHA is synchronized and the UMI manifest succeeds.

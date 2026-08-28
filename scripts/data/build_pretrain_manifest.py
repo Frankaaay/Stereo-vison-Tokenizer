@@ -197,6 +197,10 @@ def build_umi(roots):
                 frames = json.loads(frames)
             if isinstance(frames, dict) and frames.get("status") != "done":
                 continue
+            try:
+                calibration = _umi_calibration(sidecar)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
             counts = Counter()
             topics = {}
             with mcap_path.open("rb") as stream:
@@ -217,7 +221,7 @@ def build_umi(roots):
                 "length": length,
                 "fps": 30.0,
                 "topics": topics,
-                "calibration": _umi_calibration(sidecar),
+                "calibration": calibration,
                 "maximum_pair_skew_s": 1.0 / 60.0,
             }
             yield {
