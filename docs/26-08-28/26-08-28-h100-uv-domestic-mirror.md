@@ -24,10 +24,20 @@
 
 - `pyproject.toml` 保留具名、`explicit = true` 的专用 index，并增加 `format = "flat"`。
 - `uv.lock` 由 `uv lock` 重新生成；包版本和 CUDA 变体保持不变。
-- 本地锁文件检查和 H100 空缓存安装、CUDA 导入验收将在提交后继续执行，结果追加到本文档。
+- 本地执行 `uv lock --check` 通过，共解析 177 个包。
+
+## H100 灰度验收
+
+- 状态：进行中。
+- 运行位置：H100 Slurm，Job `345`，节点 `xn01-gpu1-0049`，1 张 H100 80GB；开始时间 `2026-08-28T20:27:54+08:00`。
+- 关键命令：`sbatch /gpfs/jiuquyun/projects/zetyun/validation/uv-domestic-mirror-db2bb23-32f55fa-260828/validate.sh`。
+- 日志：`/gpfs/jiuquyun/projects/zetyun/validation/uv-domestic-mirror-db2bb23-32f55fa-260828/logs/uv-mirror-accept-345.out`。
+- 验收内容：NGAD 环境先在独立空 cache 中完成冷同步和 CUDA 检查；本项目随后使用另一份独立空 cache 执行冷 `uv sync --locked`、PyTorch/CUDA/H100 导入和一次热同步。
+- 启动检查：Job 正常运行，已分配 H100；当前处于 NGAD 冷安装阶段。
+- 异常记录：Job `343` 在 uv 启动前因管理员账号无权创建 `/local/cache/users/zetyun` 退出；未触碰任何用户 cache。Job `345` 改用管理员自己的 GPFS validation 目录，不修改系统权限。
+- ETA：以 `2026-08-28 20:28 +08:00` 为估算时点，两个环境的冷安装主体预计 `20:38–20:53` 完成；日志回读和文档收尾预计再需约 5 分钟。尚无完整安装吞吐，属于初估。
 
 ## 产物与回滚
 
-- 无 checkpoint、训练 output 或大日志；未启动或改动 Slurm 作业。
+- 无 checkpoint、训练 output 或大日志；仅提交验收 Job `343`/`345`，未启动训练，也未修改或取消其他 Slurm 作业。
 - 回滚只需恢复本提交前的 `pyproject.toml` 与 `uv.lock`；TUNA 普通包配置不受影响。
-
