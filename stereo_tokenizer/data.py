@@ -24,7 +24,7 @@ from .mode_sampling import (
     MixedModeDataset,
     parse_weight_spec,
 )
-from .pretrain_data import HyLanceMonoDataset, LiberoMonoDataset, UMIRawStereoDataset
+from .pretrain_data import HyLanceMonoDataset, LiberoMonoDataset
 from .profiling import profile_region
 
 
@@ -136,10 +136,16 @@ class StereoDataModule(pl.LightningDataModule):
             ),
             "umi": DatasetSource(
                 "stereo",
-                UMIRawStereoDataset(
+                LeRobotStereoDataset(
                     self.args.umi_manifest,
-                    _load_root_aliases(self.args.umi_root_aliases, "--umi_root_aliases"),
-                    episode_cache_capacity=self.args.umi_episode_cache_capacity,
+                    self.args.umi_dataset_root,
+                    expected_rectification_audit_sha256=(
+                        self.args.umi_rectification_audit_sha256
+                    ),
+                    video_cache_capacity=self.args.lerobot_video_cache_capacity,
+                    maximum_timestamp_error_s=(
+                        self.args.lerobot_maximum_timestamp_error_s
+                    ),
                     **common,
                 ),
             ),
@@ -258,8 +264,8 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--libero_manifest", type=str, default=None)
         parser.add_argument("--libero_root_aliases", type=str, default=None)
         parser.add_argument("--umi_manifest", type=str, default=None)
-        parser.add_argument("--umi_root_aliases", type=str, default=None)
-        parser.add_argument("--umi_episode_cache_capacity", type=int, default=2)
+        parser.add_argument("--umi_dataset_root", type=str, default=None)
+        parser.add_argument("--umi_rectification_audit_sha256", type=str, default=None)
         parser.add_argument("--mode_schedule_seed", type=int, default=1234)
         parser.add_argument("--mode_update_weights", type=str, default="35:35:15:15")
         parser.add_argument("--mono_dataset_weights", type=str, default="9:1")

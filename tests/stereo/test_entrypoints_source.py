@@ -269,6 +269,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "HY_MANIFEST",
             "LIBERO_MANIFEST",
             "UMI_MANIFEST",
+            "UMI_DATASET_ROOT",
+            "UMI_RECTIFICATION_AUDIT_SHA256",
             "MODE_UPDATES_PER_EPOCH",
             "DA3_CHECKPOINT_SHA256",
             "NODE_MANIFEST_CONTRACTS",
@@ -276,6 +278,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "MONO_DATASET_WEIGHTS",
         ):
             self.assertIn(token, launcher)
+        self.assertNotIn("UMI_ROOT_ALIASES", launcher)
+        self.assertNotIn("UMI_EPISODE_CACHE_CAPACITY", launcher)
         self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)
         self.assertIn('"val/mixed/total_loss"', train)
         self.assertIn("OnlineDepthAnything3GTCallback", train)

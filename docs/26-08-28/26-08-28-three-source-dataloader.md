@@ -15,9 +15,9 @@ Three manifest schemas feed one existing model batch ABI:
 
 - Hy: `hy-cam-high-episode-v1`; only `observation_images_cam_high`, never either wrist camera; Lance JPEG frames at offsets `[0,3,6,9]`, window stride 12.
 - LIBERO: `libero-mono-episode-v1`; `observation.images.image` and `observation.images.wrist_image` are independent monocular samples; offsets `[0,2,4,6]`, stride 8.
-- UMI: `umi-raw-stereo-episode-v1`; six H.264 MCAP topics form three calibrated stereo views; offsets `[0,3,6,9]`, stride 12; online rectification and the existing 256 square student geometry are applied.
+- UMI: the existing `lerobot-stereo-episode-v1` manifest and `LeRobotStereoDataset`; six LeRobot v3 MP4 streams form three calibrated, pre-rectified stereo views with offsets `[0,3,6,9]`, stride 12, and the existing 256-square student geometry. Raw MCAP is no longer the training backend.
 
-Manifests contain logical `root_alias` values and relative paths. Launch configuration maps each alias to a physical node-local absolute root. The loader contains no table parity, H200-2 table inventory, or dataset-root constants.
+Hy and LIBERO manifests contain logical `root_alias` values and relative paths, and launch configuration maps each alias to a physical node-local absolute root. UMI uses the existing episode manifest plus an explicit node-local LeRobot root and rectification-audit SHA. The loader contains no table parity, H200-2 table inventory, or dataset-root constants.
 
 The old frozen `HyMonoSmokeDataset`, its 48-sample NPZ cache contract, and its source-limit arguments were removed. The existing non-mixed LeRobot stereo evaluation path remains available.
 
@@ -72,4 +72,5 @@ Before H200 execution, push the verified merge revision and fast-forward the cle
 - Stage 2 LIBERO completed: 1,712 records, 34,192 windows, manifest SHA256 `7abd9129b3654dd69cd867d99e1434f2070718334e1909b953e7a4da4af126a2`.
 - Stage 2 Hy completed against the H200-1 even-table roots: 57,948 records, 4,478,726 windows, manifest SHA256 `97913f5c98148046e024f1bbebd5eedae7825ddbb85ea62df4f829478947cc83`.
 - Stage 2 UMI initially failed before publication on an accepted episode missing `camera_left_wrist_left`. Commit `bc9c326accd28f3d0cec7472434571feaaf4cc0c` rejects incomplete/malformed calibration before opening the MCAP; its local and H200-1 directed tests both pass.
-- Corrected UMI inventory is in progress in tmux `sttok-h2001-stage2-umi-v2-20260828`; log and timing files are `logs/stage2-umi-v2.log` and `logs/stage2-umi-v2.time` below the output root. No stable throughput sample exists because the builder publishes only at completion, so the initial CPU-only estimate is 1-4 hours based on scanning 92k accepted episodes; stages 4 and 5 remain pending on the resulting manifest.
+- Corrected UMI inventory was launched in tmux `sttok-h2001-stage2-umi-v2-20260828`; log and timing files are `logs/stage2-umi-v2.log` and `logs/stage2-umi-v2.time` below the output root. The builder had no intermediate throughput output.
+- The raw UMI inventory was subsequently stopped without publishing a manifest. Per the updated user decision, mixed-mode pretraining now reuses `/data/shared/datasets/umi_lerobot_v3_260714` and the existing H200-1 episode manifest instead of scanning raw MCAP.

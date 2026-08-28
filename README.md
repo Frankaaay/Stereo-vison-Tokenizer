@@ -356,8 +356,9 @@ split 在 episode 层完成，不会让同一 episode 的窗口跨 train/val/tes
 
 ### 6.3 三源 node-local manifests
 
-训练直接读取 Hy Lance、LIBERO LeRobot v2.1 和 UMI raw MCAP。manifest 只保存逻辑
-`root_alias` 与相对路径；每台 H200 用自己的 alias JSON 映射物理根。Hy 只枚举
+训练直接读取 Hy Lance、LIBERO LeRobot v2.1 和 UMI LeRobot v3。Hy/LIBERO manifest
+只保存逻辑 `root_alias` 与相对路径，每台 H200 用自己的 alias JSON 映射物理根；UMI
+沿用现有 episode manifest、node-local dataset root 和 rectification audit SHA。Hy 只枚举
 `observation_images_cam_high`，不使用腕部相机：
 
 ```bash
@@ -500,8 +501,9 @@ export HY_MANIFEST=$WORK_ROOT/manifests/hy-h200-2.jsonl
 export HY_ROOT_ALIASES='{"hy_primary":"/data/shared/hy_embodied/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data","hy_rest":"/data/shared/hy_embodied_rest/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data"}'
 export LIBERO_MANIFEST=$WORK_ROOT/manifests/libero-h200-2.jsonl
 export LIBERO_ROOT_ALIASES='{"libero":"/data/shared/offline/datasets/libero_mujoco3.3.2"}'
-export UMI_MANIFEST=$WORK_ROOT/manifests/umi-h200-2.jsonl
-export UMI_ROOT_ALIASES='{"umi":"/data/shared/datasets/umi_raw_data_260714"}'
+export UMI_MANIFEST=/data/home/frank/experiments/stereo_lerobot_cpu_20260824_approval1/h200_2_local_manifest_v1.jsonl
+export UMI_DATASET_ROOT=/data/shared/datasets/umi_lerobot_v3_260714
+export UMI_RECTIFICATION_AUDIT_SHA256=41d2bfecaae85dd18f7cfd1a2a3a2177e8fd4aa8897be1cb411d85c3092a7d25
 
 export FOUNDATION_STEREO_BACKEND=las2_h
 export LAS2_H_REPO

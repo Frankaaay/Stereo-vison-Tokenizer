@@ -2,7 +2,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -14,6 +16,7 @@ from stereo_tokenizer.lerobot_data import (
     fixed_episode_subset_indices,
     window_count,
 )
+from stereo_tokenizer.data import StereoDataModule
 from stereo_tokenizer.online_gt import (
     FoundationStereoOnlineTeacher,
     _UnavailableOpen3D,
@@ -80,6 +83,40 @@ def record(episode_id, shard_id, length, split, audit_sha):
 
 
 class LeRobotOnlineContractTest(unittest.TestCase):
+    def test_mixed_pretrain_reuses_lerobot_for_umi_stereo(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "episodes.jsonl"
+            manifest.write_text(
+                json.dumps(record("episode", "shard_0000", 22, "train", "a" * 64))
+                + "\n",
+                encoding="utf-8",
+            )
+            source = mock.MagicMock()
+            source.__len__.return_value = 1
+            source.get_mode_item = mock.Mock()
+            args = Namespace(
+                hy_manifest="hy.jsonl",
+                hy_root_aliases=json.dumps({"hy": str(root)}),
+                libero_manifest="libero.jsonl",
+                libero_root_aliases=json.dumps({"libero": str(root)}),
+                umi_manifest=str(manifest),
+                umi_dataset_root=str(root),
+                umi_rectification_audit_sha256="a" * 64,
+                lerobot_video_cache_capacity=12,
+                lerobot_maximum_timestamp_error_s=0.05,
+                single_frame_source_index=0,
+            )
+            with mock.patch(
+                "stereo_tokenizer.data.HyLanceMonoDataset", return_value=source
+            ), mock.patch(
+                "stereo_tokenizer.data.LiberoMonoDataset", return_value=source
+            ):
+                dataset = StereoDataModule(args)._pretrain_dataset(train=True)
+            self.assertIsInstance(
+                dataset.sources["umi"].dataset, LeRobotStereoDataset
+            )
+
     def test_open3d_inference_stub_fails_only_if_point_cloud_api_is_used(self):
         module = _UnavailableOpen3D("open3d")
         with self.assertRaisesRegex(RuntimeError, "open3d.geometry"):

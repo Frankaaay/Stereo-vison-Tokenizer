@@ -534,7 +534,10 @@ def validate_runtime_args(args):
             "libero_manifest": args.libero_manifest,
             "libero_root_aliases": args.libero_root_aliases,
             "umi_manifest": args.umi_manifest,
-            "umi_root_aliases": args.umi_root_aliases,
+            "umi_dataset_root": args.umi_dataset_root,
+            "umi_rectification_audit_sha256": (
+                args.umi_rectification_audit_sha256
+            ),
             "da3_repo": args.da3_repo,
             "da3_source_sha": args.da3_source_sha,
             "da3_checkpoint": args.da3_checkpoint,
@@ -552,6 +555,11 @@ def validate_runtime_args(args):
         for name, value, length in (
             ("da3_source_sha", args.da3_source_sha, 40),
             ("da3_checkpoint_sha256", args.da3_checkpoint_sha256, 64),
+            (
+                "umi_rectification_audit_sha256",
+                args.umi_rectification_audit_sha256,
+                64,
+            ),
         ):
             if len(value) != length:
                 raise ValueError(f"{name} must be a full hexadecimal digest")
