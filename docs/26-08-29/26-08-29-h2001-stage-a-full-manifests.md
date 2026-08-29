@@ -204,3 +204,19 @@ Local validation before user review:
   checkpoint and timing-artifact completion should follow by about 12:18. This is
   based on the v1 wall time of about 7m41s plus 51 previously truncated physical
   micro-batches, not yet on a stable v2 throughput sample.
+
+### H200-1 v2 final result
+
+- Exit code: 0; tmux and all training processes exited normally, and all GPUs
+  returned to 0 MiB.
+- Completed 340 logical updates as 391 physical micro-batches in about 7m54s,
+  followed by validation with `val/mixed/total_loss ~= 0.943`.
+- Checkpoints: `epoch=0-step=340.ckpt`, `last.ckpt`, and
+  `best-epoch=0-step=340.ckpt` under the v2 output `train/checkpoints` directory.
+- `step_timings.json` was generated successfully. After excluding 20 warmup logical
+  updates per mode, the aggregate effective-global-sample throughput was about
+  804.3 samples/s for mono/single, 298.0 for mono/four, 449.1 for stereo/single,
+  and 112.4 for stereo/four. Across all 260 stable logical updates it was about
+  325.0 samples/s.
+- Conclusion: validation and checkpointing now occur on a complete logical-update
+  boundary; the original incomplete-logical-update failure is resolved.
