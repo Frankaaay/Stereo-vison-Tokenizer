@@ -326,6 +326,16 @@ Local validation before user review:
 - Initial health check found the tmux alive during source/model initialization with
   no immediate traceback. Initial ETA is 5-12 minutes for both splits, metrics JSON,
   and reconstruction artifacts.
+- The v1 evaluation later exited with code 1 after completing the first 20 Hy mono
+  quantitative batches. It failed before writing metrics or reconstruction panels,
+  while building train-split provenance: `HyLanceMonoDataset` no longer has the
+  legacy `cache_root` attribute. The test split did not start; this was not an OOM,
+  and all eight GPUs returned to 0 MiB.
+- The evaluation provenance implementation was corrected to record the current Hy
+  dataset contract (`manifest_path` plus a deterministic resolved `root_aliases`
+  mapping). A focused regression test rejects reintroduction of `cache_root`. The
+  failed v1 output is retained; the corrected evaluation will use a fresh v2 output
+  directory after the commit is synchronized and runtime tests pass on H200-1.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is

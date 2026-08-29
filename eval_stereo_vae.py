@@ -364,7 +364,10 @@ def dataset_provenance(args, eye_mode, dataset):
     if eye_mode == "mono":
         return {
             "manifest": str(dataset.manifest_path),
-            "cache_root": str(dataset.cache_root),
+            "root_aliases": {
+                alias: str(Path(root).expanduser().resolve())
+                for alias, root in sorted(dataset.root_aliases.items())
+            },
             "sample_count": len(dataset),
             "video_contract": "[B,1,1,3,T,H,W]",
         }

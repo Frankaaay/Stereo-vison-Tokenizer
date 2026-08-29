@@ -12,6 +12,32 @@ from stereo_tokenizer.mode_sampling import MODE_IDS
 
 
 class FourModeEvaluationTest(unittest.TestCase):
+    def test_mono_provenance_uses_hy_manifest_and_root_aliases(self):
+        class Dataset:
+            manifest_path = Path("hy-manifest.jsonl")
+            root_aliases = {
+                "hy_rest": Path("hy-rest"),
+                "hy_primary": Path("hy-primary"),
+            }
+
+            def __len__(self):
+                return 17
+
+        provenance = evaluation.dataset_provenance(
+            SimpleNamespace(), "mono", Dataset()
+        )
+
+        self.assertEqual(provenance["manifest"], "hy-manifest.jsonl")
+        self.assertEqual(
+            provenance["root_aliases"],
+            {
+                "hy_primary": str(Path("hy-primary").resolve()),
+                "hy_rest": str(Path("hy-rest").resolve()),
+            },
+        )
+        self.assertEqual(provenance["sample_count"], 17)
+        self.assertNotIn("cache_root", provenance)
+
     def test_all_nine_argument_combinations_expand_from_mode_ids(self):
         expected = {
             (eye, temporal): tuple(
