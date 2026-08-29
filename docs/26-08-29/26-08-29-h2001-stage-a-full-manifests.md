@@ -283,3 +283,24 @@ Local validation before user review:
   immediate traceback. Based on the completed GAN-off profile, the initial body ETA
   is about 32-38 hours, plus periodic/final validation and checkpoint overhead; this
   will be refreshed from the first stable formal-run snapshot.
+
+### Correction: Stage A restored to uniform BS24/GA1
+
+- Profiling showed that doubling effective batch from 192 to 384 increased logical
+  update time by more than 2x, reducing weighted samples/s. The dataset inventory did
+  not grow; only samples per optimizer update grew, while wall-clock data coverage
+  became worse.
+- The BS384 Stage A run was stopped at 2026-08-29 13:33 CST. Its tmux and exact
+  output-bound DDP processes exited, all GPUs returned to 0 MiB, and its output was
+  retained rather than reused.
+- A new fresh run started at 13:33 CST:
+  `stereo-three-source-stagea-bs192-h2001-20260829-v3`.
+- Output: `/data/home/frank/experiments/stereo-three-source-stagea-bs192-h2001-20260829-v3`.
+- Resolved config confirms all four mode batch sizes are 24/GPU, all four mode
+  accumulation factors are 1, effective global batch is 192, GAN is fully disabled,
+  no resume is used, timing callbacks are disabled, and the decode-verified UMI
+  manifest remains active. The 100k-update, checkpoint-1000, validation-2000, mode
+  weighting, teacher, worker, and loss contracts are otherwise unchanged.
+- Initial health check found the tmux alive during DDP initialization with no
+  immediate traceback. Based on the prior uniform-BS24 throughput, the initial
+  training-body ETA is about 17-22 hours, plus validation/checkpoint overhead.
