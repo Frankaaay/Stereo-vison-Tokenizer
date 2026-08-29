@@ -84,7 +84,7 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
     def test_periodic_validation_requires_complete_schedule_cycles(self):
         with self.assertRaisesRegex(ValueError, "whole mode-schedule cycles"):
             _resolve_val_check_interval(
-                self._args(max_steps=1000, online_val_check_interval_steps=340)
+                self._args(max_steps=1000, online_val_check_interval_steps=341)
             )
 
     def test_periodic_validation_expands_complete_schedule_cycles(self):

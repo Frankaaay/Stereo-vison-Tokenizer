@@ -180,7 +180,7 @@ Local validation before user review:
 - Fix: translate the logical validation cadence to the exact physical-batch count
   implied by the deterministic mode schedule and per-mode accumulation contract.
   Periodic validation must start on a schedule-cycle boundary and cover whole
-  100-update cycles; a final-only interval may cover all remaining logical updates.
+  20-update cycles; a final-only interval may cover all remaining logical updates.
   The incomplete-checkpoint guard remains unchanged and fail-closed.
 - Validation status: `py_compile` and `git diff --check` passed; the 25 local
   source-boundary tests passed. A read-only calculation in the pinned H200-1 runtime
