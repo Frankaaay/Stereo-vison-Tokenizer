@@ -304,3 +304,29 @@ Local validation before user review:
 - Initial health check found the tmux alive during DDP initialization with no
   immediate traceback. Based on the prior uniform-BS24 throughput, the initial
   training-body ETA is about 17-22 hours, plus validation/checkpoint overhead.
+
+## Stage A step-44000 evaluation gate
+
+- The user stopped Stage A after the update-44000 checkpoint landed. The process
+  had reached approximately update 44075; it and all GPU contexts were terminated,
+  and all eight GPUs returned to 0 MiB.
+- Selected checkpoint:
+  `/data/home/frank/experiments/stereo-three-source-stagea-bs192-h2001-20260829-v3/train/checkpoints/epoch=0-step=44000.ckpt`.
+- Checkpoint counters were inspected directly: 44,000 generator updates, no
+  discriminator updates, 22,000 single-frame and 22,000 four-frame updates, with
+  exact per-mode counts 15,400/15,400/6,600/6,600. The last logged validation loss
+  was approximately 0.230.
+- A bounded evaluation started at 2026-08-29 23:01 CST in tmux
+  `stereo-stagea-step44000-eval-h2001-v1`, writing to
+  `/data/home/frank/experiments/stereo-stagea-step44000-eval-h2001-20260829-v1`.
+- It uses strict checkpoint loading, BF16 on one H200, real DA3-BASE/LAS2-H
+  teachers, both single/four modes, and 20 BS24 batches each for Hy mono and UMI
+  stereo on both train and test splits. Each split also selects two deterministic
+  Hy cases and two deterministic UMI cases for RGB/depth reconstruction panels.
+- Initial health check found the tmux alive during source/model initialization with
+  no immediate traceback. Initial ETA is 5-12 minutes for both splits, metrics JSON,
+  and reconstruction artifacts.
+- Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
+  discriminator optimizer state. A generator weights-only warm start with a newly
+  initialized discriminator/optimizer and explicit counter/provenance semantics is
+  required before GAN training can be launched safely.
