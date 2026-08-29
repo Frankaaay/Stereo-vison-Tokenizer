@@ -364,6 +364,21 @@ Local validation before user review:
   `/data/home/frank/experiments/stereo-stagea-step44000-eval-h2001-20260829-v3`.
   The one-shot health check found the process alive in initialization with no
   traceback and `exit_code` not yet written. Initial full-output ETA is 5-12 minutes.
+- Evaluation v3 completed normally with `exit_code=0`; both train and test metrics
+  JSON files and all 16 requested RGB/depth PNG panels were written. Every mode
+  evaluated 480 samples. Train/test RGB L1 values were respectively:
+  mono single 0.01666/0.01875, mono four 0.01688/0.01878, stereo single
+  0.03536/0.03912, and stereo four 0.03903/0.04299.
+- Test relative-log depth L1 was 0.11155 for mono single and 0.06644 for mono four.
+  Stereo test single/four values by view were head 0.17532/0.16206, left wrist
+  0.21216/0.20108, and right wrist 0.22330/0.21331. All modes had nonzero valid
+  pixels and the expected DA3-BASE/LAS2-H provenance.
+- Visual inspection of representative test mono/stereo RGB and depth panels found
+  valid inputs, temporal ordering, all three stereo views, masks, and predictions;
+  there was no blank output, channel swap, or repeated-frame pipeline failure.
+  Reconstructions remain visibly smooth/motion-blurred and depth error is strongest
+  at object boundaries and wrist views, which is a Stage A quality result rather
+  than an evaluation-runtime defect.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is
