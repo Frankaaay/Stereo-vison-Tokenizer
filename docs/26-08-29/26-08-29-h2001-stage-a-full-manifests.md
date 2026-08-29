@@ -264,3 +264,22 @@ Local validation before user review:
   derived from the short GAN-on smoke and will be refreshed from a later stable
   formal-run snapshot; the expected completion window is approximately Sunday
   midnight through Monday afternoon CST.
+
+### Correction: Stage A restarted without GAN
+
+- The user corrected the phase contract: Stage A must not enable Image GAN. The
+  incorrectly launched Stage B run was stopped at 2026-08-29 13:14 CST. Its tmux
+  session was removed, its remaining DDP children were terminated by their exact
+  output-path match, and all eight GPUs returned to 0 MiB. Its output directory was
+  retained as an aborted-run record and was not reused.
+- A new fresh Stage A run started at 13:15 CST:
+  `stereo-three-source-stagea-bs384-h2001-20260829-v2`.
+- Output: `/data/home/frank/experiments/stereo-three-source-stagea-bs384-h2001-20260829-v2`.
+- Resolved config confirms `gan_enabled=false`, Image GAN 0, Video GAN 0, feature
+  matching 0, no resume checkpoint, 100,000 generator updates, checkpoint every
+  1,000 updates, validation every 2,000 updates, and the decode-verified UMI
+  manifest. All four mode-aware BS/GA contracts remain unchanged.
+- Initial health check found the tmux alive during model/DDP initialization with no
+  immediate traceback. Based on the completed GAN-off profile, the initial body ETA
+  is about 32-38 hours, plus periodic/final validation and checkpoint overhead; this
+  will be refreshed from the first stable formal-run snapshot.
