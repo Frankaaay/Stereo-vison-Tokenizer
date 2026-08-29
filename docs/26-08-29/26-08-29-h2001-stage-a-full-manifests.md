@@ -238,3 +238,29 @@ Local validation before user review:
 - Initial health check: all ranks were initializing without an immediate traceback.
   Initial ETA at 13:03 CST is about 3-6 minutes for the smoke body and validation;
   this is a conservative estimate because no stable GAN-on throughput existed yet.
+
+### Image-GAN smoke result and formal run
+
+- The smoke exited with code 0, produced validation/checkpoints/timing output, and
+  returned all GPUs to 0 MiB. The largest observed per-rank allocation was about
+  107.4 GiB in stereo/four; the largest reserved value was about 137.8 GiB in
+  mono/four. This passed but leaves limited allocator headroom.
+- The fresh formal run started at 2026-08-29 13:10 CST on code SHA
+  `dcfdf3fb2264173bf7e48679e32a5a5f14099950`.
+- tmux: `stereo-three-source-stageb-gan005-h2001-20260829-v1`.
+- Output: `/data/home/frank/experiments/stereo-three-source-stageb-gan005-h2001-20260829-v1`.
+- It uses the same BS/GA, teacher, verified-manifest, Image-GAN 0.005, and
+  four-mode weighting contracts as the successful smoke; Video GAN and feature
+  matching remain disabled. The target is 100,000 generator updates.
+- Validation is every 2,000 generator updates. Lightning counts both generator and
+  discriminator optimizer steps, so its checkpoint interval is configured as 2,000
+  Lightning steps to obtain one checkpoint per 1,000 generator updates.
+- Per-step timing callbacks are disabled for the formal run to avoid a CUDA
+  synchronization on every physical batch.
+- Initial health check: tmux and resolved config exist, rank 0 entered distributed
+  initialization, and no immediate traceback was present.
+- Initial ETA at 13:12 CST: roughly 35-50 hours for 100,000 generator updates,
+  with final validation/checkpoint completion shortly afterward. This range is
+  derived from the short GAN-on smoke and will be refreshed from a later stable
+  formal-run snapshot; the expected completion window is approximately Sunday
+  midnight through Monday afternoon CST.
