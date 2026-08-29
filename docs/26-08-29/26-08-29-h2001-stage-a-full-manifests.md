@@ -220,3 +220,21 @@ Local validation before user review:
   325.0 samples/s.
 - Conclusion: validation and checkpointing now occur on a complete logical-update
   boundary; the original incomplete-logical-update failure is resolved.
+
+## Stage B Image-GAN capacity smoke
+
+- Status: started on H200-1 at 2026-08-29 13:02 CST.
+- Code SHA: `dcfdf3fb2264173bf7e48679e32a5a5f14099950`.
+- tmux: `stereo-mode-aware-gan005-oom-smoke-h2001-v1`.
+- Output: `/data/home/frank/experiments/stereo-mode-aware-gan005-oom-smoke-h2001-v1`.
+- Contract: BF16, eight GPUs, mode batch sizes `48:48:48:24`, mode-aware GA
+  `1:1:1:2`, effective global batch 384, real LAS2-H and DA3-BASE teachers,
+  Image GAN weight 0.005 from update 0, Video GAN and feature matching disabled.
+- Scope: 40 logical updates (two complete `7:7:3:3` mode cycles), validation,
+  checkpoint, timing, and peak-memory collection.
+- UMI input was changed from the provisional manifest to the decode-verified
+  manifest with SHA256
+  `5e8f58c769549372af070a6132ad826bd7172aaeabcebebff84426e66bc2120f`.
+- Initial health check: all ranks were initializing without an immediate traceback.
+  Initial ETA at 13:03 CST is about 3-6 minutes for the smoke body and validation;
+  this is a conservative estimate because no stable GAN-on throughput existed yet.
