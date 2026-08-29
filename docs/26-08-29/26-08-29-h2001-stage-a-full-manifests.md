@@ -185,5 +185,22 @@ Local validation before user review:
 - Validation status: `py_compile` and `git diff --check` passed; the 25 local
   source-boundary tests passed. A read-only calculation in the pinned H200-1 runtime
   confirmed that this 340-logical-update schedule expands to exactly 391 physical
-  batches (`len == iterated count == 391`). Tensor/runtime regression tests and the
-  GPU rerun remain pending commit, push, and exact-SHA synchronization authorization.
+  batches (`len == iterated count == 391`). The committed H200 runtime gate and GPU
+  rerun status are recorded below.
+
+### H200-1 v2 rerun
+
+- Code SHA: `aec9521b4149684c867347bc112e6a66c421d4a5`.
+- H200 runtime gate: 57 targeted tests passed with 4 existing warnings.
+- Launch time: 2026-08-29 12:06 CST.
+- Status at the initial health check: running; all eight DDP ranks registered and
+  no immediate traceback was present.
+- tmux: `stereo-mode-aware-bs384-profile-h2001-v2`.
+- Output: `/data/home/frank/experiments/stereo-mode-aware-bs384-profile-h2001-v2`.
+- Log: `/data/home/frank/experiments/stereo-mode-aware-bs384-profile-h2001-v2/run.log`.
+- Timing result target:
+  `/data/home/frank/experiments/stereo-mode-aware-bs384-profile-h2001-v2/step_timings.json`.
+- Initial ETA at 12:07 CST: training and validation should finish around 12:15-12:17;
+  checkpoint and timing-artifact completion should follow by about 12:18. This is
+  based on the v1 wall time of about 7m41s plus 51 previously truncated physical
+  micro-batches, not yet on a stable v2 throughput sample.
