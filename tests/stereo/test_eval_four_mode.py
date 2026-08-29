@@ -130,7 +130,7 @@ class FourModeEvaluationTest(unittest.TestCase):
 
         class Dataset:
             manifest_path = Path("manifest.jsonl")
-            cache_root = Path("cache")
+            root_aliases = {"hy_primary": Path("hy-primary")}
             dataset_root = Path("dataset")
 
             def __len__(self):
@@ -265,7 +265,7 @@ class FourModeEvaluationTest(unittest.TestCase):
 
         class Dataset:
             manifest_path = Path("manifest.jsonl")
-            cache_root = Path("cache")
+            root_aliases = {"hy_primary": Path("hy-primary")}
             dataset_root = Path("dataset")
 
             def __len__(self):

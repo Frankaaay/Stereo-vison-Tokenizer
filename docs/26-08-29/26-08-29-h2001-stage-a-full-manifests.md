@@ -336,6 +336,10 @@ Local validation before user review:
   mapping). A focused regression test rejects reintroduction of `cache_root`. The
   failed v1 output is retained; the corrected evaluation will use a fresh v2 output
   directory after the commit is synchronized and runtime tests pass on H200-1.
+- The first H200-1 directed test run exposed two evaluation test fixtures that still
+  modeled the removed `cache_root` field (19 passed, 2 failed). Production code was
+  kept fail-closed; only those fixtures were updated to the current `root_aliases`
+  contract before rerunning the gate.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is
