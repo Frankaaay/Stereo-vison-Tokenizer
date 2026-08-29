@@ -275,6 +275,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "DA3_CHECKPOINT_SHA256",
             "NODE_MANIFEST_CONTRACTS",
             "MODE_UPDATE_WEIGHTS",
+            "MODE_BATCH_SIZES",
+            "MODE_GRAD_ACCUMULATES",
             "MONO_DATASET_WEIGHTS",
         ):
             self.assertIn(token, launcher)

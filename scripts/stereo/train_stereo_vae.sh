@@ -66,9 +66,27 @@ fi
 MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
 MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
+MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}}"
+MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}}"
 if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
   if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
-    echo "four-mode training requires GRAD_ACCUMULATES=1" >&2
+    echo "four-mode training keeps GRAD_ACCUMULATES=1; use MODE_GRAD_ACCUMULATES" >&2
+    exit 2
+  fi
+  IFS=: read -r -a MODE_BATCH_SIZE_VALUES <<< "${MODE_BATCH_SIZES}"
+  IFS=: read -r -a MODE_GRAD_ACCUMULATE_VALUES <<< "${MODE_GRAD_ACCUMULATES}"
+  if [[ "${#MODE_BATCH_SIZE_VALUES[@]}" -ne 4 || "${#MODE_GRAD_ACCUMULATE_VALUES[@]}" -ne 4 ]]; then
+    echo "MODE_BATCH_SIZES and MODE_GRAD_ACCUMULATES require four colon-separated values" >&2
+    exit 2
+  fi
+  for value in "${MODE_BATCH_SIZE_VALUES[@]}" "${MODE_GRAD_ACCUMULATE_VALUES[@]}"; do
+    if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "per-mode batch and accumulation values must be positive integers" >&2
+      exit 2
+    fi
+  done
+  if [[ "${MODE_GRAD_ACCUMULATE_VALUES[0]}" != "1" || "${MODE_GRAD_ACCUMULATE_VALUES[1]}" != "1" ]]; then
+    echo "mono modes currently require accumulation factor 1" >&2
     exit 2
   fi
 fi
@@ -155,10 +173,20 @@ ONLINE_GT_ARGS+=(
   --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
 )
 WORLD_SIZE=$((NUM_NODES * GPU_COUNT))
-EXPECTED_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
-if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
-  echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
-  exit 2
+if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
+  for index in 0 1 2 3; do
+    EXPECTED_MODE_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * MODE_BATCH_SIZE_VALUES[index] * MODE_GRAD_ACCUMULATE_VALUES[index]))
+    if [[ "${EXPECTED_MODE_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
+      echo "mode ${index} global batch mismatch: expected ${EXPECTED_MODE_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
+      exit 2
+    fi
+  done
+else
+  EXPECTED_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
+  if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
+    echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
+    exit 2
+  fi
 fi
 
 WANDB_ARGS=()
@@ -212,6 +240,8 @@ if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
     --umi_rectification_audit_sha256 "${UMI_RECTIFICATION_AUDIT_SHA256}"
     --mode_schedule_seed "${MODE_SCHEDULE_SEED:-1234}"
     --mode_update_weights "${MODE_UPDATE_WEIGHTS}"
+    --mode_batch_sizes "${MODE_BATCH_SIZES}"
+    --mode_grad_accumulates "${MODE_GRAD_ACCUMULATES}"
     --mono_dataset_weights "${MONO_DATASET_WEIGHTS}"
     --node_manifest_contracts "${NODE_MANIFEST_CONTRACTS:-}"
     --mode_updates_per_epoch "${MODE_UPDATES_PER_EPOCH}"

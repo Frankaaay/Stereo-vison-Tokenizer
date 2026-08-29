@@ -1,9 +1,16 @@
 import unittest
 from argparse import Namespace
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
 from stereo_tokenizer import StereoVAE
+from stereo_tokenizer.mode_sampling import (
+    MODE_IDS,
+    mode_occurrences_before,
+    parse_weight_spec,
+)
 from stereo_tokenizer.modules.attention import PEG
 
 
@@ -62,6 +69,15 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             apply_diffaug=False,
             grad_accumulates=1,
             batch_size=24,
+            mode_batch_sizes=None,
+            mode_grad_accumulates=None,
+            four_mode_mixed_training=False,
+            mode_update_weights="35:35:15:15",
+            mono_dataset_weights="9:1",
+            node_manifest_contracts=None,
+            mode_schedule_seed=1234,
+            devices=1,
+            num_nodes=1,
             grad_clip_val=1.0,
             grad_clip_val_disc=1.0,
             lr=3e-4,
@@ -298,6 +314,13 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "temporal-mode update counters"):
             model.on_load_checkpoint({"global_step": 9})
 
+    def test_checkpoint_rejects_incomplete_logical_update(self) -> None:
+        model = StereoVAE(self._args())
+        model._micro_step = 1
+
+        with self.assertRaisesRegex(RuntimeError, "incomplete logical update"):
+            model.on_save_checkpoint({})
+
     def test_single_frame_forward_and_metadata(self) -> None:
         model = StereoVAE(self._args()).eval()
         single_batch = self._single_batch()
@@ -375,21 +398,109 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             StereoVAE._mode_from_batch(wrong_teacher)
 
     def test_checkpoint_resume_preserves_four_mode_counters(self) -> None:
-        model = StereoVAE(self._args())
-        model.generator_updates = 8
-        model.four_frame_updates = 4
-        model.single_frame_updates = 4
-        model.mode_updates = {mode_id: 2 for mode_id in model.mode_updates}
-        model.mode_samples = {mode_id: 48 for mode_id in model.mode_samples}
-        model.batch_updates = 8
+        args = self._args()
+        args.four_mode_mixed_training = True
+        args.mode_batch_sizes = "48:48:48:24"
+        args.mode_grad_accumulates = "1:1:1:2"
+        args.devices = 8
+        model = StereoVAE(args)
+        model.generator_updates = 20
+        model.mode_updates = mode_occurrences_before(
+            args.mode_schedule_seed,
+            model.generator_updates,
+            parse_weight_spec(args.mode_update_weights, MODE_IDS),
+        )
+        model.four_frame_updates = sum(
+            count
+            for mode_id, count in model.mode_updates.items()
+            if mode_id.endswith("four_frame")
+        )
+        model.single_frame_updates = model.generator_updates - model.four_frame_updates
+        model.mode_samples = {
+            mode_id: count * 384 for mode_id, count in model.mode_updates.items()
+        }
+        model.batch_updates = sum(
+            count * model.mode_grad_accumulates[mode_id]
+            for mode_id, count in model.mode_updates.items()
+        )
         checkpoint = {}
         model.on_save_checkpoint(checkpoint)
 
-        restored = StereoVAE(self._args())
+        restored = StereoVAE(args)
         restored.on_load_checkpoint(checkpoint)
 
         self.assertEqual(restored.mode_updates, model.mode_updates)
         self.assertEqual(restored.mode_samples, model.mode_samples)
+
+    def test_stereo_four_ga2_steps_once_and_counts_384_samples(self) -> None:
+        args = self._args()
+        args.four_mode_mixed_training = True
+        args.mode_batch_sizes = "48:48:48:24"
+        args.mode_grad_accumulates = "1:1:1:2"
+        args.devices = 8
+        args.grad_clip_val = None
+        model = StereoVAE(args)
+        model._trainer = SimpleNamespace(world_size=8, should_stop=False)
+        optimizer = mock.Mock()
+        scheduler = mock.Mock()
+        zero = torch.zeros(())
+        result = SimpleNamespace(
+            model=SimpleNamespace(rgb=torch.zeros(24, 1, 3, 1, 1, 1)),
+            loss=SimpleNamespace(total=torch.tensor(4.0, requires_grad=True)),
+        )
+        batch = {
+            "video": torch.zeros(24, 1, 1, 3, 4, 1, 1),
+            "mode_id": ["stereo/four_frame"] * 24,
+            "dataset_id": ["umi"] * 24,
+        }
+        adversarial_zeros = (zero, zero, zero, zero)
+        with (
+            mock.patch(
+                "stereo_tokenizer.model.mode_for_update",
+                return_value="stereo/four_frame",
+            ),
+            mock.patch(
+                "stereo_tokenizer.model.dataset_for_mode_occurrence",
+                return_value="umi",
+            ),
+            mock.patch.object(
+                model,
+                "_mode_from_batch",
+                return_value=("stereo/four_frame", "stereo", "four_frame"),
+            ),
+            mock.patch.object(
+                model,
+                "_prepare_temporal_batch",
+                side_effect=lambda value, **_: value,
+            ),
+            mock.patch.object(model, "compute_core_loss", return_value=result),
+            mock.patch.object(model, "_perceptual_loss", return_value=zero),
+            mock.patch.object(
+                model,
+                "_generator_adversarial_loss",
+                return_value=adversarial_zeros,
+            ),
+            mock.patch.object(model, "_gan_is_active", return_value=False),
+            mock.patch.object(model, "optimizers", return_value=[optimizer]),
+            mock.patch.object(model, "lr_schedulers", return_value=[scheduler]),
+            mock.patch.object(model, "manual_backward") as backward,
+            mock.patch.object(model, "_log_loss_breakdown"),
+            mock.patch.object(model, "log_dict"),
+        ):
+            model._profiled_training_step(batch)
+            self.assertEqual(model.generator_updates, 0)
+            optimizer.step.assert_not_called()
+            model._profiled_training_step(batch)
+
+        self.assertEqual(backward.call_count, 2)
+        self.assertEqual(backward.call_args_list[0].args[0].item(), 2.0)
+        optimizer.step.assert_called_once_with()
+        optimizer.zero_grad.assert_called_once_with()
+        scheduler.step_update.assert_called_once_with(1)
+        self.assertEqual(model.generator_updates, 1)
+        self.assertEqual(model.batch_updates, 2)
+        self.assertEqual(model.mode_updates["stereo/four_frame"], 1)
+        self.assertEqual(model.mode_samples["stereo/four_frame"], 384)
 
 
 if __name__ == "__main__":

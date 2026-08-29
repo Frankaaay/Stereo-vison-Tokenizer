@@ -23,6 +23,7 @@ from .mode_sampling import (
     MixedModeBatchSampler,
     MixedModeDataset,
     parse_weight_spec,
+    resolve_mode_int_spec,
 )
 from .pretrain_data import HyLanceMonoDataset, LiberoMonoDataset
 from .profiling import profile_region
@@ -194,9 +195,21 @@ class StereoDataModule(pl.LightningDataModule):
             mono_weights = parse_weight_spec(
                 self.args.mono_dataset_weights, ("hy", "libero")
             )
+            mode_batch_sizes = resolve_mode_int_spec(
+                getattr(self.args, "mode_batch_sizes", None),
+                fallback=int(self.args.batch_size),
+            )
+            mode_accumulation_factors = resolve_mode_int_spec(
+                getattr(self.args, "mode_grad_accumulates", None),
+                fallback=int(self.args.grad_accumulates),
+            )
+            if not train:
+                mode_accumulation_factors = {mode_id: 1 for mode_id in MODE_IDS}
             batch_sampler = MixedModeBatchSampler(
                 dataset.source_lengths,
                 batch_size=self.args.batch_size,
+                mode_batch_sizes=mode_batch_sizes,
+                mode_accumulation_factors=mode_accumulation_factors,
                 seed=int(self.args.mode_schedule_seed),
                 updates_per_epoch=(
                     int(self.args.mode_updates_per_epoch)
@@ -277,6 +290,8 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--umi_rectification_audit_sha256", type=str, default=None)
         parser.add_argument("--mode_schedule_seed", type=int, default=1234)
         parser.add_argument("--mode_update_weights", type=str, default="35:35:15:15")
+        parser.add_argument("--mode_batch_sizes", type=str, default=None)
+        parser.add_argument("--mode_grad_accumulates", type=str, default=None)
         parser.add_argument("--mono_dataset_weights", type=str, default="9:1")
         parser.add_argument("--node_manifest_contracts", type=str, default=None)
         parser.add_argument("--mode_updates_per_epoch", type=int, default=0)

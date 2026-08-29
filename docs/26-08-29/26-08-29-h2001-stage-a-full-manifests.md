@@ -112,3 +112,56 @@ immediate exception. No shard had completed yet, so the initial 3--6 hour ETA
 is based on the targeted full-file decode and 24-way concurrency rather than a
 measured steady-state shard rate. Final aggregation should take only minutes
 after the decode body.
+
+## Mode-aware logical-update implementation
+
+Local implementation started from clean branch `hezhou-las2-h` at base commit
+`c5443e5bf8603ed66a952c724f8a1c5d0f559aaa`. The implementation is pending
+user diff review and has not been pushed or synchronized to H200-1. No GPU
+profile or training run was started, and the UMI CPU decode audit was not
+interrupted.
+
+The new four-mode batch contract is:
+
+| mode | BS/GPU | micro-batches/logical update | effective global batch on 8 GPUs |
+|---|---:|---:|---:|
+| mono/single_frame | 48 | 1 | 384 |
+| mono/four_frame | 48 | 1 | 384 |
+| stereo/single_frame | 48 | 1 | 384 |
+| stereo/four_frame | 24 | 2 | 384 |
+
+The sampler keeps the seeded `35:35:15:15` weights in logical-update space and
+emits the two `stereo/four_frame` physical micro-batches consecutively. The
+model divides each loss by the mode accumulation factor and advances optimizer,
+scheduler, generator/mode/sample counters only at the logical boundary. The
+checkpoint contract now records per-mode BS, accumulation, effective global
+batch, physical-batch counters, and a logical-update ABI version. Checkpointing
+inside an incomplete accumulation window is rejected. Older Stage A
+checkpoints are not strict-resume compatible with the new ABI; profiling must
+use a fresh run or an explicitly authorized weights-only warm start. This
+StereoVAE path has no EMA implementation, so no EMA behavior was added.
+
+The launcher retains the scalar BS/GA path for legacy non-four-mode runs. In
+four-mode training it keeps global `GRAD_ACCUMULATES=1`, accepts
+`MODE_BATCH_SIZES` and `MODE_GRAD_ACCUMULATES`, and fail-closes unless every
+mode has the configured effective global batch. Resolved config, run manifest,
+checkpoint, and timing output all carry the per-mode contract. Validation uses
+the per-mode batch sizes but does not duplicate batches for gradient
+accumulation.
+
+Local validation before user review:
+
+- `python -m py_compile` passed for all modified Python source and tests.
+- `python -m unittest tests.stereo.test_entrypoints_source
+  tests.stereo.test_source_boundary`: 25 tests passed.
+- Git Bash `bash -n scripts/stereo/train_stereo_vae.sh`: passed.
+- Launcher fail-closed probes accepted `48:48:48:24` plus `1:1:1:2` through
+  the batch-contract gate and rejected a `48:48:48:25` mismatch as effective
+  global batch 400 versus configured 384. Both probes stopped before data/model
+  access and did not launch Python.
+- A dependency-free sampler smoke verified 23 physical batches for one
+  20-logical-update `7:7:3:3` cycle and exact resume suffix preservation.
+- `git diff --check`: passed.
+- Tensor/runtime tests were not executed locally because the Windows Python
+  environment has neither Torch nor PyTorch Lightning. They remain a required
+  gate in the pinned H200 runtime after commit/push and exact-SHA sync.

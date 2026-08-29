@@ -130,6 +130,34 @@ def parse_weight_spec(value: str, keys: tuple[str, ...]) -> dict[str, int]:
     return _normalize_weights(parsed, keys, parsed)
 
 
+def parse_positive_int_spec(value: str, keys: tuple[str, ...]) -> dict[str, int]:
+    """Parse an ordered positive-integer contract without weight normalization."""
+
+    parts = value.split(":")
+    if len(parts) != len(keys):
+        raise ValueError(f"expected {len(keys)} colon-separated positive integers")
+    try:
+        parsed = {key: int(part) for key, part in zip(keys, parts)}
+    except ValueError as error:
+        raise ValueError("contract values must be integers") from error
+    if any(value < 1 for value in parsed.values()):
+        raise ValueError("contract values must be positive integers")
+    return parsed
+
+
+def resolve_mode_int_spec(
+    value: str | None,
+    *,
+    fallback: int,
+    keys: tuple[str, ...] = MODE_IDS,
+) -> dict[str, int]:
+    if fallback < 1:
+        raise ValueError("fallback contract value must be positive")
+    if value is None:
+        return {key: int(fallback) for key in keys}
+    return parse_positive_int_spec(value, keys)
+
+
 @dataclass(frozen=True)
 class DatasetSource:
     eye_mode: str
@@ -198,6 +226,8 @@ class MixedModeBatchSampler(data.Sampler):
         source_lengths: Mapping[str, int],
         *,
         batch_size: int,
+        mode_batch_sizes: Mapping[str, int] | None = None,
+        mode_accumulation_factors: Mapping[str, int] | None = None,
         seed: int,
         updates_per_epoch: int,
         start_update: int = 0,
@@ -216,6 +246,22 @@ class MixedModeBatchSampler(data.Sampler):
         if min(self.source_lengths.values()) < 1:
             raise ValueError("all three data sources must be non-empty")
         self.batch_size = int(batch_size)
+        self.mode_batch_sizes = self._mode_positive_ints(
+            mode_batch_sizes,
+            fallback=self.batch_size,
+            label="mode batch sizes",
+        )
+        self.mode_accumulation_factors = self._mode_positive_ints(
+            mode_accumulation_factors,
+            fallback=1,
+            label="mode accumulation factors",
+        )
+        if any(
+            self.mode_accumulation_factors[mode_id] != 1
+            for mode_id in MODE_IDS
+            if mode_id.startswith("mono/")
+        ):
+            raise ValueError("mono modes currently require accumulation factor 1")
         self.seed = int(seed)
         self.updates_per_epoch = int(updates_per_epoch)
         self.start_update = int(start_update)
@@ -236,17 +282,41 @@ class MixedModeBatchSampler(data.Sampler):
         if any(not indices for indices in self._local_indices.values()):
             raise ValueError("a node-local rank was assigned no samples")
 
-    def _batch_indices(self, mode_id: str, dataset_id: str, occurrence: int) -> list[int]:
+    @staticmethod
+    def _mode_positive_ints(
+        values: Mapping[str, int] | None,
+        *,
+        fallback: int,
+        label: str,
+    ) -> dict[str, int]:
+        normalized = (
+            {mode_id: int(fallback) for mode_id in MODE_IDS}
+            if values is None
+            else dict(values)
+        )
+        if set(normalized) != set(MODE_IDS):
+            raise ValueError(f"{label} must contain exactly {MODE_IDS}")
+        if any(type(value) is not int or value < 1 for value in normalized.values()):
+            raise ValueError(f"{label} must be positive integers")
+        return {mode_id: normalized[mode_id] for mode_id in MODE_IDS}
+
+    def _batch_indices(
+        self,
+        mode_id: str,
+        dataset_id: str,
+        occurrence: int,
+        batch_size: int,
+    ) -> list[int]:
         local = self._local_indices[dataset_id]
-        start = occurrence * self.batch_size
+        start = occurrence * batch_size
         output = []
-        while len(output) < self.batch_size:
+        while len(output) < batch_size:
             data_epoch, offset = divmod(start, len(local))
             permutation = list(local)
             random.Random(
                 _stable_seed(self.seed, mode_id, dataset_id, "data-epoch", data_epoch)
             ).shuffle(permutation)
-            take = min(self.batch_size - len(output), len(local) - offset)
+            take = min(batch_size - len(output), len(local) - offset)
             output.extend(permutation[offset : offset + take])
             start += take
         return output
@@ -271,7 +341,7 @@ class MixedModeBatchSampler(data.Sampler):
                 )
             ] += 1
         dataset_counts["umi"] = sum(
-            count
+            count * self.mode_accumulation_factors[mode_id]
             for mode_id, count in mode_counts.items()
             if mode_id.startswith("stereo/")
         )
@@ -288,14 +358,30 @@ class MixedModeBatchSampler(data.Sampler):
             )
             if mode_id.startswith("mono/"):
                 mono_occurrence += 1
-            dataset_occurrence = dataset_counts[dataset_id]
-            dataset_counts[dataset_id] += 1
-            yield [
-                (mode_id, dataset_id, sample_index)
-                for sample_index in self._batch_indices(
-                    mode_id, dataset_id, dataset_occurrence
-                )
-            ]
+            for _ in range(self.mode_accumulation_factors[mode_id]):
+                dataset_occurrence = dataset_counts[dataset_id]
+                dataset_counts[dataset_id] += 1
+                yield [
+                    (mode_id, dataset_id, sample_index)
+                    for sample_index in self._batch_indices(
+                        mode_id,
+                        dataset_id,
+                        dataset_occurrence,
+                        self.mode_batch_sizes[mode_id],
+                    )
+                ]
 
     def __len__(self):
-        return self.updates_per_epoch
+        before = mode_occurrences_before(
+            self.seed, self.start_update, self.mode_weights
+        )
+        after = mode_occurrences_before(
+            self.seed,
+            self.start_update + self.updates_per_epoch,
+            self.mode_weights,
+        )
+        return sum(
+            (after[mode_id] - before[mode_id])
+            * self.mode_accumulation_factors[mode_id]
+            for mode_id in MODE_IDS
+        )

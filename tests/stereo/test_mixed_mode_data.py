@@ -7,7 +7,9 @@ from stereo_tokenizer.mode_sampling import (
     DatasetSource,
     MixedModeBatchSampler,
     MixedModeDataset,
+    mode_for_update,
     mode_occurrences_before,
+    parse_positive_int_spec,
     parse_weight_spec,
 )
 
@@ -27,6 +29,12 @@ class _Source:
 
 
 class ThreeSourceScheduleTest(unittest.TestCase):
+    def test_positive_integer_contract_preserves_absolute_values(self):
+        self.assertEqual(
+            parse_positive_int_spec("48:48:48:24", MODE_IDS),
+            dict(zip(MODE_IDS, (48, 48, 48, 24))),
+        )
+
     def test_weighted_mode_and_dataset_counts_are_exact_per_cycle(self):
         weights = parse_weight_spec("35:35:15:15", MODE_IDS)
         self.assertEqual(
@@ -63,6 +71,57 @@ class ThreeSourceScheduleTest(unittest.TestCase):
             self.assertEqual(batch0[0][:2], batch1[0][:2])
             self.assertTrue(all(item[2] % 2 == 0 for item in batch0))
             self.assertTrue(all(item[2] % 2 == 1 for item in batch1))
+
+    def test_mode_aware_sampler_emits_consecutive_micro_batches(self):
+        weights = parse_weight_spec("35:35:15:15", MODE_IDS)
+        batch_sizes = dict(zip(MODE_IDS, (2, 2, 2, 1)))
+        accumulation = dict(zip(MODE_IDS, (1, 1, 1, 2)))
+        sampler = MixedModeBatchSampler(
+            {"hy": 101, "libero": 101, "umi": 101},
+            batch_size=2,
+            mode_batch_sizes=batch_sizes,
+            mode_accumulation_factors=accumulation,
+            seed=7,
+            updates_per_epoch=20,
+            mode_weights=weights,
+        )
+        batches = list(sampler)
+        self.assertEqual(len(sampler), 23)
+        cursor = 0
+        for update_index in range(20):
+            mode_id = mode_for_update(7, update_index, weights)
+            logical_batches = batches[cursor : cursor + accumulation[mode_id]]
+            self.assertEqual(len(logical_batches), accumulation[mode_id])
+            self.assertTrue(
+                all(len(batch) == batch_sizes[mode_id] for batch in logical_batches)
+            )
+            self.assertTrue(
+                all(item[0] == mode_id for batch in logical_batches for item in batch)
+            )
+            if accumulation[mode_id] == 2:
+                self.assertNotEqual(logical_batches[0], logical_batches[1])
+            cursor += accumulation[mode_id]
+        self.assertEqual(cursor, len(batches))
+
+    def test_resume_suffix_preserves_physical_batch_stream(self):
+        kwargs = dict(
+            source_lengths={"hy": 101, "libero": 101, "umi": 101},
+            batch_size=2,
+            mode_batch_sizes=dict(zip(MODE_IDS, (2, 2, 2, 1))),
+            mode_accumulation_factors=dict(zip(MODE_IDS, (1, 1, 1, 2))),
+            seed=19,
+            mode_weights=parse_weight_spec("35:35:15:15", MODE_IDS),
+        )
+        full = list(MixedModeBatchSampler(updates_per_epoch=20, **kwargs))
+        prefix = list(MixedModeBatchSampler(updates_per_epoch=5, **kwargs))
+        resumed = list(
+            MixedModeBatchSampler(
+                updates_per_epoch=15,
+                start_update=5,
+                **kwargs,
+            )
+        )
+        self.assertEqual(resumed, full[len(prefix) :])
 
     def test_dispatches_hy_libero_and_umi_without_shape_conversion(self):
         dataset = MixedModeDataset(

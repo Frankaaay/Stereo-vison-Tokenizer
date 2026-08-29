@@ -19,6 +19,7 @@ from .mode_sampling import (
     mode_for_update,
     mode_occurrences_before,
     parse_weight_spec,
+    resolve_mode_int_spec,
 )
 from .modules import (
     LPIPS,
@@ -241,9 +242,20 @@ class StereoVAE(pl.LightningModule):
 
         self.automatic_optimization = False
         self.grad_accumulates = args.grad_accumulates
+        self.mode_batch_sizes = resolve_mode_int_spec(
+            getattr(args, "mode_batch_sizes", None),
+            fallback=int(args.batch_size),
+        )
+        self.mode_grad_accumulates = resolve_mode_int_spec(
+            getattr(args, "mode_grad_accumulates", None),
+            fallback=int(args.grad_accumulates),
+        )
         self.grad_clip_val = args.grad_clip_val
         self.grad_clip_val_disc = args.grad_clip_val_disc
         self._micro_step = 0
+        self._logical_mode_id = None
+        self._logical_dataset_id = None
+        self._logical_global_samples = 0
         self.generator_updates = 0
         self.discriminator_updates = 0
         self.four_frame_updates = 0
@@ -254,6 +266,10 @@ class StereoVAE(pl.LightningModule):
         self.last_temporal_mode: Optional[TemporalMode] = None
         self.last_mode_id: Optional[str] = None
         self.last_dataset_id: Optional[str] = None
+        self.last_micro_step_index = 0
+        self.last_accumulation_factor = 1
+        self.last_microbatch_size = 0
+        self.last_logical_global_samples = 0
         self._validation_mode_sums = None
         self._validation_mode_counts = None
         self.save_hyperparameters("args")
@@ -327,9 +343,14 @@ class StereoVAE(pl.LightningModule):
         return value
 
     def on_save_checkpoint(self, checkpoint) -> None:
+        if self._micro_step != 0:
+            raise RuntimeError("refusing to checkpoint an incomplete logical update")
         mode_weight_spec = getattr(self.args, "mode_update_weights", "1:1:1:1")
         mono_weight_spec = getattr(self.args, "mono_dataset_weights", "9:1")
         mode_weights = parse_weight_spec(mode_weight_spec, MODE_IDS)
+        world_size_contract = int(
+            getattr(self.args, "devices", 1) * getattr(self.args, "num_nodes", 1)
+        )
         checkpoint["stereo_update_counters"] = {
             "generator_updates": self.generator_updates,
             "discriminator_updates": self.discriminator_updates,
@@ -346,13 +367,19 @@ class StereoVAE(pl.LightningModule):
             ),
             "per_device_batch_size": int(self.args.batch_size),
             "grad_accumulates": int(self.grad_accumulates),
+            "mode_batch_sizes": dict(self.mode_batch_sizes),
+            "mode_grad_accumulates": dict(self.mode_grad_accumulates),
+            "mode_effective_global_batch_sizes": {
+                mode_id: self.mode_batch_sizes[mode_id]
+                * self.mode_grad_accumulates[mode_id]
+                * world_size_contract
+                for mode_id in MODE_IDS
+            },
+            "logical_update_contract_version": 1,
             "mode_schedule_seed": int(
                 getattr(self.args, "mode_schedule_seed", 1234)
             ),
-            "world_size_contract": int(
-                getattr(self.args, "devices", 1)
-                * getattr(self.args, "num_nodes", 1)
-            ),
+            "world_size_contract": world_size_contract,
         }
 
     def on_load_checkpoint(self, checkpoint) -> None:
@@ -394,6 +421,12 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("checkpoint per-device batch size mismatch")
         if counters.get("grad_accumulates") != int(self.grad_accumulates):
             raise ValueError("checkpoint gradient accumulation mismatch")
+        if counters.get("logical_update_contract_version") != 1:
+            raise ValueError("checkpoint logical-update contract version mismatch")
+        if counters.get("mode_batch_sizes") != self.mode_batch_sizes:
+            raise ValueError("checkpoint per-mode batch size mismatch")
+        if counters.get("mode_grad_accumulates") != self.mode_grad_accumulates:
+            raise ValueError("checkpoint per-mode gradient accumulation mismatch")
         schedule_seed = int(getattr(self.args, "mode_schedule_seed", 1234))
         if counters.get("mode_schedule_seed") != schedule_seed:
             raise ValueError("checkpoint mode schedule seed mismatch")
@@ -403,6 +436,17 @@ class StereoVAE(pl.LightningModule):
         )
         if counters.get("world_size_contract") != expected_world_size:
             raise ValueError("checkpoint DDP world-size contract mismatch")
+        expected_effective_global_batches = {
+            mode_id: self.mode_batch_sizes[mode_id]
+            * self.mode_grad_accumulates[mode_id]
+            * expected_world_size
+            for mode_id in MODE_IDS
+        }
+        if (
+            counters.get("mode_effective_global_batch_sizes")
+            != expected_effective_global_batches
+        ):
+            raise ValueError("checkpoint effective global batch contract mismatch")
         mode_updates = counters.get("mode_updates")
         mode_samples = counters.get("mode_samples")
         if not isinstance(mode_updates, Mapping) or set(mode_updates) != set(MODE_IDS):
@@ -421,7 +465,16 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("discriminator updates cannot exceed generator updates")
         if not self.gan_enabled and discriminator_updates != 0:
             raise ValueError("GAN-disabled checkpoint has discriminator updates")
-        if batch_updates < generator_updates * self.grad_accumulates:
+        if bool(getattr(self.args, "four_mode_mixed_training", False)):
+            expected_batch_updates = sum(
+                mode_updates_count * self.mode_grad_accumulates[mode_id]
+                for mode_id, mode_updates_count in mode_updates.items()
+            )
+            if batch_updates != expected_batch_updates:
+                raise ValueError(
+                    "batch updates disagree with per-mode accumulation contract"
+                )
+        elif batch_updates < generator_updates * self.grad_accumulates:
             raise ValueError("batch updates are inconsistent with generator updates")
         if generator_updates != sum(mode_updates.values()):
             raise ValueError("generator updates must equal the four mode counters")
@@ -449,7 +502,8 @@ class StereoVAE(pl.LightningModule):
                 )
             expected_mode_samples = {
                 mode_id: updates
-                * int(self.args.batch_size)
+                * self.mode_batch_sizes[mode_id]
+                * self.mode_grad_accumulates[mode_id]
                 * expected_world_size
                 for mode_id, updates in mode_updates.items()
             }
@@ -466,6 +520,9 @@ class StereoVAE(pl.LightningModule):
         self.mode_samples = mode_samples
         self.batch_updates = batch_updates
         self._micro_step = 0
+        self._logical_mode_id = None
+        self._logical_dataset_id = None
+        self._logical_global_samples = 0
 
     @staticmethod
     def _flatten_view_videos(video: torch.Tensor) -> torch.Tensor:
@@ -969,6 +1026,7 @@ class StereoVAE(pl.LightningModule):
     def _profiled_training_step(self, batch):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        dataset_id = None
         if bool(getattr(self.args, "four_mode_mixed_training", False)):
             mode_weights = parse_weight_spec(
                 getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
@@ -1009,8 +1067,30 @@ class StereoVAE(pl.LightningModule):
                     f"seeded dataset schedule expected {expected_dataset}, got {dataset_id}"
                 )
             self.last_dataset_id = dataset_id
+            accumulation_factor = self.mode_grad_accumulates[mode_id]
+        else:
+            accumulation_factor = int(self.grad_accumulates)
+        actual_batch_size = int(source_batch["video"].shape[0])
+        if bool(getattr(self.args, "four_mode_mixed_training", False)) and (
+            actual_batch_size != self.mode_batch_sizes[mode_id]
+        ):
+            raise RuntimeError(
+                f"{mode_id} expected per-device batch "
+                f"{self.mode_batch_sizes[mode_id]}, got {actual_batch_size}"
+            )
+        if self._micro_step == 0:
+            self._logical_mode_id = mode_id
+            self._logical_dataset_id = dataset_id
+            self._logical_global_samples = 0
+        elif (
+            mode_id != self._logical_mode_id
+            or dataset_id != self._logical_dataset_id
+        ):
+            raise RuntimeError("gradient accumulation window crossed mode or dataset")
         self.last_temporal_mode = temporal_mode
         self.last_mode_id = mode_id
+        self.last_micro_step_index = self._micro_step + 1
+        self.last_accumulation_factor = accumulation_factor
         batch = self._prepare_temporal_batch(
             source_batch,
             temporal_mode=temporal_mode,
@@ -1042,11 +1122,17 @@ class StereoVAE(pl.LightningModule):
         schedulers = self._as_sequence(self.lr_schedulers())
         generator_optimizer = optimizers[0]
         with profile_region("stereo/update/backward"):
-            self.manual_backward(generator_loss / self.grad_accumulates)
+            self.manual_backward(generator_loss / accumulation_factor)
 
         self.batch_updates += 1
         self._micro_step += 1
-        should_step = self._micro_step % self.grad_accumulates == 0
+        if self._micro_step > accumulation_factor:
+            raise RuntimeError("logical update received too many micro-batches")
+        self.last_microbatch_size = actual_batch_size
+        self._logical_global_samples += (
+            self.last_microbatch_size * int(self.trainer.world_size)
+        )
+        should_step = self._micro_step == accumulation_factor
         if should_step:
             if self.grad_clip_val is not None:
                 with profile_region("stereo/update/gradient_clipping"):
@@ -1063,13 +1149,15 @@ class StereoVAE(pl.LightningModule):
             else:
                 self.single_frame_updates += 1
             self.mode_updates[mode_id] += 1
-            self.mode_samples[mode_id] += (
-                int(batch["video"].shape[0]) * int(self.trainer.world_size)
-            )
+            self.mode_samples[mode_id] += self._logical_global_samples
+            self.last_logical_global_samples = self._logical_global_samples
             self.generator_updates += 1
             with profile_region("stereo/update/scheduler"):
                 schedulers[0].step_update(self.generator_updates)
             self._micro_step = 0
+            self._logical_mode_id = None
+            self._logical_dataset_id = None
+            self._logical_global_samples = 0
 
         discriminator_total = result.model.rgb.new_zeros(())
         discriminator_image = result.model.rgb.new_zeros(())
@@ -1087,7 +1175,7 @@ class StereoVAE(pl.LightningModule):
                 rgb_target,
                 temporal_mode=temporal_mode,
             )
-            self.manual_backward(discriminator_total / self.grad_accumulates)
+            self.manual_backward(discriminator_total / accumulation_factor)
             if should_step:
                 discriminator_optimizer = optimizers[1]
                 if self.grad_clip_val_disc is not None:

@@ -22,6 +22,7 @@ from stereo_tokenizer.mode_sampling import (
     MODE_IDS,
     mode_occurrences_before,
     parse_weight_spec,
+    resolve_mode_int_spec,
 )
 from stereo_tokenizer.modules.callbacks import ImageLogger, VideoLogger
 from stereo_tokenizer.online_gt import (
@@ -49,8 +50,12 @@ class StepTimingCallback(Callback):
         self.output_path = Path(output_path)
         self.warmup_updates = warmup_updates
         self.last_batch_end = None
+        self.current_batch_start = None
+        self.current_input_wait = None
+        self.logical_update_start = None
         self.last_generator_update = None
         self.timings = []
+        self.micro_timings = []
 
     def on_train_start(self, trainer, pl_module):
         torch.cuda.reset_peak_memory_stats()
@@ -58,22 +63,59 @@ class StepTimingCallback(Callback):
         self.last_batch_end = time.perf_counter()
         self.last_generator_update = int(pl_module.generator_updates)
 
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        torch.cuda.synchronize()
+        now = time.perf_counter()
+        self.current_input_wait = now - self.last_batch_end
+        self.current_batch_start = now
+        if int(pl_module._micro_step) == 0:
+            self.logical_update_start = self.last_batch_end
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        torch.cuda.synchronize()
+        now = time.perf_counter()
+        micro_interval = now - self.current_batch_start
         generator_update = int(pl_module.generator_updates)
+        logical_step = generator_update
+        if int(pl_module.last_micro_step_index) < int(
+            pl_module.last_accumulation_factor
+        ):
+            logical_step += 1
+        micro_global_samples = int(pl_module.last_microbatch_size) * int(
+            trainer.world_size
+        )
+        self.micro_timings.append(
+            {
+                "batch_update": int(pl_module.batch_updates),
+                "logical_step": logical_step,
+                "mode_id": pl_module.last_mode_id,
+                "temporal_mode": pl_module.last_temporal_mode,
+                "micro_step_index": int(pl_module.last_micro_step_index),
+                "accumulation_factor": int(pl_module.last_accumulation_factor),
+                "per_device_batch_size": int(pl_module.last_microbatch_size),
+                "global_samples": micro_global_samples,
+                "samples_per_s": micro_global_samples / micro_interval,
+                "input_wait_and_transfer_s": self.current_input_wait,
+                "interval_s": micro_interval,
+            }
+        )
+        self.last_batch_end = now
         if generator_update == self.last_generator_update:
             return
         if generator_update != self.last_generator_update + 1:
             raise RuntimeError("step timing observed a non-consecutive generator update")
-        torch.cuda.synchronize()
-        now = time.perf_counter()
         peak_allocated = torch.cuda.max_memory_allocated()
         peak_reserved = torch.cuda.max_memory_reserved()
+        logical_interval = now - self.logical_update_start
+        global_samples = int(pl_module.last_logical_global_samples)
         self.timings.append(
             {
                 "step": generator_update,
                 "mode_id": pl_module.last_mode_id,
                 "temporal_mode": pl_module.last_temporal_mode,
-                "interval_s": now - self.last_batch_end,
+                "interval_s": logical_interval,
+                "global_samples": global_samples,
+                "samples_per_s": global_samples / logical_interval,
                 "peak_memory_allocated_bytes": peak_allocated,
                 "peak_memory_reserved_bytes": peak_reserved,
             }
@@ -81,7 +123,8 @@ class StepTimingCallback(Callback):
         mode_prefix = f"train/{pl_module.last_mode_id}"
         pl_module.log_dict(
             {
-                f"{mode_prefix}/step_time_s": now - self.last_batch_end,
+                f"{mode_prefix}/step_time_s": logical_interval,
+                f"{mode_prefix}/samples_per_s": global_samples / logical_interval,
                 f"{mode_prefix}/peak_memory_allocated_bytes": float(
                     peak_allocated
                 ),
@@ -95,8 +138,8 @@ class StepTimingCallback(Callback):
             sync_dist=True,
         )
         torch.cuda.reset_peak_memory_stats()
-        self.last_batch_end = now
         self.last_generator_update = generator_update
+        self.logical_update_start = None
 
     def on_train_end(self, trainer, pl_module):
         local_memory = torch.tensor(
@@ -132,7 +175,13 @@ class StepTimingCallback(Callback):
             torch.distributed.all_gather(rank_memory, local_memory)
         if not trainer.is_global_zero:
             return
-        stable = self.timings[self.warmup_updates :]
+        stable = []
+        mode_seen = {mode_id: 0 for mode_id in MODE_IDS}
+        for row in self.timings:
+            mode_id = row["mode_id"]
+            if mode_seen[mode_id] >= self.warmup_updates:
+                stable.append(row)
+            mode_seen[mode_id] += 1
         values = [row["interval_s"] for row in stable]
         stable_by_temporal_mode = {}
         for temporal_mode in ("single_frame", "four_frame"):
@@ -146,6 +195,7 @@ class StepTimingCallback(Callback):
                     mode_values
                 )
         stable_by_mode = {}
+        stable_samples_per_s_by_mode = {}
         for mode_id in MODE_IDS:
             mode_values = [
                 row["interval_s"]
@@ -154,10 +204,24 @@ class StepTimingCallback(Callback):
             ]
             if mode_values:
                 stable_by_mode[mode_id] = _timing_summary(mode_values)
+                stable_samples_per_s_by_mode[mode_id] = _timing_summary(
+                    [
+                        row["samples_per_s"]
+                        for row in stable
+                        if row["mode_id"] == mode_id
+                    ]
+                )
         payload = {
             "world_size": int(trainer.world_size),
-            "per_device_batch_size": int(pl_module.args.batch_size),
-            "warmup_updates": self.warmup_updates,
+            "per_mode_batch_sizes": dict(pl_module.mode_batch_sizes),
+            "per_mode_grad_accumulates": dict(pl_module.mode_grad_accumulates),
+            "per_mode_effective_global_batch_sizes": {
+                mode_id: pl_module.mode_batch_sizes[mode_id]
+                * pl_module.mode_grad_accumulates[mode_id]
+                * int(trainer.world_size)
+                for mode_id in MODE_IDS
+            },
+            "warmup_updates_per_mode": self.warmup_updates,
             "peak_memory_bytes_by_rank_and_mode": [
                 {
                     "rank": rank,
@@ -172,9 +236,11 @@ class StepTimingCallback(Callback):
                 for rank, memory in enumerate(rank_memory)
             ],
             "timings": self.timings,
+            "micro_timings": self.micro_timings,
             "stable": _timing_summary(values),
             "stable_by_temporal_mode": stable_by_temporal_mode,
             "stable_by_mode": stable_by_mode,
+            "stable_samples_per_s_by_mode": stable_samples_per_s_by_mode,
         }
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.output_path.write_text(
@@ -430,12 +496,40 @@ def validate_distributed_runtime_args(args, environ=None):
 
 def _validate_four_mode_batch_contract(args):
     if args.grad_accumulates != 1:
-        raise ValueError("four-mode training requires grad_accumulates=1")
+        raise ValueError(
+            "four-mode training keeps global grad_accumulates=1 and uses "
+            "mode_grad_accumulates"
+        )
     if args.batch_size < 1:
         raise ValueError("four-mode batch size must be positive")
     world_size = args.devices * args.num_nodes
     if world_size < 1:
         raise ValueError("four-mode DDP world size must be positive")
+    mode_batch_sizes = resolve_mode_int_spec(
+        getattr(args, "mode_batch_sizes", None),
+        fallback=int(args.batch_size),
+    )
+    mode_grad_accumulates = resolve_mode_int_spec(
+        getattr(args, "mode_grad_accumulates", None),
+        fallback=int(args.grad_accumulates),
+    )
+    if any(
+        mode_grad_accumulates[mode_id] != 1
+        for mode_id in MODE_IDS
+        if mode_id.startswith("mono/")
+    ):
+        raise ValueError("mono modes currently require accumulation factor 1")
+    effective_global_batches = {
+        mode_id: mode_batch_sizes[mode_id]
+        * mode_grad_accumulates[mode_id]
+        * world_size
+        for mode_id in MODE_IDS
+    }
+    if len(set(effective_global_batches.values())) != 1:
+        raise ValueError(
+            "four-mode effective global batch sizes must be equal: "
+            f"{effective_global_batches}"
+        )
     parse_weight_spec(args.mode_update_weights, MODE_IDS)
     parse_weight_spec(args.mono_dataset_weights, ("hy", "libero"))
     if args.num_nodes > 1 and not args.node_manifest_contracts:
@@ -857,6 +951,25 @@ def write_online_gt_run_metadata(args):
         "online_gt": online_gt,
     }
     if args.four_mode_mixed_training:
+        mode_batch_sizes = resolve_mode_int_spec(
+            args.mode_batch_sizes,
+            fallback=int(args.batch_size),
+        )
+        mode_grad_accumulates = resolve_mode_int_spec(
+            args.mode_grad_accumulates,
+            fallback=int(args.grad_accumulates),
+        )
+        run_manifest["logical_update_batch_contract"] = {
+            mode_id: {
+                "per_device_batch_size": mode_batch_sizes[mode_id],
+                "micro_batches_per_logical_update": mode_grad_accumulates[mode_id],
+                "effective_global_batch_size": mode_batch_sizes[mode_id]
+                * mode_grad_accumulates[mode_id]
+                * args.devices
+                * args.num_nodes,
+            }
+            for mode_id in MODE_IDS
+        }
         run_manifest["online_gt"]["da3"] = {
             "repo": str(Path(args.da3_repo).resolve()),
             "source_sha": args.da3_source_sha,
@@ -872,6 +985,10 @@ def write_online_gt_run_metadata(args):
 
 def build_callbacks(args):
     callbacks = []
+    if args.step_timing_output is not None:
+        callbacks.append(
+            StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
+        )
     if args.online_gt_enabled:
         callbacks.append(OnlineFoundationGTCallback(args))
         if args.four_mode_mixed_training:
@@ -901,10 +1018,6 @@ def build_callbacks(args):
         )
     if not args.disable_wandb:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
-    if args.step_timing_output is not None:
-        callbacks.append(
-            StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
-        )
     callbacks.append(
         ModelCheckpoint(
             monitor=(
