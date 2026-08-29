@@ -539,6 +539,47 @@ def _validate_four_mode_batch_contract(args):
         )
 
 
+def _resolve_val_check_interval(args):
+    """Translate logical validation cadence to Lightning physical batches."""
+
+    logical_interval = int(args.online_val_check_interval_steps)
+    if not args.four_mode_mixed_training:
+        return logical_interval
+
+    remaining_updates = int(args.max_steps) - int(args.mode_schedule_start_update)
+    logical_interval = min(logical_interval, remaining_updates)
+    mode_weights = parse_weight_spec(args.mode_update_weights, MODE_IDS)
+    cycle_size = sum(mode_weights.values())
+    schedule_start = int(args.mode_schedule_start_update)
+    periodic_interval = logical_interval < remaining_updates
+    if periodic_interval and (
+        logical_interval % cycle_size != 0 or schedule_start % cycle_size != 0
+    ):
+        raise ValueError(
+            "four-mode periodic validation requires a cycle-aligned schedule start "
+            f"and whole mode-schedule cycles ({cycle_size} logical updates), or "
+            "the interval must cover all remaining updates"
+        )
+    accumulation = resolve_mode_int_spec(
+        args.mode_grad_accumulates,
+        fallback=int(args.grad_accumulates),
+    )
+    before = mode_occurrences_before(
+        int(args.mode_schedule_seed),
+        schedule_start,
+        mode_weights,
+    )
+    after = mode_occurrences_before(
+        int(args.mode_schedule_seed),
+        schedule_start + logical_interval,
+        mode_weights,
+    )
+    return sum(
+        (after[mode_id] - before[mode_id]) * accumulation[mode_id]
+        for mode_id in MODE_IDS
+    )
+
+
 def _bind_node_manifest_contracts(args):
     """Bind each physical node rank to immutable manifest content hashes."""
     if not args.four_mode_mixed_training:
@@ -1109,7 +1150,7 @@ def main():
             find_unused_parameters=True,
         )
 
-    val_check_interval = args.online_val_check_interval_steps
+    val_check_interval = _resolve_val_check_interval(args)
     check_val_every_n_epoch = None
 
     trainer = pl.Trainer(

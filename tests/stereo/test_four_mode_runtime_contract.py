@@ -3,7 +3,12 @@ from argparse import Namespace
 from types import SimpleNamespace
 from unittest import mock
 
-from train_stereo_vae import StepTimingCallback, _validate_four_mode_batch_contract
+from stereo_tokenizer.mode_sampling import MODE_IDS, mode_for_update, parse_weight_spec
+from train_stereo_vae import (
+    StepTimingCallback,
+    _resolve_val_check_interval,
+    _validate_four_mode_batch_contract,
+)
 
 
 class ThreeSourceRuntimeContractTest(unittest.TestCase):
@@ -18,6 +23,11 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
             mode_update_weights="35:35:15:15",
             mono_dataset_weights="9:1",
             node_manifest_contracts=None,
+            four_mode_mixed_training=True,
+            online_val_check_interval_steps=340,
+            max_steps=340,
+            mode_schedule_start_update=0,
+            mode_schedule_seed=7,
         )
         values.update(updates)
         return Namespace(**values)
@@ -57,6 +67,45 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
     def test_rejects_invalid_weights(self):
         with self.assertRaises(ValueError):
             _validate_four_mode_batch_contract(self._args(mono_dataset_weights="9:0"))
+
+    def test_validation_interval_expands_to_complete_logical_updates(self):
+        args = self._args()
+        weights = parse_weight_spec(args.mode_update_weights, MODE_IDS)
+        expected = sum(
+            2
+            if mode_for_update(args.mode_schedule_seed, update, weights)
+            == "stereo/four_frame"
+            else 1
+            for update in range(args.max_steps)
+        )
+        self.assertEqual(_resolve_val_check_interval(args), expected)
+        self.assertGreater(expected, args.online_val_check_interval_steps)
+
+    def test_periodic_validation_requires_complete_schedule_cycles(self):
+        with self.assertRaisesRegex(ValueError, "whole mode-schedule cycles"):
+            _resolve_val_check_interval(
+                self._args(max_steps=1000, online_val_check_interval_steps=340)
+            )
+
+    def test_periodic_validation_expands_complete_schedule_cycles(self):
+        interval = _resolve_val_check_interval(
+            self._args(max_steps=1000, online_val_check_interval_steps=500)
+        )
+        self.assertEqual(interval, 575)
+
+    def test_periodic_validation_requires_cycle_aligned_resume(self):
+        with self.assertRaisesRegex(ValueError, "cycle-aligned schedule start"):
+            _resolve_val_check_interval(
+                self._args(
+                    max_steps=1001,
+                    mode_schedule_start_update=1,
+                    online_val_check_interval_steps=500,
+                )
+            )
+
+    def test_non_mixed_validation_interval_is_unchanged(self):
+        args = self._args(four_mode_mixed_training=False)
+        self.assertEqual(_resolve_val_check_interval(args), 340)
 
     @mock.patch("train_stereo_vae.torch.cuda.reset_peak_memory_stats")
     @mock.patch("train_stereo_vae.torch.cuda.max_memory_reserved", return_value=20)

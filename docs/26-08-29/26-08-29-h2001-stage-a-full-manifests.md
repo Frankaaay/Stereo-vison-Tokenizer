@@ -165,3 +165,25 @@ Local validation before user review:
 - Tensor/runtime tests were not executed locally because the Windows Python
   environment has neither Torch nor PyTorch Lightning. They remain a required
   gate in the pinned H200 runtime after commit/push and exact-SHA sync.
+
+## Mode-aware profiling checkpoint boundary fix
+
+- Runtime: H200-1, branch `hezhou-las2-h`, commit `25dc4cfa3489f8766d92f13f449c65d50e808096`.
+- Profiling output: `/data/home/frank/experiments/stereo-mode-aware-bs384-profile-h2001-v1`.
+- Observed result: the run consumed 340 physical DataLoader batches, validated at
+  `val/mixed/total_loss ~= 0.940`, then `save_last` failed with
+  `refusing to checkpoint an incomplete logical update`.
+- Root cause: `online_val_check_interval_steps` was passed directly to Lightning,
+  which interprets it as physical batches. Under mode-aware GA, 340 logical updates
+  expand to more than 340 physical batches, so validation and its checkpoint hook
+  could run after the first micro-batch of a `stereo/four_frame` logical update.
+- Fix: translate the logical validation cadence to the exact physical-batch count
+  implied by the deterministic mode schedule and per-mode accumulation contract.
+  Periodic validation must start on a schedule-cycle boundary and cover whole
+  100-update cycles; a final-only interval may cover all remaining logical updates.
+  The incomplete-checkpoint guard remains unchanged and fail-closed.
+- Validation status: `py_compile` and `git diff --check` passed; the 25 local
+  source-boundary tests passed. A read-only calculation in the pinned H200-1 runtime
+  confirmed that this 340-logical-update schedule expands to exactly 391 physical
+  batches (`len == iterated count == 391`). Tensor/runtime regression tests and the
+  GPU rerun remain pending commit, push, and exact-SHA synchronization authorization.
