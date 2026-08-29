@@ -6,12 +6,58 @@ from unittest import mock
 from stereo_tokenizer.mode_sampling import MODE_IDS, mode_for_update, parse_weight_spec
 from train_stereo_vae import (
     StepTimingCallback,
+    _load_stage_transition_checkpoint,
     _resolve_val_check_interval,
     _validate_four_mode_batch_contract,
 )
 
 
 class ThreeSourceRuntimeContractTest(unittest.TestCase):
+    def test_stage_transition_loads_only_new_discriminator_as_missing(self):
+        checkpoint = {
+            "state_dict": {"encoder.weight": object()},
+            "stereo_update_counters": {"discriminator_updates": 0},
+        }
+
+        class Model:
+            def __init__(self):
+                self.loaded_checkpoint = None
+
+            @staticmethod
+            def state_dict():
+                return {
+                    "encoder.weight": object(),
+                    "image_discriminator.weight": object(),
+                }
+
+            def load_state_dict(self, state_dict, strict):
+                self.asserted_state_dict = state_dict
+                self.asserted_strict = strict
+                return SimpleNamespace(
+                    missing_keys=["image_discriminator.weight"],
+                    unexpected_keys=[],
+                )
+
+            def on_load_checkpoint(self, loaded):
+                self.loaded_checkpoint = loaded
+
+        model = Model()
+        _load_stage_transition_checkpoint(model, checkpoint, "stage-a.ckpt")
+
+        self.assertIs(model.loaded_checkpoint, checkpoint)
+        self.assertFalse(model.asserted_strict)
+        self.assertTrue(model.stage_transition_source.endswith("stage-a.ckpt"))
+
+    def test_stage_transition_rejects_existing_discriminator_weights(self):
+        checkpoint = {
+            "state_dict": {"image_discriminator.weight": object()},
+            "stereo_update_counters": {"discriminator_updates": 0},
+        }
+        with self.assertRaisesRegex(ValueError, "strict resume"):
+            _load_stage_transition_checkpoint(
+                SimpleNamespace(), checkpoint, "gan.ckpt"
+            )
+
     def _args(self, **updates):
         values = dict(
             grad_accumulates=1,

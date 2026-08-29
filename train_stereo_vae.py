@@ -377,6 +377,7 @@ def build_parser():
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
     parser.add_argument("--resume_from_checkpoint", type=Path, default=None)
+    parser.add_argument("--stage_transition_checkpoint", type=Path, default=None)
     parser.add_argument("--checkpoint_every_n_steps", type=int, default=500)
     parser.add_argument("--step_timing_output", type=str, default=None)
     parser.add_argument("--step_timing_warmup", type=int, default=5)
@@ -633,6 +634,18 @@ def _bind_node_manifest_contracts(args):
 
 
 def validate_runtime_args(args):
+    if (
+        args.resume_from_checkpoint is not None
+        and getattr(args, "stage_transition_checkpoint", None) is not None
+    ):
+        raise ValueError(
+            "resume_from_checkpoint and stage_transition_checkpoint are mutually exclusive"
+        )
+    if (
+        getattr(args, "stage_transition_checkpoint", None) is not None
+        and not args.gan_enabled
+    ):
+        raise ValueError("stage_transition_checkpoint requires GAN-enabled training")
     if args.sequence_length != 4:
         raise ValueError("StereoVAE training requires sequence_length=4")
     if not 0 <= args.single_frame_source_index < args.sequence_length:
@@ -652,6 +665,7 @@ def validate_runtime_args(args):
             raise ValueError("mode_schedule_start_update must be non-negative")
         if (
             args.resume_from_checkpoint is None
+            and getattr(args, "stage_transition_checkpoint", None) is None
             and args.mode_schedule_start_update != 0
         ):
             raise ValueError("mode_schedule_start_update requires a checkpoint")
@@ -1075,12 +1089,66 @@ def build_callbacks(args):
     return callbacks
 
 
+def _load_stage_transition_checkpoint(model, checkpoint, checkpoint_path):
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError("stage transition checkpoint has no model state_dict")
+    discriminator_prefixes = ("image_discriminator.", "video_discriminator.")
+    source_discriminator_keys = {
+        key
+        for key in state_dict
+        if key.startswith(discriminator_prefixes)
+    }
+    if source_discriminator_keys:
+        raise ValueError(
+            "stage transition source already contains discriminator weights; "
+            "use strict resume"
+        )
+    expected_missing = {
+        key
+        for key in model.state_dict()
+        if key.startswith(discriminator_prefixes)
+    }
+    if not expected_missing:
+        raise ValueError("stage transition target has no discriminator parameters")
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    missing = set(incompatible.missing_keys)
+    unexpected = set(incompatible.unexpected_keys)
+    if missing != expected_missing or unexpected:
+        raise ValueError(
+            "stage transition model mismatch: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
+    counters = checkpoint.get("stereo_update_counters")
+    if not isinstance(counters, dict) or counters.get("discriminator_updates") != 0:
+        raise ValueError(
+            "stage transition requires a GAN-free checkpoint with zero "
+            "discriminator updates"
+        )
+    model.on_load_checkpoint(checkpoint)
+    model.stage_transition_source = str(Path(checkpoint_path).resolve())
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    if args.resume_from_checkpoint is not None:
+    if (
+        args.resume_from_checkpoint is not None
+        and args.stage_transition_checkpoint is not None
+    ):
+        raise ValueError(
+            "resume_from_checkpoint and stage_transition_checkpoint are mutually exclusive"
+        )
+    checkpoint_path = (
+        args.resume_from_checkpoint
+        if args.resume_from_checkpoint is not None
+        else args.stage_transition_checkpoint
+    )
+    checkpoint = None
+    counters = None
+    if checkpoint_path is not None:
         checkpoint = torch.load(
-            args.resume_from_checkpoint, map_location="cpu", weights_only=False
+            checkpoint_path, map_location="cpu", weights_only=False
         )
         counters = checkpoint.get("stereo_update_counters")
         if not isinstance(counters, dict):
@@ -1088,7 +1156,7 @@ def main():
         args.mode_schedule_start_update = int(counters["generator_updates"])
     _bind_node_manifest_contracts(args)
     validate_runtime_args(args)
-    if args.resume_from_checkpoint is not None and args.four_mode_mixed_training:
+    if checkpoint_path is not None and args.four_mode_mixed_training:
         if counters.get("mode_schedule_seed") != args.mode_schedule_seed:
             raise ValueError("resume checkpoint mode schedule seed mismatch")
         if counters.get("mode_updates") != mode_occurrences_before(
@@ -1102,6 +1170,12 @@ def main():
 
     data = StereoDataModule(args)
     model = StereoVAE(args)
+    if args.stage_transition_checkpoint is not None:
+        _load_stage_transition_checkpoint(
+            model,
+            checkpoint,
+            args.stage_transition_checkpoint,
+        )
     callbacks = build_callbacks(args)
 
     profiler = None

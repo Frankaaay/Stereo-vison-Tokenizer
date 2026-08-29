@@ -19,6 +19,8 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("max_steps=-1 if args.gan_enabled else args.max_steps", source)
         self.assertIn("max_epochs=-1", source)
         self.assertIn("--resume_from_checkpoint", source)
+        self.assertIn("--stage_transition_checkpoint", source)
+        self.assertIn("_load_stage_transition_checkpoint(", source)
         self.assertIn("ckpt_path=args.resume_from_checkpoint", source)
 
     def test_evaluation_is_deterministic_and_strict(self):
@@ -101,6 +103,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("single_frame_loss_weight", source)
         self.assertIn('GAN_ENABLED="${GAN_ENABLED:-0}"', source)
         self.assertIn("GAN_ARGS+=(--gan_enabled)", source)
+        self.assertIn("STAGE_TRANSITION_CHECKPOINT", source)
         self.assertNotIn("--use_vae", source)
         self.assertNotIn("--fp16", source)
 

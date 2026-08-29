@@ -1391,6 +1391,20 @@ class StereoVAE(pl.LightningModule):
             )
         return optimizers, schedulers
 
+    def on_train_start(self) -> None:
+        if getattr(self.args, "stage_transition_checkpoint", None) is None:
+            return
+        schedulers = self._as_sequence(self.lr_schedulers())
+        if not schedulers:
+            raise RuntimeError("stage transition requires a generator scheduler")
+        schedulers[0].step_update(self.generator_updates)
+        if self.gan_enabled:
+            if len(schedulers) != 2:
+                raise RuntimeError(
+                    "GAN stage transition requires generator and discriminator schedulers"
+                )
+            schedulers[1].step_update(self.discriminator_updates)
+
     def log_images(self, batch, **kwargs):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
