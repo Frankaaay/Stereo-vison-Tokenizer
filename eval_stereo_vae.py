@@ -546,16 +546,39 @@ def exact_eval_loader(args, dataset, eye_mode, rank, world_size):
 def fixed_eval_case_indices(dataset, count, seed, eye_mode):
     if eye_mode == "stereo":
         return fixed_episode_subset_indices(dataset, count, seed=seed)
-    if count < 1 or count > len(dataset):
+    if count < 1:
+        raise ValueError("fixed mono subset count must be positive")
+    if len(dataset.spans) < count:
         raise ValueError(
-            f"fixed mono subset needs 1..{len(dataset)} samples, got {count}"
+            f"fixed mono subset needs {count} episodes, split has "
+            f"{len(dataset.spans)}"
         )
-    return sorted(
-        range(len(dataset)),
-        key=lambda index: hashlib.sha256(
-            f"{seed}:{dataset.records[index]['sample_id']}".encode("utf-8")
+    ordered = sorted(
+        dataset.spans,
+        key=lambda span: hashlib.sha256(
+            (
+                f"{seed}:{dataset.records[span.record_index]['root_alias']}:"
+                f"{dataset.records[span.record_index]['table_name']}:"
+                f"{dataset.records[span.record_index]['episode_id']}:"
+                f"{span.variant}"
+            ).encode("utf-8")
         ).digest(),
-    )[:count]
+    )
+    indices = []
+    for span in ordered[:count]:
+        record = dataset.records[span.record_index]
+        identity = (
+            f"{record['root_alias']}:{record['table_name']}:"
+            f"{record['episode_id']}:{span.variant}"
+        )
+        local_window = int.from_bytes(
+            hashlib.sha256(
+                f"{seed}:evaluation-window:{identity}".encode("utf-8")
+            ).digest()[:8],
+            "big",
+        ) % span.sample_count
+        indices.append(span.first_sample + local_window)
+    return indices
 
 
 def build_online_teacher(args, eye_mode, device):

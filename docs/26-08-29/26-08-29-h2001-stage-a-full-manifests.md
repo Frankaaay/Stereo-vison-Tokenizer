@@ -348,6 +348,15 @@ Local validation before user review:
   The one-shot health check found the process alive in model/teacher initialization,
   no traceback, and no exit code. The initial ETA remains 5-12 minutes for both
   evaluation bodies plus metrics and reconstruction output validation.
+- Evaluation v2 completed the first 20 Hy mono quantitative batches, then exited
+  with code 1 while selecting reconstruction cases. The selector incorrectly read
+  `sample_id` from episode-level Hy manifest records, where that field exists only
+  after a concrete window is decoded. No metrics/reconstruction artifact was written
+  and the test split did not start; all GPUs returned to 0 MiB.
+- The replacement selector follows the existing episode-span contract: it hashes
+  stable Hy episode metadata to select distinct spans, then hashes again to choose
+  one window inside each span. It does not decode candidates or sort every training
+  window, and is deterministic for a fixed manifest and seed.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is

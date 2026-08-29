@@ -12,6 +12,40 @@ from stereo_tokenizer.mode_sampling import MODE_IDS
 
 
 class FourModeEvaluationTest(unittest.TestCase):
+    def test_fixed_mono_cases_use_distinct_episode_spans_without_sample_ids(self):
+        records = [
+            {
+                "root_alias": "hy_primary",
+                "table_name": "table_000",
+                "episode_id": f"table_000:{episode}",
+            }
+            for episode in range(3)
+        ]
+        spans = [
+            SimpleNamespace(
+                record_index=index,
+                variant="cam_high",
+                first_sample=index * 10,
+                sample_count=10,
+            )
+            for index in range(3)
+        ]
+        dataset = SimpleNamespace(records=records, spans=spans)
+
+        indices = evaluation.fixed_eval_case_indices(
+            dataset, count=2, seed=1234, eye_mode="mono"
+        )
+
+        self.assertEqual(
+            indices,
+            evaluation.fixed_eval_case_indices(
+                dataset, count=2, seed=1234, eye_mode="mono"
+            ),
+        )
+        self.assertEqual(len(indices), 2)
+        self.assertEqual(len({index // 10 for index in indices}), 2)
+        self.assertTrue(all(0 <= index < 30 for index in indices))
+
     def test_mono_provenance_uses_hy_manifest_and_root_aliases(self):
         class Dataset:
             manifest_path = Path("hy-manifest.jsonl")
