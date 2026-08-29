@@ -357,6 +357,13 @@ Local validation before user review:
   stable Hy episode metadata to select distinct spans, then hashes again to choose
   one window inside each span. It does not decode candidates or sort every training
   window, and is deterministic for a fixed manifest and seed.
+- H200-1 runtime validation at commit
+  `4f66df0cd292867057333dad8fd2bf021be51485` passed 22 directed tests plus all
+  9 argument-mode subtests. Evaluation v3 started at 2026-08-29 23:32 CST in tmux
+  `stereo-stagea-step44000-eval-h2001-v3`, writing to
+  `/data/home/frank/experiments/stereo-stagea-step44000-eval-h2001-20260829-v3`.
+  The one-shot health check found the process alive in initialization with no
+  traceback and `exit_code` not yet written. Initial full-output ETA is 5-12 minutes.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is
