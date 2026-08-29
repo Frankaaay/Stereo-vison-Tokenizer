@@ -31,7 +31,21 @@ strict resume across a changed optimizer/model topology.
 - Image discriminator active from generator update 44,000
 - target generator update 100,000
 
-## Status
+## Launch and health
 
-Implementation and directed validation are in progress. The formal output directory,
-runtime commit, tmux name, launch health, and ETA will be appended after launch.
+- Runtime commit: `02c2793091fa7e74f533328f9d41fda9d02bc07f`
+- H200-1 directed gate: shell syntax passed; 46 runtime/integration tests passed.
+- Output: `/data/home/frank/experiments/stereo-three-source-stageb-imagegan-bs192-h2001-20260830-v1`
+- tmux: `stereo-stageb-imagegan-bs192-h2001-v1`
+- Started at 2026-08-30 00:37 CST with master port 29668.
+- The immutable resolved config records `mode_schedule_start_update=44000`, the
+  Stage A transition checkpoint, no strict-resume checkpoint, BF16, 8 GPUs, BS24/GA1,
+  Image GAN 0.005, Video GAN 0, and feature matching 0. The run manifest records the
+  same code SHA and effective global batch 192 for every mode.
+- After five minutes, the run had completed about 378 Stage B logical updates at
+  approximately 1.24 updates/s. All GPUs remained at 100% utilization with about
+  135.8-136.0 GiB used per GPU. Image generator/discriminator loss paths were active;
+  there was no traceback, CUDA OOM, NCCL error, NaN report, or exit code.
+- ETA estimated at 00:42 CST: about 12.5 hours for the remaining pure update body at
+  the observed rate; 13-16 hours including periodic validation and checkpointing.
+  Final checkpoint/counter verification should require another 10-20 minutes.
