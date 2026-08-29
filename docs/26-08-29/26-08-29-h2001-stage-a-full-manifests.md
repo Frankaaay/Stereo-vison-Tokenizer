@@ -340,6 +340,14 @@ Local validation before user review:
   modeled the removed `cache_root` field (19 passed, 2 failed). Production code was
   kept fail-closed; only those fixtures were updated to the current `root_aliases`
   contract before rerunning the gate.
+- The corrected H200-1 runtime gate then passed: 21 tests plus all 9 argument-mode
+  subtests. Evaluation v2 started at 2026-08-29 23:24 CST from code commit
+  `195a4fb31465638c2ef37186cc82f199756e21b5` in tmux
+  `stereo-stagea-step44000-eval-h2001-v2`, with output/log root
+  `/data/home/frank/experiments/stereo-stagea-step44000-eval-h2001-20260829-v2`.
+  The one-shot health check found the process alive in model/teacher initialization,
+  no traceback, and no exit code. The initial ETA remains 5-12 minutes for both
+  evaluation bodies plus metrics and reconstruction output validation.
 - Stage B is not a strict resume: the Stage A checkpoint has no discriminator or
   discriminator optimizer state. A generator weights-only warm start with a newly
   initialized discriminator/optimizer and explicit counter/provenance semantics is
