@@ -117,3 +117,17 @@ strict resume across a changed optimizer/model topology.
   direct optional-argument access in `validate_runtime_args`. Training never started
   and no GPU/output was used. The local fix uses fail-safe `getattr(..., None)` for
   every optional checkpoint input; the full gate must pass after the follow-up push.
+- The follow-up implementation commit is
+  `5cb1ad859e161396ab348b823f86bc2048718a77`. H200-1 was cleanly fast-forwarded to
+  that exact SHA; shell syntax and all 72 directed runtime/integration/source tests
+  passed.
+- A bounded 200-update transition smoke started at 2026-08-30 16:05 CST in tmux
+  `stereo-stagec-videogan-bs192-h2001-smoke-v1`, writing to
+  `/data/home/frank/experiments/stereo-three-source-stagec-videogan-bs192-h2001-20260830-smoke-v1`.
+  It starts again from the verified Stage B update-100,000 checkpoint, targets
+  update 100,200, enables Image/Video GAN weights 0.005/0.005 with feature matching
+  0, records logical-update timings, and will not be used as the formal Stage C
+  source. The one-shot health check found all eight ranks alive, both discriminator
+  modules instantiated, each GPU opened at about 2.7 GiB during initialization, no
+  exit marker, and no immediate error. Initial smoke-body ETA is 4-10 minutes;
+  checkpoint/counter/optimizer validation should complete within 6-13 minutes.
