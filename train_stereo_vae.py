@@ -1,4 +1,5 @@
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -249,6 +250,90 @@ class StepTimingCallback(Callback):
         )
 
 
+class DiscriminatorExpansionOptimizerCallback(Callback):
+    def on_train_start(self, trainer, pl_module):
+        source_states = getattr(
+            pl_module, "_discriminator_expansion_optimizer_states", None
+        )
+        if not isinstance(source_states, list) or len(source_states) != 2:
+            raise ValueError(
+                "discriminator expansion requires exactly two source optimizer states"
+            )
+        optimizers = list(trainer.optimizers)
+        if len(optimizers) != 2:
+            raise ValueError(
+                "discriminator expansion requires generator and discriminator optimizers"
+            )
+
+        generator_state = copy.deepcopy(source_states[0])
+        generator_target = optimizers[0].state_dict()
+        self._validate_group_shape(
+            generator_state, generator_target, label="generator", exact=True
+        )
+        optimizers[0].load_state_dict(generator_state)
+
+        image_param_count = len(list(pl_module.image_discriminator.parameters()))
+        video_param_count = len(list(pl_module.video_discriminator.parameters()))
+        discriminator_state = copy.deepcopy(source_states[1])
+        discriminator_target = optimizers[1].state_dict()
+        self._validate_group_shape(
+            discriminator_state,
+            discriminator_target,
+            label="discriminator",
+            exact=False,
+        )
+        source_group = discriminator_state["param_groups"][0]
+        target_group = discriminator_target["param_groups"][0]
+        source_ids = list(source_group["params"])
+        target_ids = list(target_group["params"])
+        if len(source_ids) != image_param_count:
+            raise ValueError(
+                "source discriminator optimizer does not match image discriminator"
+            )
+        if len(target_ids) != image_param_count + video_param_count:
+            raise ValueError(
+                "target discriminator optimizer does not match image+video discriminators"
+            )
+        source_state = discriminator_state.get("state", {})
+        unknown_state_ids = set(source_state) - set(source_ids)
+        if unknown_state_ids:
+            raise ValueError(
+                "source discriminator optimizer has state outside its parameter group"
+            )
+        discriminator_state["state"] = {
+            target_ids[index]: source_state[source_id]
+            for index, source_id in enumerate(source_ids)
+            if source_id in source_state
+        }
+        source_group["params"] = target_ids
+        optimizers[1].load_state_dict(discriminator_state)
+
+        schedulers = pl_module._as_sequence(pl_module.lr_schedulers())
+        if len(schedulers) != 2:
+            raise ValueError(
+                "discriminator expansion requires generator and discriminator schedulers"
+            )
+        schedulers[0].step_update(pl_module.generator_updates)
+        schedulers[1].step_update(pl_module.discriminator_updates)
+        del pl_module._discriminator_expansion_optimizer_states
+        pl_module.discriminator_expansion_optimizer_restored = True
+
+    @staticmethod
+    def _validate_group_shape(source, target, *, label, exact):
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            raise TypeError(f"{label} optimizer state must be a mapping")
+        source_groups = source.get("param_groups")
+        target_groups = target.get("param_groups")
+        if not isinstance(source_groups, list) or len(source_groups) != 1:
+            raise ValueError(f"{label} source optimizer must have one parameter group")
+        if not isinstance(target_groups, list) or len(target_groups) != 1:
+            raise ValueError(f"{label} target optimizer must have one parameter group")
+        if exact and len(source_groups[0]["params"]) != len(
+            target_groups[0]["params"]
+        ):
+            raise ValueError(f"{label} optimizer parameter count changed")
+
+
 def _profile_event_time_us(event, name):
     value = getattr(event, name, None)
     if value is not None:
@@ -378,6 +463,9 @@ def build_parser():
     parser.add_argument("--default_root_dir", type=str, required=True)
     parser.add_argument("--resume_from_checkpoint", type=Path, default=None)
     parser.add_argument("--stage_transition_checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--discriminator_expansion_checkpoint", type=Path, default=None
+    )
     parser.add_argument("--checkpoint_every_n_steps", type=int, default=500)
     parser.add_argument("--step_timing_output", type=str, default=None)
     parser.add_argument("--step_timing_warmup", type=int, default=5)
@@ -634,18 +722,30 @@ def _bind_node_manifest_contracts(args):
 
 
 def validate_runtime_args(args):
-    if (
-        args.resume_from_checkpoint is not None
-        and getattr(args, "stage_transition_checkpoint", None) is not None
-    ):
+    checkpoint_args = (
+        args.resume_from_checkpoint,
+        getattr(args, "stage_transition_checkpoint", None),
+        getattr(args, "discriminator_expansion_checkpoint", None),
+    )
+    if sum(value is not None for value in checkpoint_args) > 1:
         raise ValueError(
-            "resume_from_checkpoint and stage_transition_checkpoint are mutually exclusive"
+            "resume_from_checkpoint, stage_transition_checkpoint, and "
+            "discriminator_expansion_checkpoint are mutually exclusive"
         )
     if (
         getattr(args, "stage_transition_checkpoint", None) is not None
         and not args.gan_enabled
     ):
         raise ValueError("stage_transition_checkpoint requires GAN-enabled training")
+    if getattr(args, "discriminator_expansion_checkpoint", None) is not None:
+        if not args.gan_enabled:
+            raise ValueError(
+                "discriminator_expansion_checkpoint requires GAN-enabled training"
+            )
+        if args.image_gan_weight <= 0 or args.video_gan_weight <= 0:
+            raise ValueError(
+                "discriminator expansion requires positive image and video GAN weights"
+            )
     if args.sequence_length != 4:
         raise ValueError("StereoVAE training requires sequence_length=4")
     if not 0 <= args.single_frame_source_index < args.sequence_length:
@@ -666,6 +766,7 @@ def validate_runtime_args(args):
         if (
             args.resume_from_checkpoint is None
             and getattr(args, "stage_transition_checkpoint", None) is None
+            and getattr(args, "discriminator_expansion_checkpoint", None) is None
             and args.mode_schedule_start_update != 0
         ):
             raise ValueError("mode_schedule_start_update requires a checkpoint")
@@ -1040,6 +1141,8 @@ def write_online_gt_run_metadata(args):
 
 def build_callbacks(args):
     callbacks = []
+    if getattr(args, "discriminator_expansion_checkpoint", None) is not None:
+        callbacks.append(DiscriminatorExpansionOptimizerCallback())
     if args.step_timing_output is not None:
         callbacks.append(
             StepTimingCallback(args.step_timing_output, args.step_timing_warmup)
@@ -1129,20 +1232,80 @@ def _load_stage_transition_checkpoint(model, checkpoint, checkpoint_path):
     model.stage_transition_source = str(Path(checkpoint_path).resolve())
 
 
+def _load_discriminator_expansion_checkpoint(model, checkpoint, checkpoint_path):
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError("discriminator expansion checkpoint has no model state_dict")
+    source_image_keys = {
+        key for key in state_dict if key.startswith("image_discriminator.")
+    }
+    source_video_keys = {
+        key for key in state_dict if key.startswith("video_discriminator.")
+    }
+    if not source_image_keys:
+        raise ValueError(
+            "discriminator expansion source has no image discriminator weights"
+        )
+    if source_video_keys:
+        raise ValueError(
+            "discriminator expansion source already has video discriminator weights"
+        )
+    target_state = model.state_dict()
+    target_image_keys = {
+        key for key in target_state if key.startswith("image_discriminator.")
+    }
+    target_video_keys = {
+        key for key in target_state if key.startswith("video_discriminator.")
+    }
+    if source_image_keys != target_image_keys or not target_video_keys:
+        raise ValueError(
+            "discriminator expansion target topology does not preserve image and add video"
+        )
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    missing = set(incompatible.missing_keys)
+    unexpected = set(incompatible.unexpected_keys)
+    if missing != target_video_keys or unexpected:
+        raise ValueError(
+            "discriminator expansion model mismatch: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
+    counters = checkpoint.get("stereo_update_counters")
+    if not isinstance(counters, dict) or counters.get("discriminator_updates", 0) <= 0:
+        raise ValueError(
+            "discriminator expansion requires a GAN checkpoint with positive "
+            "discriminator updates"
+        )
+    optimizer_states = checkpoint.get("optimizer_states")
+    if not isinstance(optimizer_states, list) or len(optimizer_states) != 2:
+        raise ValueError(
+            "discriminator expansion requires generator and discriminator optimizer states"
+        )
+    model.on_load_checkpoint(checkpoint)
+    model._discriminator_expansion_optimizer_states = optimizer_states
+    model.discriminator_expansion_source = str(Path(checkpoint_path).resolve())
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    if (
-        args.resume_from_checkpoint is not None
-        and args.stage_transition_checkpoint is not None
-    ):
+    checkpoint_args = (
+        args.resume_from_checkpoint,
+        args.stage_transition_checkpoint,
+        args.discriminator_expansion_checkpoint,
+    )
+    if sum(value is not None for value in checkpoint_args) > 1:
         raise ValueError(
-            "resume_from_checkpoint and stage_transition_checkpoint are mutually exclusive"
+            "resume_from_checkpoint, stage_transition_checkpoint, and "
+            "discriminator_expansion_checkpoint are mutually exclusive"
         )
     checkpoint_path = (
         args.resume_from_checkpoint
         if args.resume_from_checkpoint is not None
-        else args.stage_transition_checkpoint
+        else (
+            args.stage_transition_checkpoint
+            if args.stage_transition_checkpoint is not None
+            else args.discriminator_expansion_checkpoint
+        )
     )
     checkpoint = None
     counters = None
@@ -1176,6 +1339,13 @@ def main():
             checkpoint,
             args.stage_transition_checkpoint,
         )
+    elif args.discriminator_expansion_checkpoint is not None:
+        _load_discriminator_expansion_checkpoint(
+            model,
+            checkpoint,
+            args.discriminator_expansion_checkpoint,
+        )
+    checkpoint = None
     callbacks = build_callbacks(args)
 
     profiler = None

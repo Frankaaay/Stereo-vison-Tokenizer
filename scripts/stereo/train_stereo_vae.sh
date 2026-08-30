@@ -269,8 +269,17 @@ if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
 fi
 
 RESUME_ARGS=()
-if [[ -n "${RESUME_FROM_CHECKPOINT:-}" && -n "${STAGE_TRANSITION_CHECKPOINT:-}" ]]; then
-  echo "RESUME_FROM_CHECKPOINT and STAGE_TRANSITION_CHECKPOINT are mutually exclusive" >&2
+CHECKPOINT_ARG_COUNT=0
+for checkpoint_value in \
+  "${RESUME_FROM_CHECKPOINT:-}" \
+  "${STAGE_TRANSITION_CHECKPOINT:-}" \
+  "${DISCRIMINATOR_EXPANSION_CHECKPOINT:-}"; do
+  if [[ -n "${checkpoint_value}" ]]; then
+    CHECKPOINT_ARG_COUNT=$((CHECKPOINT_ARG_COUNT + 1))
+  fi
+done
+if (( CHECKPOINT_ARG_COUNT > 1 )); then
+  echo "checkpoint inputs are mutually exclusive" >&2
   exit 2
 fi
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
@@ -278,6 +287,9 @@ if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
 fi
 if [[ -n "${STAGE_TRANSITION_CHECKPOINT:-}" ]]; then
   RESUME_ARGS+=(--stage_transition_checkpoint "${STAGE_TRANSITION_CHECKPOINT}")
+fi
+if [[ -n "${DISCRIMINATOR_EXPANSION_CHECKPOINT:-}" ]]; then
+  RESUME_ARGS+=(--discriminator_expansion_checkpoint "${DISCRIMINATOR_EXPANSION_CHECKPOINT}")
 fi
 
 TRAIN_LAUNCHER=(python3)
