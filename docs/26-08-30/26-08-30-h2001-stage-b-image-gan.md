@@ -131,3 +131,28 @@ strict resume across a changed optimizer/model topology.
   modules instantiated, each GPU opened at about 2.7 GiB during initialization, no
   exit marker, and no immediate error. Initial smoke-body ETA is 4-10 minutes;
   checkpoint/counter/optimizer validation should complete within 6-13 minutes.
+- The smoke completed at 2026-08-30 16:10 CST with `exit_code=0`, no strict error,
+  and all 200 requested updates. Direct checkpoint inspection found generator and
+  discriminator counters 100,200/56,200, exact mode increments 70/70/30/30, 16
+  Image plus 16 Video discriminator state keys, two optimizers, and populated Adam
+  state for all 16 Image and all 16 Video discriminator parameters. Peak reserved
+  GPU memory was 139,305,418,752 bytes (129.74 GiB). The measured 200-update mean
+  was 0.7892 logical updates/s. The smoke checkpoint is retained as evidence but is
+  not a formal-training source.
+- Formal Stage C started from the original verified Stage B update-100,000 checkpoint
+  at 2026-08-30 16:19:22 CST in tmux
+  `stereo-stagec-videogan-bs192-h2001-v1`, writing to
+  `/data/home/frank/experiments/stereo-three-source-stagec-videogan-bs192-h2001-20260830-v1`.
+  H200-1 was clean at exact SHA `f3c65591704ebae70f97b726b01b0128ed45f739`.
+  The immutable contract is max generator update 300,000, LPIPS 1.0, Image/Video
+  GAN 0.005/0.005, feature matching 0, uniform BS24/GPU and GA1, mode weights
+  35:35:15:15, Hy:LIBERO 9:1, and checkpoint cadence 1,000 Lightning global steps.
+  The one-shot health snapshot found the tmux and all eight rank processes alive,
+  no exit marker or immediate error, and ranks 1-7 opening CUDA contexts while DDP
+  initialization was still in progress; no formal update existed yet.
+- The initial formal ETA uses the measured smoke rate. At 0.7892 updates/s, 200,000
+  updates require 70 hours 24 minutes raw. Because the formal checkpoint cadence is
+  ten times less frequent than the smoke, the initial body range is 65-71 hours,
+  approximately 2026-09-02 09:30-14:45 CST. Final checkpoint and counter validation
+  are initially expected by 10:00-15:30 CST. This must be refreshed from formal-run
+  throughput once stable progress samples exist.
