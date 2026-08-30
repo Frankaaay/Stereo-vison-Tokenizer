@@ -112,3 +112,8 @@ strict resume across a changed optimizer/model topology.
   directly verified as generator/discriminator updates 100,000/56,000 with 16 Image
   discriminator state keys, zero Video discriminator state keys, and two optimizer
   states. Implementation validation and H200 smoke are pending before formal launch.
+- The first H200 directed gate at commit `23ef6fea50f0d7acbd10c4eb613d60583d88f3a6`
+  ran 72 tests: 71 passed and one lightweight `SimpleNamespace` fixture exposed a
+  direct optional-argument access in `validate_runtime_args`. Training never started
+  and no GPU/output was used. The local fix uses fail-safe `getattr(..., None)` for
+  every optional checkpoint input; the full gate must pass after the follow-up push.

@@ -723,7 +723,7 @@ def _bind_node_manifest_contracts(args):
 
 def validate_runtime_args(args):
     checkpoint_args = (
-        args.resume_from_checkpoint,
+        getattr(args, "resume_from_checkpoint", None),
         getattr(args, "stage_transition_checkpoint", None),
         getattr(args, "discriminator_expansion_checkpoint", None),
     )
@@ -764,7 +764,7 @@ def validate_runtime_args(args):
         if args.mode_schedule_start_update < 0:
             raise ValueError("mode_schedule_start_update must be non-negative")
         if (
-            args.resume_from_checkpoint is None
+            getattr(args, "resume_from_checkpoint", None) is None
             and getattr(args, "stage_transition_checkpoint", None) is None
             and getattr(args, "discriminator_expansion_checkpoint", None) is None
             and args.mode_schedule_start_update != 0
