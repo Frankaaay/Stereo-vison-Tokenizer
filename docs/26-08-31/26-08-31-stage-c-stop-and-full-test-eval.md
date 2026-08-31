@@ -74,3 +74,26 @@ Formal manifest inventory on `h200-1`:
   and copying viewable cases are initially expected by 15:15-17:30 CST. This is a
   historical-throughput range and must be refreshed from the next user-requested
   live snapshot after the real full-split loop begins.
+
+## Evaluation restart and monitored health
+
+- The first launch failed at 2026-08-31 13:00:05 CST with `exit_code=1` because the
+  repository-external launch script omitted the parser-required
+  `image_gan_weight`, `video_gan_weight`, and `gan_feat_weight` arguments. All ranks
+  exited during argument parsing, before model load or CUDA allocation; no metrics or
+  visualization was produced. This was not a checkpoint, model, CUDA, or memory
+  failure.
+- The output-local launcher now passes all three evaluation-only values as zero. The
+  model topology and weights continue to load strictly from the Stage C checkpoint.
+  After syntax and exact argument-count checks, the stale single `exit_code.txt` was
+  removed and the same tmux task restarted at 2026-08-31 13:28:57 CST.
+- The real 8-GPU LIBERO/DA3 smoke completed successfully and wrote a readable
+  4,011-byte metrics JSON plus two RGB/depth visualization cases. It exercised both
+  single-frame and four-frame model paths. The torchrun ranks then shut down and the
+  launcher advanced automatically to the complete Hy test split.
+- The monitored Hy health sample at 2026-08-31 13:36:49 CST showed `74/1164` exact
+  per-rank batches after 41 seconds (about 2.8 batches/s), approximately 25.38 GiB on
+  every GPU, active compute, no exit marker, and no traceback, OOM, NCCL error, or
+  parser error. The revised initial completion range is 14:00-14:15 CST for all three
+  evaluation bodies and 14:10-14:30 CST for metrics/artifact validation and copying
+  viewable cases, subject to the later LIBERO and LAS2-H throughput.
