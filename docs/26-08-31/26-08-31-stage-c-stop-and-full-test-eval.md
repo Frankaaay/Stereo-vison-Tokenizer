@@ -97,3 +97,19 @@ Formal manifest inventory on `h200-1`:
   parser error. The revised initial completion range is 14:00-14:15 CST for all three
   evaluation bodies and 14:10-14:30 CST for metrics/artifact validation and copying
   viewable cases, subject to the later LIBERO and LAS2-H throughput.
+
+## Completed result
+
+- Completion was verified at 2026-08-31 14:03:37 CST: `exit_code=0`, no tmux or
+  evaluator process remained, all eight GPUs were released, and the strict error
+  scan was empty.
+- Hy test evaluated exactly 223,371 samples per temporal mode. RGB L1 was
+  0.0191616 for mono/single-frame and 0.0248613 for mono/four-frame.
+- LIBERO test evaluated exactly 3,656 camera-expanded samples per temporal mode. RGB
+  L1 was 0.0269678 for mono/single-frame and 0.0322745 for mono/four-frame.
+- UMI test evaluated exactly 69,167 samples per temporal mode. RGB L1 was 0.0378934
+  for stereo/single-frame and 0.0460464 for stereo/four-frame.
+- Every full-test metrics JSON is readable. Each dataset has two deterministic RGB
+  panels, two corresponding depth panels, and a readable `cases.json`.
+- The three result directories were copied to
+  `C:\Users\Frank\Desktop\stereo-stagec-update162500-full-test-eval-20260831`.
