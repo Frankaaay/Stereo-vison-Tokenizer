@@ -55,4 +55,22 @@ Formal manifest inventory on `h200-1`:
 - The first H200 directed test correctly rejected a fixture whose mocked LIBERO root
   did not exist. The fixture was changed to a real temporary directory; production
   fail-closed path validation is unchanged.
-- Full test evaluation: pending code synchronization and H200 directed tests.
+- Implementation commits: `b01344ba4ad34a3e29f66d4b6af89821d72b9e6d`
+  and fixture-only follow-up `75051e71b193290814e5978af2dc7cab2eb5f711`.
+  Both were pushed to `origin/hezhou-las2-h`; H200-1 is clean and fast-forwarded to
+  the latter exact SHA.
+- H200 directed tests: 18/18 passed in the pinned runtime.
+- Full test evaluation started at 2026-08-31 12:59 CST in tmux
+  `stereo-stagec-update162500-full-test-eval-v1`, writing to
+  `/data/home/frank/experiments/stereo-stagec-update162500-full-test-eval-h2001-20260831-v1`.
+  The launcher directly re-verifies generator update 162,500 and runs an 8-GPU,
+  one-batch real LIBERO/DA3 smoke before the complete Hy, LIBERO, and UMI test splits.
+  Each full dataset covers both temporal modes and saves two deterministic RGB/depth
+  cases.
+- The one-shot startup check found the smoke torchrun alive during dependency/model
+  initialization, with no exit marker or immediate error. CUDA contexts had not yet
+  appeared. Based on the prior single-GPU sampled evaluator and the now 8-way exact
+  sharding, the initial full-body ETA is 15:00-17:00 CST; JSON/artifact validation
+  and copying viewable cases are initially expected by 15:15-17:30 CST. This is a
+  historical-throughput range and must be refreshed from the next user-requested
+  live snapshot after the real full-split loop begins.
