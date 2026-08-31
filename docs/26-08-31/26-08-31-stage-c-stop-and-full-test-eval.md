@@ -52,4 +52,7 @@ Formal manifest inventory on `h200-1`:
 - Local tensor test gate is unavailable because the Windows Python environment has
   no Torch; the directed test must run in the pinned H200 runtime after the pushed
   commit is fast-forwarded.
+- The first H200 directed test correctly rejected a fixture whose mocked LIBERO root
+  did not exist. The fixture was changed to a real temporary directory; production
+  fail-closed path validation is unchanged.
 - Full test evaluation: pending code synchronization and H200 directed tests.

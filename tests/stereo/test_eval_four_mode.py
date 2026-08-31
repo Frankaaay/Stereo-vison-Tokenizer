@@ -73,24 +73,25 @@ class FourModeEvaluationTest(unittest.TestCase):
         self.assertNotIn("cache_root", provenance)
 
     def test_libero_mono_dataset_uses_its_manifest_and_decode_contract(self):
-        args = SimpleNamespace(
-            mono_dataset="libero",
-            eval_split="test",
-            single_frame_source_index=0,
-            libero_manifest="libero.jsonl",
-            libero_root_aliases='{"libero": "/dataset"}',
-            lerobot_video_cache_capacity=7,
-            lerobot_maximum_timestamp_error_s=0.05,
-        )
-        with mock.patch.object(
-            evaluation, "LiberoMonoDataset", return_value="libero-dataset"
-        ) as constructor:
-            dataset = evaluation.build_eval_dataset(args, "mono")
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                mono_dataset="libero",
+                eval_split="test",
+                single_frame_source_index=0,
+                libero_manifest="libero.jsonl",
+                libero_root_aliases=f'{{"libero": "{directory}"}}',
+                lerobot_video_cache_capacity=7,
+                lerobot_maximum_timestamp_error_s=0.05,
+            )
+            with mock.patch.object(
+                evaluation, "LiberoMonoDataset", return_value="libero-dataset"
+            ) as constructor:
+                dataset = evaluation.build_eval_dataset(args, "mono")
 
         self.assertEqual(dataset, "libero-dataset")
         constructor.assert_called_once_with(
             "libero.jsonl",
-            {"libero": "/dataset"},
+            {"libero": str(Path(directory).resolve())},
             video_cache_capacity=7,
             maximum_timestamp_error_s=0.05,
             split="test",
