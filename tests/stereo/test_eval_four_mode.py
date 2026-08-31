@@ -72,6 +72,59 @@ class FourModeEvaluationTest(unittest.TestCase):
         self.assertEqual(provenance["sample_count"], 17)
         self.assertNotIn("cache_root", provenance)
 
+    def test_libero_mono_dataset_uses_its_manifest_and_decode_contract(self):
+        args = SimpleNamespace(
+            mono_dataset="libero",
+            eval_split="test",
+            single_frame_source_index=0,
+            libero_manifest="libero.jsonl",
+            libero_root_aliases='{"libero": "/dataset"}',
+            lerobot_video_cache_capacity=7,
+            lerobot_maximum_timestamp_error_s=0.05,
+        )
+        with mock.patch.object(
+            evaluation, "LiberoMonoDataset", return_value="libero-dataset"
+        ) as constructor:
+            dataset = evaluation.build_eval_dataset(args, "mono")
+
+        self.assertEqual(dataset, "libero-dataset")
+        constructor.assert_called_once_with(
+            "libero.jsonl",
+            {"libero": "/dataset"},
+            video_cache_capacity=7,
+            maximum_timestamp_error_s=0.05,
+            split="test",
+            single_frame_source_index=0,
+        )
+
+    def test_fixed_libero_cases_use_suite_identity(self):
+        dataset = SimpleNamespace(
+            records=[
+                {
+                    "root_alias": "libero",
+                    "suite": "libero_10",
+                    "episode_id": f"episode-{index}",
+                }
+                for index in range(2)
+            ],
+            spans=[
+                SimpleNamespace(
+                    record_index=index,
+                    variant="observation.images.image",
+                    first_sample=index * 5,
+                    sample_count=5,
+                )
+                for index in range(2)
+            ],
+        )
+
+        indices = evaluation.fixed_eval_case_indices(
+            dataset, count=2, seed=1234, eye_mode="mono"
+        )
+
+        self.assertEqual(len(indices), 2)
+        self.assertEqual(len({index // 5 for index in indices}), 2)
+
     def test_all_nine_argument_combinations_expand_from_mode_ids(self):
         expected = {
             (eye, temporal): tuple(

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.data import StereoDataModule, _load_root_aliases
-from stereo_tokenizer.pretrain_data import HyLanceMonoDataset
+from stereo_tokenizer.pretrain_data import HyLanceMonoDataset, LiberoMonoDataset
 from stereo_tokenizer.lerobot_data import fixed_episode_subset_indices
 from stereo_tokenizer.mode_sampling import MODE_IDS
 from stereo_tokenizer.modules.relative_depth import (
@@ -111,6 +111,7 @@ def build_parser():
     parser.add_argument(
         "--eval_split", choices=["train", "val", "test"], default="val"
     )
+    parser.add_argument("--mono_dataset", choices=["hy", "libero"], default="hy")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max_batches", type=int, default=None)
     parser.add_argument("--output_json", type=Path, required=True)
@@ -208,9 +209,11 @@ def validate_args(args):
         if args.stereo_lr_error_relative_threshold < 0:
             raise ValueError("relative LR threshold must be non-negative")
     if "mono" in eye_modes:
+        manifest_name = f"{args.mono_dataset}_manifest"
+        aliases_name = f"{args.mono_dataset}_root_aliases"
         required = {
-            "hy_manifest": args.hy_manifest,
-            "hy_root_aliases": args.hy_root_aliases,
+            manifest_name: getattr(args, manifest_name),
+            aliases_name: getattr(args, aliases_name),
             "da3_repo": args.da3_repo,
             "da3_source_sha": args.da3_source_sha,
             "da3_checkpoint": args.da3_checkpoint,
@@ -363,6 +366,7 @@ def preflight_teacher_assets(args, eye_modes):
 def dataset_provenance(args, eye_mode, dataset):
     if eye_mode == "mono":
         return {
+            "dataset_id": getattr(args, "mono_dataset", "hy"),
             "manifest": str(dataset.manifest_path),
             "root_aliases": {
                 alias: str(Path(root).expanduser().resolve())
@@ -500,12 +504,27 @@ def _exact_mono_rank_indices(dataset, rank, world_size):
 
 def build_eval_dataset(args, eye_mode):
     if eye_mode == "mono":
-        return HyLanceMonoDataset(
-            args.hy_manifest,
-            _load_root_aliases(args.hy_root_aliases, "--hy_root_aliases"),
-            split=args.eval_split,
-            single_frame_source_index=args.single_frame_source_index,
-        )
+        common = {
+            "split": args.eval_split,
+            "single_frame_source_index": args.single_frame_source_index,
+        }
+        if args.mono_dataset == "hy":
+            return HyLanceMonoDataset(
+                args.hy_manifest,
+                _load_root_aliases(args.hy_root_aliases, "--hy_root_aliases"),
+                **common,
+            )
+        if args.mono_dataset == "libero":
+            return LiberoMonoDataset(
+                args.libero_manifest,
+                _load_root_aliases(
+                    args.libero_root_aliases, "--libero_root_aliases"
+                ),
+                video_cache_capacity=args.lerobot_video_cache_capacity,
+                maximum_timestamp_error_s=args.lerobot_maximum_timestamp_error_s,
+                **common,
+            )
+        raise ValueError(f"unsupported mono dataset {args.mono_dataset!r}")
     if eye_mode == "stereo":
         data_module = StereoDataModule(args, shuffle=False)
         dataset = data_module._dataset(False, split=args.eval_split)
@@ -558,7 +577,7 @@ def fixed_eval_case_indices(dataset, count, seed, eye_mode):
         key=lambda span: hashlib.sha256(
             (
                 f"{seed}:{dataset.records[span.record_index]['root_alias']}:"
-                f"{dataset.records[span.record_index]['table_name']}:"
+                f"{_mono_record_group(dataset.records[span.record_index])}:"
                 f"{dataset.records[span.record_index]['episode_id']}:"
                 f"{span.variant}"
             ).encode("utf-8")
@@ -568,7 +587,7 @@ def fixed_eval_case_indices(dataset, count, seed, eye_mode):
     for span in ordered[:count]:
         record = dataset.records[span.record_index]
         identity = (
-            f"{record['root_alias']}:{record['table_name']}:"
+            f"{record['root_alias']}:{_mono_record_group(record)}:"
             f"{record['episode_id']}:{span.variant}"
         )
         local_window = int.from_bytes(
@@ -579,6 +598,13 @@ def fixed_eval_case_indices(dataset, count, seed, eye_mode):
         ) % span.sample_count
         indices.append(span.first_sample + local_window)
     return indices
+
+
+def _mono_record_group(record):
+    group = record.get("table_name", record.get("suite"))
+    if not group:
+        raise ValueError("mono evaluation record lacks table_name/suite identity")
+    return group
 
 
 def build_online_teacher(args, eye_mode, device):
