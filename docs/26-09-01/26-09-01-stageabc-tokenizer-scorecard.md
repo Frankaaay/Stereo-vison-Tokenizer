@@ -47,7 +47,12 @@ checkpoint 文件名和 Lightning `global_step` 不作为 generator update 依�
 ## 状态与结果
 
 - 本地静态编译：通过
-- 本地 tensor/CUDA 单测：本机 Python 缺少 Torch，转到固定 H200 runtime 执行
-- H200 smoke：待执行
-- 正式全量评测：待执行
-- 输出、日志、指标、ETA 与结论：启动后补充
+- 本地 tensor/CUDA 单测：本机 Python 缺少 Torch；固定 H200 runtime 的定向单测 27/27 通过
+- 实现 commit：`1056f81c03b305a1f558d015deef496196565980`，已推送；H200-1 clean clone 已 fast-forward 到同一 SHA
+- mono/Libero smoke：单卡 GPU 3、batch 4，`exit_code=0`；四个 source 的指标与 RGB/depth 图均非空；eval 新增显存约 8.5 GiB，结束后完全释放
+- stereo/UMI smoke：单卡 GPU 3、batch 12，`exit_code=0`；LAS2-H、三视角、五个模式、LPIPS/SSIM/SILog/temporal-delta 与四组可视化全部跑通；实测约 4.99 秒/批
+- 正式全量评测于 2026-09-01 14:12:04 CST 启动；tmux：`stereo-stageabc-scorecard-h2001-v1`
+- 输出根：`/data/home/frank/experiments/stereo-tokenizer-stageabc-scorecard-h2001-20260901-v1`
+- 运行顺序：Stage A 的 Hy/LIBERO/UMI → Stage B 的 Hy/LIBERO/UMI → Stage C 的 Hy/LIBERO/UMI；8 GPU、每卡 batch 12、指标 microbatch 4，每个数据集 8 个固定 cases × 4 个 source
+- 初始主体 ETA：2026-09-01 23:30 至 2026-09-02 02:00 CST；完整性校验、聚合报告和桌面产物预计再需 20--40 分钟。依据为正式参数下单卡 UMI smoke 与上一版 8 卡 evaluator 的历史吞吐，待 Stage A Hy 出现真实进度后刷新
+- 启动时直接验证 Stage A `generator_updates=44000`；tmux 存活、既有 WAM 进程仍在、错误扫描为空。正式 ranks 尚处于 torchrun/model 初始化，首个进度 heartbeat 待下一次用户请求时按长任务规则复核
