@@ -8,6 +8,7 @@ import torch
 from stereo_tokenizer import StereoVAE
 from stereo_tokenizer.mode_sampling import (
     MODE_IDS,
+    mode_for_update,
     mode_occurrences_before,
     parse_weight_spec,
 )
