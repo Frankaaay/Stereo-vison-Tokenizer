@@ -82,6 +82,39 @@ permitted.
 
 ## Status
 
-Implementation prepared locally; H100 validation and run identifiers are
-pending. This document will be updated with the exact committed SHA, Slurm job
-IDs, measured throughput, outcome, and final artifact paths.
+The implementation was validated on H100 at exact clean Git SHA
+`672e82206449947e56f02b362aea96aa2da88dee`. The targeted evaluator, VAE,
+LeRobot contract, source guard, fusion, and ablation suite passed 70/70 tests in
+the existing tokenizer environment.
+
+The Stage A checkpoint was transferred to
+`/gpfs/jiuquyun/checkpoints/hezhou/stereo-tokenizer/stagea-20260829/epoch=0-step=44000.ckpt`.
+Its H100 size is 729,457,783 bytes and its SHA256 matches the H200 source:
+`b86f938a584476ee8ce47bdd635432deed08994225dad68ff6283ebd0d27a213`.
+
+The deterministic manifest contains 31,709 usable episodes and 756,863
+windows. Its SHA256 is
+`4cf9019b5a8ed6819acec9cb378bffe8a30adede85e6a2e6881ae38c8b63cb58`;
+the split episode counts are train/val/test = 28,451/1,634/1,624.
+
+The 100-episode data gate stopped the experiment before any GPU job was
+submitted. All 300 requested stereo pairs failed to open with `EACCES`, so the
+valid read and match-pair ratios are both 0%. Metadata interval synchronization
+had zero failures, but no epipolar conclusion is possible without pixels. A
+representative MP4 is owned by `xuancan:ai-users` with ACL `group::r-x` masked
+by `mask::---`; user `hezhou` is in `ai-users` but therefore has no effective
+read permission. This is a data-access failure, not a model result.
+
+H100 artifacts:
+
+- gate JSON SHA256:
+  `e1a7faf3a81dbedd94ba1d5f7eeec76fc9e2ae5291d0677ee9f1286481fb8b07`;
+- self-contained gate HTML SHA256:
+  `5b1b5595f6d61f7b877edfdcd76833d79d50fd227010aba732c69a5d7c381e21`;
+- directory:
+  `/gpfs/jiuquyun/projects/hezhou/experiments/stereo_ablation_h100/assets-20260901-seed1234/data-gate-100`.
+
+The dataset owner must grant effective group read on the MP4 files while
+preserving directory traversal. After that external state change, rerun the
+same gate in a new output directory. Only a passing gate authorizes the 1-GPU
+smoke and subsequent 8-GPU diagnostic/main jobs.
