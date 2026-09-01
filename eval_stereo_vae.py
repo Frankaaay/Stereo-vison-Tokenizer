@@ -1684,11 +1684,11 @@ def evaluate_eye_mode(
                         if condition is None
                         else apply_student_condition(mode_batch, condition)
                     )
-                    model_kwargs = {
-                        "eye_mode": eye_mode,
-                        "temporal_mode": temporal_mode,
-                        "sample_posterior": False,
-                    }
+                    model_kwargs = dict(
+                        eye_mode=eye_mode,
+                        temporal_mode=temporal_mode,
+                        sample_posterior=False,
+                    )
                     if (
                         condition is not None
                         and condition.fusion_scale_override is not None
@@ -1848,11 +1848,11 @@ def evaluate_eye_mode(
                             if condition is None
                             else apply_student_condition(mode_batch, condition)
                         )
-                        model_kwargs = {
-                            "eye_mode": eye_mode,
-                            "temporal_mode": temporal_mode,
-                            "sample_posterior": False,
-                        }
+                        model_kwargs = dict(
+                            eye_mode=eye_mode,
+                            temporal_mode=temporal_mode,
+                            sample_posterior=False,
+                        )
                         if (
                             condition is not None
                             and condition.fusion_scale_override is not None
