@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import torch
 
 import eval_stereo_vae as evaluation
-from scripts.data.build_canonical_v3_stereo_manifest import split_for_episode
+from scripts.data import build_canonical_v3_stereo_manifest as manifest_builder
 from stereo_tokenizer.ablation import (
     AblationCondition,
     apply_student_condition,
@@ -20,11 +20,22 @@ from stereo_tokenizer.ablation import (
 )
 from stereo_tokenizer.canonical_v3_data import (
     EpisodeSpan,
+    SCHEMA,
+    VIDEO_KEYS,
     fixed_episode_window_pairs,
+    window_count,
 )
 
 
 class StereoAblationTest(unittest.TestCase):
+    def test_manifest_builder_and_runtime_share_the_data_contract(self):
+        self.assertEqual(manifest_builder.SCHEMA, SCHEMA)
+        self.assertEqual(manifest_builder.VIDEO_KEYS, VIDEO_KEYS)
+        for length in (1, 10, 11, 22, 1000):
+            self.assertEqual(
+                manifest_builder.window_count(length), window_count(length)
+            )
+
     def test_condition_order_and_shift_expansion_are_deterministic(self):
         conditions = expand_conditions(
             (
@@ -124,7 +135,9 @@ class StereoAblationTest(unittest.TestCase):
         groups = {"train": set(), "val": set(), "test": set()}
         for index in range(10_000):
             identity = f"episode-{index}"
-            groups[split_for_episode(identity, 1234)].add(identity)
+            groups[manifest_builder.split_for_episode(identity, 1234)].add(
+                identity
+            )
         self.assertFalse(groups["train"] & groups["val"])
         self.assertFalse(groups["train"] & groups["test"])
         self.assertFalse(groups["val"] & groups["test"])

@@ -10,7 +10,20 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from stereo_tokenizer.canonical_v3_data import SCHEMA, VIDEO_KEYS, window_count
+
+SCHEMA = "canonical-v3-stereo-ablation-v1"
+VIDEO_KEYS = {
+    ("head", "left"): "observation.images.cam_head_left",
+    ("head", "right"): "observation.images.cam_head_right",
+    ("lefthand", "left"): "observation.images.cam_left_wrist_left",
+    ("lefthand", "right"): "observation.images.cam_left_wrist_right",
+    ("righthand", "left"): "observation.images.cam_right_wrist_left",
+    ("righthand", "right"): "observation.images.cam_right_wrist_right",
+}
+
+
+def window_count(length):
+    return max(0, (int(length) - 1 - 9) // 12 + 1)
 
 
 def sha256_file(path):
