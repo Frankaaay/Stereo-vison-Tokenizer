@@ -1764,12 +1764,19 @@ def evaluate_eye_mode(
         metrics["teacher"] = teacher_metadata
         metrics_by_mode[mode_id] = metrics
     if args.max_batches is None:
-        expected_sample_count = (
-            args.ablation_episode_count * args.ablation_windows_per_episode
-            if conditions
-            else len(dataset)
-        )
         for mode_id, metrics in metrics_by_mode.items():
+            if conditions:
+                expected_sample_count = (
+                    args.ablation_episode_count
+                    * args.ablation_windows_per_episode
+                )
+            elif metrics["sample_count"] != len(dataset):
+                raise RuntimeError(
+                    f"{mode_id} evaluated {metrics['sample_count']} samples, "
+                    f"expected exact split size {len(dataset)}"
+                )
+            else:
+                continue
             if metrics["sample_count"] != expected_sample_count:
                 raise RuntimeError(
                     f"{mode_id} evaluated {metrics['sample_count']} samples, "
@@ -1918,9 +1925,13 @@ def evaluate_eye_mode(
                         filename = (
                             f"case-{slot:02d}{condition_suffix}{suffix}.png"
                         )
-                        depth_filename = (
-                            f"depth-case-{slot:02d}{condition_suffix}{suffix}.png"
-                        )
+                        if condition is None and not suffix:
+                            depth_filename = f"depth-case-{slot:02d}.png"
+                        else:
+                            depth_filename = (
+                                f"depth-case-{slot:02d}{condition_suffix}"
+                                f"{suffix}.png"
+                            )
                         visualization_source_index = (
                             source_index
                             if source_index is not None
