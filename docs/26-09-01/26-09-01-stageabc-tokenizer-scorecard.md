@@ -56,3 +56,38 @@ checkpoint 文件名和 Lightning `global_step` 不作为 generator update 依�
 - 运行顺序：Stage A 的 Hy/LIBERO/UMI → Stage B 的 Hy/LIBERO/UMI → Stage C 的 Hy/LIBERO/UMI；8 GPU、每卡 batch 12、指标 microbatch 4，每个数据集 8 个固定 cases × 4 个 source
 - 初始主体 ETA：2026-09-01 23:30 至 2026-09-02 02:00 CST；完整性校验、聚合报告和桌面产物预计再需 20--40 分钟。依据为正式参数下单卡 UMI smoke 与上一版 8 卡 evaluator 的历史吞吐，待 Stage A Hy 出现真实进度后刷新
 - 启动时直接验证 Stage A `generator_updates=44000`；tmux 存活、既有 WAM 进程仍在、错误扫描为空。正式 ranks 尚处于 torchrun/model 初始化，首个进度 heartbeat 待下一次用户请求时按长任务规则复核
+
+## 用户中止与视角合同 probe
+
+用户发现潜在训练/推理视角合同不一致后，正式全量任务被立即停止。停止后 `stereo-stageabc-scorecard-h2001-v1` tmux、不完整 evaluator ranks 和新增 GPU 显存占用均消失；既有 WAM 训练未被操作，smoke 与部分输出保留。
+
+Stage C 162,500-update checkpoint 加真实 UMI test window 的定向 probe 表明：
+
+- 正式 joint 输入是 `[1,3,2,3,T,256,256]`，但 latent 是 `[1,3,48,1,16,16]`，即每个 view 一个 latent，并非三个 view 合成一个 latent。
+- 当前公共 `encode(..., eye_mode="stereo")` 对 `[1,1,2,3,T,256,256]` 明确报 `ValueError: stereo eye mode requires V=3,E=2`，所以单独 stereo pair 的生产调用合同当前确实不可用。
+- Encoder 的 temporal attention、spatial path 和 stereo fusion 均不跨 view；三个 view 共享权重。用进程内诊断性 V=1 contract 按 view 单独编码后，FP32 下 single/four-frame 的 latent、RGB 和 depth 都与 joint 调用对应 view 在 `atol=rtol=1e-4` 内一致。latent 最大绝对差约 `3.7e-6`--`5.6e-6`，RGB 最大差约 `3.8e-6`--`3.1e-5`。
+- BF16 改变 batch cardinality 时均值差很小，但存在局部较大的最大差；这属于低精度 kernel 数值路径和当前重建异常值的放大，不能误判为跨 view 信息融合。
+
+结论：核心网络语义允许每个 stereo pair 独立编码；真正缺口是 API 没有接收 `V=1` 和显式 `view_index/search_radius` 的合同及回归测试。生产修复前不能声称现有 checkpoint 已支持下游逐 pair 调用。
+
+## Hy wrist 快速泛化 probe
+
+按用户要求不跑全量，只选 4 个固定 Hy test episode。对每个 episode 同步读取 `cam_high`、`cam_left_wrist`、`cam_right_wrist`，分别测试 window source 0/1/2/3 的 single-frame 以及 four-frame。使用 Stage C 162,500-update checkpoint；不运行 DA3，指标仅覆盖 RGB。输出位于：
+
+`/data/home/frank/experiments/stereo-tokenizer-stageabc-scorecard-h2001-20260901-v1/hy-wrist-quick-cases`
+
+并复制到：
+
+`C:\Users\Frank\Desktop\stereo-tokenizer-hy-wrist-quick-cases-20260901`
+
+四个 single-frame source 的范围：
+
+| Camera | RGB L1 | LPIPS | SSIM |
+|---|---:|---:|---:|
+| head | 0.01794--0.01814 | 0.04724--0.04852 | 0.88955--0.89227 |
+| left wrist | 0.04231--0.04345 | 0.14209--0.14624 | 0.75643--0.76310 |
+| right wrist | 0.05551--0.05995 | 0.15063--0.15430 | 0.75814--0.76186 |
+
+four-frame 分别为：head `L1=0.02362, LPIPS=0.04919, SSIM=0.88767`；left wrist `0.04718, 0.15002, 0.74141`；right wrist `0.05906, 0.16461, 0.74933`。
+
+腕部相机相对 head 的退化远大于 source 0/1/2/3 间差异，说明主要问题是训练只覆盖 Hy `cam_high` 带来的相机域偏移。可视化抽查与指标一致：腕部细节更模糊，并有更明显的局部高饱和彩色伪影；head 也存在物体区域的局部彩色伪影，支持继续调查 GAN 阶段异常值的必要性。该结论仅来自 4 个固定 case，用于快速方向判断，不替代全 split 统计。
