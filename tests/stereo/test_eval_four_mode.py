@@ -151,6 +151,30 @@ class FourModeEvaluationTest(unittest.TestCase):
             MODE_IDS,
         )
 
+    def test_multiple_single_frame_sources_expand_without_changing_four_frame(self):
+        args = Namespace(
+            eval_eye_mode="both",
+            eval_temporal_mode="both",
+            single_frame_source_index=0,
+            single_frame_source_indices=[0, 1, 2, 3],
+        )
+
+        self.assertEqual(
+            evaluation.requested_mode_ids(args),
+            (
+                "mono/single_frame/source_0",
+                "mono/single_frame/source_1",
+                "mono/single_frame/source_2",
+                "mono/single_frame/source_3",
+                "mono/four_frame",
+                "stereo/single_frame/source_0",
+                "stereo/single_frame/source_1",
+                "stereo/single_frame/source_2",
+                "stereo/single_frame/source_3",
+                "stereo/four_frame",
+            ),
+        )
+
     @staticmethod
     def _depth_batch():
         shape = (1, 1, 1, 4, 8, 8)

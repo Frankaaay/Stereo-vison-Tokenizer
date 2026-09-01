@@ -13,6 +13,7 @@ import torch.distributed as dist
 from PIL import Image, ImageDraw
 from torch.utils import data as torch_data
 from torch.utils.data import default_collate
+from torchmetrics.functional.image import structural_similarity_index_measure
 from tqdm import tqdm
 
 from stereo_tokenizer import StereoVAE
@@ -86,21 +87,37 @@ def requested_temporal_modes(args):
     return (args.eval_temporal_mode,)
 
 
+def requested_single_frame_source_indices(args):
+    configured = getattr(args, "single_frame_source_indices", None)
+    if configured is None:
+        return (int(getattr(args, "single_frame_source_index", 0)),)
+    return tuple(int(index) for index in configured)
+
+
+def evaluation_specs(args, eye_mode, temporal_modes=None):
+    source_indices = requested_single_frame_source_indices(args)
+    multiple_sources = len(source_indices) > 1
+    specs = []
+    if temporal_modes is None:
+        temporal_modes = requested_temporal_modes(args)
+    for temporal_mode in temporal_modes:
+        if temporal_mode == "single_frame":
+            for source_index in source_indices:
+                mode_id = f"{eye_mode}/single_frame"
+                if multiple_sources:
+                    mode_id += f"/source_{source_index}"
+                specs.append((mode_id, temporal_mode, source_index))
+        else:
+            specs.append((f"{eye_mode}/four_frame", temporal_mode, None))
+    return tuple(specs)
+
+
 def requested_mode_ids(args):
-    eyes = set(requested_eye_modes(args))
-    temporal_modes = set(requested_temporal_modes(args))
-    mode_ids = tuple(
+    return tuple(
         mode_id
-        for mode_id in MODE_IDS
-        if mode_id.split("/", maxsplit=1)[0] in eyes
-        and mode_id.split("/", maxsplit=1)[1] in temporal_modes
+        for eye_mode in requested_eye_modes(args)
+        for mode_id, _, _ in evaluation_specs(args, eye_mode)
     )
-    expected_count = len(eyes) * len(temporal_modes)
-    if len(mode_ids) != expected_count or any(
-        mode_id not in MODE_IDS for mode_id in mode_ids
-    ):
-        raise ValueError("requested evaluation modes do not match MODE_IDS")
-    return mode_ids
 
 
 def build_parser():
@@ -169,6 +186,10 @@ def build_parser():
     parser.add_argument("--visualization_dir", type=Path, default=None)
     parser.add_argument("--num_visualizations", type=int, default=0)
     parser.add_argument(
+        "--single_frame_source_indices", type=int, nargs="+", default=None
+    )
+    parser.add_argument("--metric_frame_microbatch", type=int, default=24)
+    parser.add_argument(
         "--eval_eye_mode",
         choices=["mono", "stereo", "both"],
         default="stereo",
@@ -184,6 +205,18 @@ def build_parser():
 def validate_args(args):
     requested_mode_ids(args)
     eye_modes = requested_eye_modes(args)
+    source_indices = requested_single_frame_source_indices(args)
+    if not source_indices or len(set(source_indices)) != len(source_indices):
+        raise ValueError("single-frame source indices must be non-empty and unique")
+    if any(not 0 <= index < args.stereo_num_frames for index in source_indices):
+        raise ValueError("single-frame source indices must be in [0, 3]")
+    if (
+        getattr(args, "single_frame_source_indices", None) is not None
+        and "single_frame" not in requested_temporal_modes(args)
+    ):
+        raise ValueError("source index list requires single-frame evaluation")
+    if getattr(args, "metric_frame_microbatch", 24) < 1:
+        raise ValueError("--metric_frame_microbatch must be positive")
     if "stereo" in eye_modes:
         geometry = {
             "stereo_disparity_min_px": args.stereo_disparity_min_px,
@@ -1028,8 +1061,30 @@ def empty_accumulator(device, view_count):
     return {
         "sample_count": torch.zeros((), dtype=torch.long, device=device),
         "rgb_abs_sum": torch.zeros((), dtype=torch.float64, device=device),
+        "rgb_sq_sum": torch.zeros((), dtype=torch.float64, device=device),
         "rgb_count": torch.zeros((), dtype=torch.long, device=device),
+        "rgb_frame_psnr_sum": torch.zeros((), dtype=torch.float64, device=device),
+        "rgb_ssim_sum": torch.zeros((), dtype=torch.float64, device=device),
+        "rgb_lpips_sum": torch.zeros((), dtype=torch.float64, device=device),
+        "rgb_frame_count": torch.zeros((), dtype=torch.long, device=device),
+        "rgb_lpips_frame_count": torch.zeros(
+            (), dtype=torch.long, device=device
+        ),
+        "temporal_delta_abs_sum": torch.zeros(
+            (), dtype=torch.float64, device=device
+        ),
+        "temporal_delta_count": torch.zeros((), dtype=torch.long, device=device),
+        "temporal_delta_lpips_sum": torch.zeros(
+            (), dtype=torch.float64, device=device
+        ),
+        "temporal_pair_count": torch.zeros((), dtype=torch.long, device=device),
+        "temporal_lpips_pair_count": torch.zeros(
+            (), dtype=torch.long, device=device
+        ),
         "relative_log_abs_sum": torch.zeros(
+            view_count, dtype=torch.float64, device=device
+        ),
+        "relative_log_sum": torch.zeros(
             view_count, dtype=torch.float64, device=device
         ),
         "valid_count": torch.zeros(view_count, dtype=torch.long, device=device),
@@ -1039,18 +1094,99 @@ def empty_accumulator(device, view_count):
     }
 
 
-def update_metrics(accumulator, batch, output, relative_depth_epsilon):
-    rgb_target = batch["video"][:, :, 0]
+def _flatten_rgb_frames(video):
+    return video.permute(0, 1, 3, 2, 4, 5).reshape(-1, 3, *video.shape[-2:])
+
+
+def _lpips_sum(perceptual_model, prediction, target, microbatch):
+    if perceptual_model is None:
+        raise RuntimeError("LPIPS evaluation requires the checkpoint perceptual model")
+    total = prediction.new_zeros((), dtype=torch.float64)
+    for start in range(0, len(prediction), microbatch):
+        stop = min(start + microbatch, len(prediction))
+        total += perceptual_model(
+            prediction[start:stop].float(), target[start:stop].float()
+        ).double().sum()
+    return total
+
+
+def _ssim_sum(prediction, target, microbatch):
+    total = prediction.new_zeros((), dtype=torch.float64)
+    for start in range(0, len(prediction), microbatch):
+        stop = min(start + microbatch, len(prediction))
+        total += structural_similarity_index_measure(
+            prediction[start:stop].add(0.5).clamp(0, 1),
+            target[start:stop].add(0.5).clamp(0, 1),
+            data_range=1.0,
+            reduction="sum",
+        ).double()
+    return total
+
+
+def update_metrics(
+    accumulator,
+    batch,
+    output,
+    relative_depth_epsilon,
+    perceptual_model=None,
+    metric_frame_microbatch=24,
+):
+    rgb_target = batch["video"][:, :, 0].float()
+    rgb_prediction = output.rgb.float()
     expected_views = int(accumulator["valid_count"].numel())
     if int(rgb_target.shape[1]) != expected_views:
         raise ValueError(
             f"evaluation accumulator expects {expected_views} views, "
             f"batch contains {int(rgb_target.shape[1])}"
         )
-    rgb_error = (output.rgb - rgb_target).abs()
+    rgb_error = (rgb_prediction - rgb_target).abs()
     accumulator["sample_count"] += rgb_target.shape[0]
     accumulator["rgb_abs_sum"] += rgb_error.double().sum()
+    accumulator["rgb_sq_sum"] += rgb_error.square().double().sum()
     accumulator["rgb_count"] += rgb_error.numel()
+
+    prediction_frames = _flatten_rgb_frames(rgb_prediction)
+    target_frames = _flatten_rgb_frames(rgb_target)
+    frame_mse = (prediction_frames - target_frames).square().mean((1, 2, 3))
+    accumulator["rgb_frame_psnr_sum"] += (
+        -10.0 * torch.log10(frame_mse.clamp_min(1e-12))
+    ).double().sum()
+    accumulator["rgb_ssim_sum"] += _ssim_sum(
+        prediction_frames,
+        target_frames,
+        metric_frame_microbatch,
+    )
+    if perceptual_model is not None:
+        accumulator["rgb_lpips_sum"] += _lpips_sum(
+            perceptual_model,
+            prediction_frames * 2.0,
+            target_frames * 2.0,
+            metric_frame_microbatch,
+        )
+        accumulator["rgb_lpips_frame_count"] += len(prediction_frames)
+    accumulator["rgb_frame_count"] += len(prediction_frames)
+
+    if rgb_target.shape[3] > 1:
+        target_delta = rgb_target[:, :, :, 1:] - rgb_target[:, :, :, :-1]
+        prediction_delta = (
+            rgb_prediction[:, :, :, 1:] - rgb_prediction[:, :, :, :-1]
+        )
+        delta_error = (prediction_delta - target_delta).abs()
+        accumulator["temporal_delta_abs_sum"] += delta_error.double().sum()
+        accumulator["temporal_delta_count"] += delta_error.numel()
+        prediction_delta_frames = _flatten_rgb_frames(prediction_delta)
+        target_delta_frames = _flatten_rgb_frames(target_delta)
+        if perceptual_model is not None:
+            accumulator["temporal_delta_lpips_sum"] += _lpips_sum(
+                perceptual_model,
+                prediction_delta_frames,
+                target_delta_frames,
+                metric_frame_microbatch,
+            )
+            accumulator["temporal_lpips_pair_count"] += len(
+                prediction_delta_frames
+            )
+        accumulator["temporal_pair_count"] += len(prediction_delta_frames)
 
     valid = batch["valid_mask"]
     target = _relative_target_from_batch(batch, relative_depth_epsilon)
@@ -1061,6 +1197,9 @@ def update_metrics(accumulator, batch, output, relative_depth_epsilon):
     reduction_dims = (0, 2, 3, 4, 5)
     accumulator["relative_log_abs_sum"] += (
         relative_error.abs().double().masked_fill(~valid, 0).sum(dim=reduction_dims)
+    )
+    accumulator["relative_log_sum"] += (
+        relative_error.double().masked_fill(~valid, 0).sum(dim=reduction_dims)
     )
     accumulator["valid_count"] += valid.sum(dim=reduction_dims)
     accumulator["relative_log_sq_sum"] += (
@@ -1084,9 +1223,51 @@ def finalize_metrics(accumulator, view_names):
         "rgb_l1": float(
             (accumulator["rgb_abs_sum"] / accumulator["rgb_count"]).item()
         ),
+        "rgb_psnr_db_global": float(
+            (
+                -10.0
+                * torch.log10(
+                    accumulator["rgb_sq_sum"]
+                    / accumulator["rgb_count"]
+                )
+            ).item()
+        ),
+        "rgb_psnr_db_frame_mean": float(
+            (
+                accumulator["rgb_frame_psnr_sum"]
+                / accumulator["rgb_frame_count"]
+            ).item()
+        ),
+        "rgb_ssim_frame_mean": float(
+            (
+                accumulator["rgb_ssim_sum"]
+                / accumulator["rgb_frame_count"]
+            ).item()
+        ),
         "valid_pixels": int(accumulator["valid_count"].sum().item()),
         "views": {},
     }
+    if accumulator["rgb_lpips_frame_count"].item():
+        result["rgb_lpips_frame_mean"] = float(
+            (
+                accumulator["rgb_lpips_sum"]
+                / accumulator["rgb_lpips_frame_count"]
+            ).item()
+        )
+    if accumulator["temporal_pair_count"].item():
+        result["temporal_delta_l1"] = float(
+            (
+                accumulator["temporal_delta_abs_sum"]
+                / accumulator["temporal_delta_count"]
+            ).item()
+        )
+    if accumulator["temporal_lpips_pair_count"].item():
+        result["temporal_delta_lpips_frame_mean"] = float(
+            (
+                accumulator["temporal_delta_lpips_sum"]
+                / accumulator["temporal_lpips_pair_count"]
+            ).item()
+        )
     for view_index, view_name in enumerate(view_names):
         result["views"][view_name] = {
             "valid_pixels": int(accumulator["valid_count"][view_index].item()),
@@ -1100,6 +1281,19 @@ def finalize_metrics(accumulator, view_names):
                 torch.sqrt(
                     accumulator["relative_log_sq_sum"][view_index]
                     / valid_count[view_index]
+                ).item()
+            ),
+            "relative_log_silog": float(
+                torch.sqrt(
+                    torch.clamp_min(
+                        accumulator["relative_log_sq_sum"][view_index]
+                        / valid_count[view_index]
+                        - (
+                            accumulator["relative_log_sum"][view_index]
+                            / valid_count[view_index]
+                        ).square(),
+                        0.0,
+                    )
                 ).item()
             ),
         }
@@ -1120,9 +1314,10 @@ def evaluate_eye_mode(
     """Evaluate one native data/teacher contract across requested time modes."""
     loader = exact_eval_loader(args, dataset, eye_mode, rank, world_size)
     view_names = MONO_VIEW_NAMES if eye_mode == "mono" else STEREO_VIEW_NAMES
+    specs = evaluation_specs(args, eye_mode, temporal_modes)
     accumulators = {
-        temporal_mode: empty_accumulator(device, len(view_names))
-        for temporal_mode in temporal_modes
+        mode_id: empty_accumulator(device, len(view_names))
+        for mode_id, _, _ in specs
     }
     with torch.inference_mode():
         progress = tqdm(loader, disable=rank != 0, desc=eye_mode)
@@ -1136,11 +1331,11 @@ def evaluate_eye_mode(
                 for key, value in batch.items()
             }
             attach_online_targets(args, eye_mode, teacher, tensor_batch)
-            for temporal_mode in temporal_modes:
+            for mode_id, temporal_mode, source_index in specs:
                 mode_batch = batch_for_temporal_mode(
                     tensor_batch,
                     temporal_mode,
-                    args.single_frame_source_index,
+                    source_index,
                 )
                 with torch.autocast(
                     device_type=device.type,
@@ -1154,20 +1349,21 @@ def evaluate_eye_mode(
                         sample_posterior=False,
                     )
                 update_metrics(
-                    accumulators[temporal_mode],
+                    accumulators[mode_id],
                     mode_batch,
                     output,
                     args.relative_depth_epsilon,
+                    perceptual_model=getattr(model, "perceptual_model", None),
+                    metric_frame_microbatch=getattr(
+                        args, "metric_frame_microbatch", 24
+                    ),
                 )
     for accumulator in accumulators.values():
         reduce_accumulator(accumulator, world_size)
     dataset_metadata = dataset_provenance(args, eye_mode, dataset)
     teacher_metadata = teacher_provenance(args, eye_mode)
     metrics_by_mode = {}
-    for temporal_mode, accumulator in accumulators.items():
-        mode_id = f"{eye_mode}/{temporal_mode}"
-        if mode_id not in MODE_IDS:
-            raise ValueError(f"unsupported mode ID {mode_id!r}")
+    for mode_id, accumulator in accumulators.items():
         metrics = finalize_metrics(accumulator, view_names)
         metrics["dataset"] = dataset_metadata
         metrics["teacher"] = teacher_metadata
@@ -1205,60 +1401,91 @@ def evaluate_eye_mode(
                 }
                 attach_online_targets(args, eye_mode, teacher, tensor_batch)
                 outputs = {}
-                for temporal_mode in temporal_modes:
+                for mode_id, temporal_mode, source_index in specs:
                     mode_batch = batch_for_temporal_mode(
                         tensor_batch,
                         temporal_mode,
-                        args.single_frame_source_index,
+                        source_index,
                     )
                     with torch.autocast(
                         device_type=device.type,
                         dtype=torch.bfloat16,
                         enabled=args.bf16,
                     ):
-                        outputs[temporal_mode] = model(
+                        outputs[mode_id] = model(
                             mode_batch["video"],
                             eye_mode=eye_mode,
                             temporal_mode=temporal_mode,
                             sample_posterior=False,
                         )
-                filename = f"case-{slot:02d}.png"
-                depth_filename = f"depth-case-{slot:02d}.png"
-                save_case_visualization(
-                    eye_directory / filename,
-                    tensor_batch["sample_id"][0],
-                    tensor_batch["episode_id"][0],
-                    tensor_batch["video"],
-                    outputs,
-                    view_names,
-                    args.single_frame_source_index,
+                four_output = outputs.get(f"{eye_mode}/four_frame")
+                source_indices = (
+                    requested_single_frame_source_indices(args)
+                    if "single_frame" in temporal_modes
+                    else (None,)
                 )
-                save_depth_case_visualization(
-                    eye_directory / depth_filename,
-                    tensor_batch,
-                    outputs,
-                    args.single_frame_source_index,
-                    args.relative_depth_epsilon,
-                    view_names,
-                )
-                local_records.append(
-                    {
-                        "slot": slot,
-                        "eye_mode": eye_mode,
-                        "temporal_modes": list(temporal_modes),
-                        "sample_id": tensor_batch["sample_id"][0],
-                        "episode_id": tensor_batch["episode_id"][0],
-                        "file": f"{eye_mode}/{filename}",
-                        "depth_file": f"{eye_mode}/{depth_filename}",
-                    }
-                )
+                for source_index in source_indices:
+                    display_outputs = {}
+                    if source_index is not None:
+                        single_key = f"{eye_mode}/single_frame"
+                        if len(source_indices) > 1:
+                            single_key += f"/source_{source_index}"
+                        display_outputs["single_frame"] = outputs[single_key]
+                    if four_output is not None:
+                        display_outputs["four_frame"] = four_output
+                    suffix = (
+                        f"-source-{source_index}"
+                        if source_index is not None and len(source_indices) > 1
+                        else ""
+                    )
+                    filename = f"case-{slot:02d}{suffix}.png"
+                    depth_filename = f"depth-case-{slot:02d}{suffix}.png"
+                    visualization_source_index = (
+                        source_index
+                        if source_index is not None
+                        else int(args.single_frame_source_index)
+                    )
+                    save_case_visualization(
+                        eye_directory / filename,
+                        tensor_batch["sample_id"][0],
+                        tensor_batch["episode_id"][0],
+                        tensor_batch["video"],
+                        display_outputs,
+                        view_names,
+                        visualization_source_index,
+                    )
+                    save_depth_case_visualization(
+                        eye_directory / depth_filename,
+                        tensor_batch,
+                        display_outputs,
+                        visualization_source_index,
+                        args.relative_depth_epsilon,
+                        view_names,
+                    )
+                    local_records.append(
+                        {
+                            "slot": slot,
+                            "eye_mode": eye_mode,
+                            "temporal_modes": list(temporal_modes),
+                            "source_frame_index": source_index,
+                            "sample_id": tensor_batch["sample_id"][0],
+                            "episode_id": tensor_batch["episode_id"][0],
+                            "file": f"{eye_mode}/{filename}",
+                            "depth_file": f"{eye_mode}/{depth_filename}",
+                        }
+                    )
         if world_size > 1:
             gathered = [None] * world_size if rank == 0 else None
             dist.gather_object(local_records, gathered, dst=0)
             if rank == 0:
                 visualization_records = sorted(
                     (item for part in gathered for item in part),
-                    key=lambda item: item["slot"],
+                    key=lambda item: (
+                        item["slot"],
+                        -1
+                        if item["source_frame_index"] is None
+                        else item["source_frame_index"],
+                    ),
                 )
         else:
             visualization_records = local_records
@@ -1289,6 +1516,9 @@ def build_evaluation_result(
         "posterior": "mean",
         "requested_modes": list(mode_ids),
         "source_frame_index": args.single_frame_source_index,
+        "source_frame_indices": list(
+            requested_single_frame_source_indices(args)
+        ),
         "precision": "bf16" if args.bf16 else "fp32",
         "world_size": world_size,
         "modes": metrics_by_mode,
@@ -1318,6 +1548,11 @@ def main():
 
     device, rank, world_size = initialize_distributed(args)
     model = load_model(args, device)
+    if model.perceptual_model is None:
+        raise RuntimeError(
+            "quantitative evaluation requires checkpoint LPIPS weights; "
+            "perceptual_model is unavailable"
+        )
     if args.num_visualizations:
         if rank == 0:
             args.visualization_dir.mkdir(parents=True, exist_ok=False)
