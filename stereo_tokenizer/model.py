@@ -677,6 +677,7 @@ class StereoVAE(pl.LightningModule):
         eye_mode: EyeMode,
         temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
+        fusion_scale_override: Optional[float] = None,
     ) -> StereoEncodeOutput:
         with profile_region("stereo/encoder/input_validation"):
             self._validate_video(
@@ -689,6 +690,7 @@ class StereoVAE(pl.LightningModule):
                 video,
                 eye_mode=eye_mode,
                 temporal_mode=temporal_mode,
+                fusion_scale_override=fusion_scale_override,
             )
         with profile_region("stereo/encoder/posterior_projection"):
             parameters = self.posterior_projection(encoded.features)
@@ -741,12 +743,14 @@ class StereoVAE(pl.LightningModule):
         eye_mode: EyeMode,
         temporal_mode: TemporalMode,
         sample_posterior: Optional[bool] = None,
+        fusion_scale_override: Optional[float] = None,
     ) -> StereoVAEOutput:
         encoded = self.encode(
             video,
             eye_mode=eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=sample_posterior,
+            fusion_scale_override=fusion_scale_override,
         )
         decoded = self.decode(encoded.latent, temporal_mode=temporal_mode)
         return StereoVAEOutput(
@@ -1719,6 +1723,7 @@ class StereoEncoder(nn.Module):
         *,
         eye_mode: EyeMode,
         temporal_mode: TemporalMode,
+        fusion_scale_override: Optional[float] = None,
     ) -> _StereoEncoderOutput:
         """Encode one or four synchronized frames into one temporal latent slot.
 
@@ -1772,7 +1777,11 @@ class StereoEncoder(nn.Module):
         fusion_output: Optional[StereoFusionOutput]
         if eye_mode == "stereo":
             with profile_region("stereo/encoder/stereo_fusion"):
-                fusion_output = self.stereo_fusion(left, frame_features[:, :, 1])
+                fusion_output = self.stereo_fusion(
+                    left,
+                    frame_features[:, :, 1],
+                    fusion_scale_override=fusion_scale_override,
+                )
             fused = fusion_output.features
         else:
             fusion_output = None

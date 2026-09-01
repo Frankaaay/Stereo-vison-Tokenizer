@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 from typing import Sequence
 
 import torch
@@ -103,7 +104,11 @@ class StereoFusion(nn.Module):
         return candidate_x, valid_mask
 
     def forward(
-        self, left: torch.Tensor, right: torch.Tensor
+        self,
+        left: torch.Tensor,
+        right: torch.Tensor,
+        *,
+        fusion_scale_override: float | None = None,
     ) -> StereoFusionOutput:
         if left.shape != right.shape:
             raise ValueError(
@@ -167,7 +172,20 @@ class StereoFusion(nn.Module):
 
         # Sharpness is a diagnostic gate, not a trainable shortcut for making
         # the attention distribution artificially peaky.
-        fused = left + self.alpha * confidence.detach()[..., None] * delta
+        fusion_scale = (
+            1.0
+            if fusion_scale_override is None
+            else float(fusion_scale_override)
+        )
+        if not math.isfinite(fusion_scale):
+            raise ValueError("fusion_scale_override must be finite")
+        fused = (
+            left
+            + fusion_scale
+            * self.alpha
+            * confidence.detach()[..., None]
+            * delta
+        )
         return StereoFusionOutput(
             features=fused,
             attention=attention,

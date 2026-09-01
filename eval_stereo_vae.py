@@ -2,6 +2,9 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
+import tempfile
+import time
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Mapping
@@ -17,6 +20,19 @@ from torchmetrics.functional.image import structural_similarity_index_measure
 from tqdm import tqdm
 
 from stereo_tokenizer import StereoVAE
+from stereo_tokenizer.ablation import (
+    BASE_CONDITIONS,
+    apply_student_condition,
+    expand_conditions,
+    paired_sample_records,
+    teacher_target_checksum,
+    write_ablation_report,
+)
+from stereo_tokenizer.canonical_v3_data import (
+    CanonicalV3AblationSubset,
+    CanonicalV3StereoDataset,
+    fixed_episode_window_pairs,
+)
 from stereo_tokenizer.data import StereoDataModule, _load_root_aliases
 from stereo_tokenizer.pretrain_data import HyLanceMonoDataset, LiberoMonoDataset
 from stereo_tokenizer.lerobot_data import fixed_episode_subset_indices
@@ -120,6 +136,31 @@ def requested_mode_ids(args):
     )
 
 
+def requested_ablation_conditions(args):
+    names = getattr(args, "ablation_condition", None)
+    if names is None:
+        return ()
+    return expand_conditions(
+        names,
+        getattr(args, "right_shift_px", (-32, -16, 16, 32)),
+    )
+
+
+def requested_evaluation_keys(args):
+    conditions = requested_ablation_conditions(args)
+    if not conditions:
+        return requested_mode_ids(args)
+    keys = []
+    for condition in conditions:
+        for mode_id in requested_mode_ids(args):
+            if condition.kind == "time_reverse" and not mode_id.startswith(
+                "stereo/four_frame"
+            ):
+                continue
+            keys.append(f"{condition.name}/{mode_id}")
+    return tuple(keys)
+
+
 def build_parser():
     parser = argparse.ArgumentParser()
     parser = StereoVAE.add_model_specific_args(parser)
@@ -199,12 +240,36 @@ def build_parser():
         choices=["single_frame", "four_frame", "both"],
         required=True,
     )
+    parser.add_argument(
+        "--ablation-condition",
+        nargs="+",
+        choices=BASE_CONDITIONS,
+        default=None,
+        help="Run deterministic student-only stereo input interventions.",
+    )
+    parser.add_argument(
+        "--right-shift-px",
+        type=int,
+        nargs="+",
+        default=(-32, -16, 16, 32),
+    )
+    parser.add_argument("--teacher-cache-dir", type=Path, default=None)
+    parser.add_argument("--paired-output-dir", type=Path, default=None)
+    parser.add_argument("--report-dir", type=Path, default=None)
+    parser.add_argument("--canonical-v3-manifest", type=Path, default=None)
+    parser.add_argument("--canonical-v3-root", type=Path, default=None)
+    parser.add_argument("--canonical-v3-pixel-mask", type=Path, default=None)
+    parser.add_argument("--data-gate-json", type=Path, default=None)
+    parser.add_argument("--ablation-episode-count", type=int, default=None)
+    parser.add_argument("--ablation-windows-per-episode", type=int, default=None)
+    parser.add_argument("--bootstrap-iterations", type=int, default=10_000)
     return parser
 
 
 def validate_args(args):
     requested_mode_ids(args)
     eye_modes = requested_eye_modes(args)
+    ablation_conditions = requested_ablation_conditions(args)
     source_indices = requested_single_frame_source_indices(args)
     if not source_indices or len(set(source_indices)) != len(source_indices):
         raise ValueError("single-frame source indices must be non-empty and unique")
@@ -276,13 +341,18 @@ def validate_args(args):
             else args.foundation_stereo_checkpoint_sha256
         )
         required = {
-            "lerobot_episode_manifest": args.lerobot_episode_manifest,
-            "lerobot_dataset_root": args.lerobot_dataset_root,
             "lerobot_rectification_audit_sha256": (
                 args.lerobot_rectification_audit_sha256
             ),
             "teacher_checkpoint_sha256": teacher_sha256,
         }
+        if getattr(args, "canonical_v3_manifest", None) is None:
+            required.update(
+                {
+                    "lerobot_episode_manifest": args.lerobot_episode_manifest,
+                    "lerobot_dataset_root": args.lerobot_dataset_root,
+                }
+            )
         if args.foundation_stereo_backend == "las2_h":
             required.update(
                 {
@@ -359,6 +429,61 @@ def validate_args(args):
         )
     if args.output_json.exists():
         raise FileExistsError(f"refusing to overwrite {args.output_json}")
+    if ablation_conditions:
+        if eye_modes != ("stereo",):
+            raise ValueError("stereo input ablation requires --eval_eye_mode stereo")
+        required = {
+            "teacher_cache_dir": getattr(args, "teacher_cache_dir", None),
+            "paired_output_dir": getattr(args, "paired_output_dir", None),
+            "report_dir": getattr(args, "report_dir", None),
+            "canonical_v3_manifest": getattr(args, "canonical_v3_manifest", None),
+            "canonical_v3_root": getattr(args, "canonical_v3_root", None),
+            "data_gate_json": getattr(args, "data_gate_json", None),
+            "ablation_episode_count": getattr(
+                args, "ablation_episode_count", None
+            ),
+            "ablation_windows_per_episode": getattr(
+                args, "ablation_windows_per_episode", None
+            ),
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "stereo input ablation requires " + ", ".join(missing)
+            )
+        if args.ablation_episode_count < 2:
+            raise ValueError("--ablation-episode-count must be at least 2")
+        if args.ablation_windows_per_episode < 1:
+            raise ValueError("--ablation-windows-per-episode must be positive")
+        if args.num_visualizations > (
+            args.ablation_episode_count * args.ablation_windows_per_episode
+        ):
+            raise ValueError(
+                "visualization count exceeds the deterministic ablation subset"
+            )
+        if args.bootstrap_iterations < 1:
+            raise ValueError("--bootstrap-iterations must be positive")
+        if getattr(args, "gan_enabled", False):
+            raise ValueError("stereo mechanism ablation forbids GAN evaluation")
+        for path in (args.paired_output_dir, args.report_dir):
+            if path.exists():
+                raise FileExistsError(f"refusing to overwrite {path}")
+        for path in (
+            args.canonical_v3_manifest,
+            args.canonical_v3_root,
+            args.data_gate_json,
+        ):
+            if not path.exists():
+                raise FileNotFoundError(path)
+        gate = json.loads(args.data_gate_json.read_text(encoding="utf-8"))
+        if gate.get("result") != "pass":
+            raise ValueError("canonical-v3 data gate did not pass")
+        gate_sha256 = sha256_file(args.data_gate_json)
+        if gate_sha256 != args.lerobot_rectification_audit_sha256:
+            raise ValueError(
+                "data gate SHA256 disagrees with "
+                "--lerobot_rectification_audit_sha256"
+            )
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"requested {args.device}, but CUDA is unavailable")
     if not 0 <= args.single_frame_source_index < args.stereo_num_frames:
@@ -407,6 +532,21 @@ def dataset_provenance(args, eye_mode, dataset):
             },
             "sample_count": len(dataset),
             "video_contract": "[B,1,1,3,T,H,W]",
+        }
+    if getattr(dataset, "is_canonical_v3_ablation", False):
+        return {
+            "dataset_id": "umi-canonical-v3",
+            "manifest": str(dataset.manifest_path),
+            "dataset_root": str(dataset.dataset_root),
+            "pixel_mask": str(dataset.pixel_mask_path),
+            "split": args.eval_split,
+            "sample_count": len(dataset),
+            "rectification_audit_sha256": (
+                args.lerobot_rectification_audit_sha256
+            ),
+            "video_contract": "[B,3,2,3,T,256,256]",
+            "geometry_metric": "per_sample_per_view_scale_free_relative_log",
+            "camera_scale_limitation": "fx/baseline not published",
         }
     return {
         "manifest": str(dataset.manifest_path),
@@ -559,6 +699,21 @@ def build_eval_dataset(args, eye_mode):
             )
         raise ValueError(f"unsupported mono dataset {args.mono_dataset!r}")
     if eye_mode == "stereo":
+        if getattr(args, "canonical_v3_manifest", None) is not None:
+            return CanonicalV3StereoDataset(
+                args.canonical_v3_manifest,
+                args.canonical_v3_root,
+                split=args.eval_split,
+                rectification_audit_sha256=(
+                    args.lerobot_rectification_audit_sha256
+                ),
+                pixel_mask_path=args.canonical_v3_pixel_mask,
+                video_cache_capacity=args.lerobot_video_cache_capacity,
+                maximum_timestamp_error_s=(
+                    args.lerobot_maximum_timestamp_error_s
+                ),
+                single_frame_source_index=args.single_frame_source_index,
+            )
         data_module = StereoDataModule(args, shuffle=False)
         dataset = data_module._dataset(False, split=args.eval_split)
         for record in dataset.records:
@@ -575,13 +730,25 @@ def build_eval_dataset(args, eye_mode):
 
 
 def exact_eval_loader(args, dataset, eye_mode, rank, world_size):
-    if eye_mode == "mono":
+    if eye_mode == "stereo" and requested_ablation_conditions(args):
+        pairs = fixed_episode_window_pairs(
+            dataset,
+            args.ablation_episode_count,
+            args.ablation_windows_per_episode,
+            int(getattr(args, "seed", 1234)),
+        )
+        local_pairs = pairs[rank::world_size]
+        if not local_pairs:
+            raise ValueError(f"ablation rank {rank} received no samples")
+        subset = CanonicalV3AblationSubset(dataset, local_pairs)
+    elif eye_mode == "mono":
         indices = _exact_mono_rank_indices(dataset, rank, world_size)
+        subset = torch_data.Subset(dataset, indices)
     elif eye_mode == "stereo":
         indices = _exact_lerobot_rank_indices(dataset, rank, world_size)
+        subset = torch_data.Subset(dataset, indices)
     else:
         raise ValueError(f"unsupported eye mode {eye_mode!r}")
-    subset = torch_data.Subset(dataset, indices)
     loader = torch_data.DataLoader(
         subset,
         batch_size=args.batch_size,
@@ -718,6 +885,105 @@ def attach_online_targets(args, eye_mode, teacher, batch):
         lr_error_relative_threshold=args.stereo_lr_error_relative_threshold,
     )
 
+
+def _teacher_cache_fingerprint(args):
+    payload = {
+        "backend": args.foundation_stereo_backend,
+        "checkpoint_sha256": (
+            args.las2_h_checkpoint_sha256
+            if args.foundation_stereo_backend == "las2_h"
+            else args.foundation_stereo_checkpoint_sha256
+        ),
+        "disparity_min_px": args.stereo_disparity_min_px,
+        "disparity_max_px": args.stereo_disparity_max_px,
+        "lr_error_abs_threshold_px": args.stereo_lr_error_abs_threshold_px,
+        "lr_error_relative_threshold": args.stereo_lr_error_relative_threshold,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _teacher_cache_path(root, sample_id):
+    name = hashlib.sha256(str(sample_id).encode("utf-8")).hexdigest() + ".pt"
+    return Path(root) / name[:2] / name
+
+
+def _load_teacher_cache(args, batch):
+    root = getattr(args, "teacher_cache_dir", None)
+    if root is None:
+        return False
+    paths = [_teacher_cache_path(root, value) for value in batch["sample_id"]]
+    if not all(path.is_file() for path in paths):
+        return False
+    fingerprint = _teacher_cache_fingerprint(args)
+    disparity = []
+    valid_mask = []
+    for index, (path, sample_id) in enumerate(zip(paths, batch["sample_id"])):
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        if payload.get("sample_id") != str(sample_id):
+            raise ValueError(f"{path}: teacher cache sample identity mismatch")
+        if payload.get("fingerprint") != fingerprint:
+            raise ValueError(f"{path}: teacher cache fingerprint mismatch")
+        contracts = batch.get("contract_sha256")
+        if contracts is not None and payload.get("contract_sha256") != str(
+            contracts[index]
+        ):
+            raise ValueError(f"{path}: teacher cache data contract mismatch")
+        disparity.append(payload["disparity"])
+        valid_mask.append(payload["valid_mask"])
+    batch["disparity"] = torch.stack(disparity).to(
+        batch["video"].device, non_blocking=True
+    )
+    batch["valid_mask"] = torch.stack(valid_mask).to(
+        batch["video"].device, non_blocking=True
+    )
+    return True
+
+
+def _store_teacher_cache(args, batch):
+    root = getattr(args, "teacher_cache_dir", None)
+    if root is None:
+        return
+    fingerprint = _teacher_cache_fingerprint(args)
+    contracts = batch.get("contract_sha256")
+    for index, sample_id in enumerate(batch["sample_id"]):
+        path = _teacher_cache_path(root, sample_id)
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "sample_id": str(sample_id),
+            "contract_sha256": (
+                str(contracts[index]) if contracts is not None else ""
+            ),
+            "fingerprint": fingerprint,
+            "disparity": batch["disparity"][index].detach().cpu(),
+            "valid_mask": batch["valid_mask"][index].detach().cpu(),
+        }
+        with tempfile.NamedTemporaryFile(
+            prefix=path.name + ".", suffix=".tmp", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+        try:
+            torch.save(payload, temporary)
+            if path.exists():
+                temporary.unlink()
+            else:
+                os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
+def attach_cached_online_targets(args, eye_mode, teacher, batch):
+    if eye_mode == "stereo" and _load_teacher_cache(args, batch):
+        return "hit"
+    attach_online_targets(args, eye_mode, teacher, batch)
+    if eye_mode == "stereo":
+        _store_teacher_cache(args, batch)
+    return "miss"
+
+
 def batch_for_temporal_mode(batch, mode, source_index):
     if mode == "four_frame":
         return batch
@@ -729,6 +995,7 @@ def batch_for_temporal_mode(batch, mode, source_index):
         "da3_confidence",
         "valid_mask",
         "non_padding_mask",
+        "wrong_right_video",
     ):
         if key in batch:
             result[key] = batch[key][..., source_index : source_index + 1, :, :]
@@ -1300,6 +1567,47 @@ def finalize_metrics(accumulator, view_names):
     return result
 
 
+def forward_student(
+    model,
+    video,
+    model_kwargs,
+    *,
+    device,
+    bf16,
+    measure_flops=False,
+):
+    """Run one student forward and optionally count supported Torch FLOPs."""
+
+    def run():
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.bfloat16,
+            enabled=bf16,
+        ):
+            return model(video, **model_kwargs)
+
+    if not measure_flops:
+        return run(), None
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+
+        with FlopCounterMode(display=False) as counter:
+            output = run()
+        return output, {
+            "status": "measured",
+            "batch_size": int(video.shape[0]),
+            "total_flops": int(counter.get_total_flops()),
+            "flops_per_sample": int(
+                counter.get_total_flops() / max(int(video.shape[0]), 1)
+            ),
+        }
+    except Exception as error:
+        return run(), {
+            "status": "unavailable",
+            "reason": f"{type(error).__name__}: {error}",
+        }
+
+
 def evaluate_eye_mode(
     args,
     eye_mode,
@@ -1310,14 +1618,31 @@ def evaluate_eye_mode(
     device,
     rank,
     world_size,
+    paired_records=None,
+    flops_by_mode=None,
 ):
     """Evaluate one native data/teacher contract across requested time modes."""
     loader = exact_eval_loader(args, dataset, eye_mode, rank, world_size)
     view_names = MONO_VIEW_NAMES if eye_mode == "mono" else STEREO_VIEW_NAMES
     specs = evaluation_specs(args, eye_mode, temporal_modes)
+    conditions = (
+        requested_ablation_conditions(args) if eye_mode == "stereo" else ()
+    )
+    metric_keys = []
+    if conditions:
+        for condition in conditions:
+            for mode_id, temporal_mode, _ in specs:
+                if (
+                    condition.kind == "time_reverse"
+                    and temporal_mode != "four_frame"
+                ):
+                    continue
+                metric_keys.append(f"{condition.name}/{mode_id}")
+    else:
+        metric_keys.extend(mode_id for mode_id, _, _ in specs)
     accumulators = {
         mode_id: empty_accumulator(device, len(view_names))
-        for mode_id, _, _ in specs
+        for mode_id in metric_keys
     }
     with torch.inference_mode():
         progress = tqdm(loader, disable=rank != 0, desc=eye_mode)
@@ -1330,34 +1655,104 @@ def evaluate_eye_mode(
                 else value
                 for key, value in batch.items()
             }
-            attach_online_targets(args, eye_mode, teacher, tensor_batch)
+            if conditions:
+                attach_cached_online_targets(
+                    args, eye_mode, teacher, tensor_batch
+                )
+            else:
+                attach_online_targets(args, eye_mode, teacher, tensor_batch)
             for mode_id, temporal_mode, source_index in specs:
                 mode_batch = batch_for_temporal_mode(
                     tensor_batch,
                     temporal_mode,
                     source_index,
                 )
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=torch.bfloat16,
-                    enabled=args.bf16,
-                ):
-                    output = model(
-                        mode_batch["video"],
-                        eye_mode=eye_mode,
-                        temporal_mode=temporal_mode,
-                        sample_posterior=False,
-                    )
-                update_metrics(
-                    accumulators[mode_id],
-                    mode_batch,
-                    output,
-                    args.relative_depth_epsilon,
-                    perceptual_model=getattr(model, "perceptual_model", None),
-                    metric_frame_microbatch=getattr(
-                        args, "metric_frame_microbatch", 24
-                    ),
+                active_conditions = conditions or (None,)
+                real_latent = None
+                checksum = (
+                    teacher_target_checksum(mode_batch) if conditions else None
                 )
+                for condition in active_conditions:
+                    if (
+                        condition is not None
+                        and condition.kind == "time_reverse"
+                        and temporal_mode != "four_frame"
+                    ):
+                        continue
+                    condition_batch = (
+                        mode_batch
+                        if condition is None
+                        else apply_student_condition(mode_batch, condition)
+                    )
+                    model_kwargs = {
+                        "eye_mode": eye_mode,
+                        "temporal_mode": temporal_mode,
+                        "sample_posterior": False,
+                    }
+                    if (
+                        condition is not None
+                        and condition.fusion_scale_override is not None
+                    ):
+                        model_kwargs["fusion_scale_override"] = (
+                            condition.fusion_scale_override
+                        )
+                    measure_flops = (
+                        flops_by_mode is not None
+                        and rank == 0
+                        and condition is not None
+                        and condition.name == "real_stereo"
+                        and mode_id not in flops_by_mode
+                    )
+                    output, flop_result = forward_student(
+                        model,
+                        condition_batch["video"],
+                        model_kwargs,
+                        device=device,
+                        bf16=args.bf16,
+                        measure_flops=measure_flops,
+                    )
+                    if flop_result is not None:
+                        flops_by_mode[mode_id] = flop_result
+                    metric_key = (
+                        mode_id
+                        if condition is None
+                        else f"{condition.name}/{mode_id}"
+                    )
+                    update_metrics(
+                        accumulators[metric_key],
+                        condition_batch,
+                        output,
+                        args.relative_depth_epsilon,
+                        perceptual_model=getattr(
+                            model, "perceptual_model", None
+                        ),
+                        metric_frame_microbatch=getattr(
+                            args, "metric_frame_microbatch", 24
+                        ),
+                    )
+                    if condition is not None:
+                        if condition.name == "real_stereo":
+                            real_latent = output.latent.detach()
+                        if paired_records is not None:
+                            paired_records.extend(
+                                paired_sample_records(
+                                    condition_batch,
+                                    output,
+                                    condition=condition,
+                                    mode_id=mode_id,
+                                    view_names=view_names,
+                                    epsilon=args.relative_depth_epsilon,
+                                    teacher_checksum=checksum,
+                                    real_latent=real_latent,
+                                    fusion_alpha=float(
+                                        model.encoder.stereo_fusion.alpha
+                                        .detach()
+                                        .float()
+                                        .item()
+                                    ),
+                                    patch_size=int(args.patch_size),
+                                )
+                            )
     for accumulator in accumulators.values():
         reduce_accumulator(accumulator, world_size)
     dataset_metadata = dataset_provenance(args, eye_mode, dataset)
@@ -1369,11 +1764,16 @@ def evaluate_eye_mode(
         metrics["teacher"] = teacher_metadata
         metrics_by_mode[mode_id] = metrics
     if args.max_batches is None:
+        expected_sample_count = (
+            args.ablation_episode_count * args.ablation_windows_per_episode
+            if conditions
+            else len(dataset)
+        )
         for mode_id, metrics in metrics_by_mode.items():
-            if metrics["sample_count"] != len(dataset):
+            if metrics["sample_count"] != expected_sample_count:
                 raise RuntimeError(
                     f"{mode_id} evaluated {metrics['sample_count']} samples, "
-                    f"expected exact split size {len(dataset)}"
+                    f"expected exact split size {expected_sample_count}"
                 )
 
     visualization_records = []
@@ -1383,23 +1783,52 @@ def evaluate_eye_mode(
             eye_directory.mkdir(parents=False, exist_ok=False)
         if world_size > 1:
             dist.barrier()
-        case_indices = fixed_eval_case_indices(
-            dataset,
-            args.num_visualizations,
-            seed=int(getattr(args, "seed", 1234)),
-            eye_mode=eye_mode,
-        )
+        if conditions:
+            evaluated_pairs = fixed_episode_window_pairs(
+                dataset,
+                args.ablation_episode_count,
+                args.ablation_windows_per_episode,
+                int(getattr(args, "seed", 1234)),
+            )
+            case_indices = [
+                base for base, _ in evaluated_pairs[: args.num_visualizations]
+            ]
+            wrong_case_indices = {
+                base: wrong
+                for base, wrong in evaluated_pairs[: args.num_visualizations]
+            }
+        else:
+            case_indices = fixed_eval_case_indices(
+                dataset,
+                args.num_visualizations,
+                seed=int(getattr(args, "seed", 1234)),
+                eye_mode=eye_mode,
+            )
         local_records = []
         with torch.inference_mode():
             for slot in range(rank, args.num_visualizations, world_size):
-                batch = default_collate([dataset[case_indices[slot]]])
+                sample = dict(dataset[case_indices[slot]])
+                if conditions:
+                    wrong = dataset[wrong_case_indices[case_indices[slot]]]
+                    if sample["episode_id"] == wrong["episode_id"]:
+                        raise RuntimeError(
+                            "visualization WRONG_RIGHT partner is not deranged"
+                        )
+                    sample["wrong_right_video"] = wrong["video"][:, 1]
+                    sample["wrong_episode_id"] = wrong["episode_id"]
+                batch = default_collate([sample])
                 tensor_batch = {
                     key: value.to(device, non_blocking=True)
                     if isinstance(value, torch.Tensor)
                     else value
                     for key, value in batch.items()
                 }
-                attach_online_targets(args, eye_mode, teacher, tensor_batch)
+                if conditions:
+                    attach_cached_online_targets(
+                        args, eye_mode, teacher, tensor_batch
+                    )
+                else:
+                    attach_online_targets(args, eye_mode, teacher, tensor_batch)
                 outputs = {}
                 for mode_id, temporal_mode, source_index in specs:
                     mode_batch = batch_for_temporal_mode(
@@ -1407,73 +1836,130 @@ def evaluate_eye_mode(
                         temporal_mode,
                         source_index,
                     )
-                    with torch.autocast(
-                        device_type=device.type,
-                        dtype=torch.bfloat16,
-                        enabled=args.bf16,
-                    ):
-                        outputs[mode_id] = model(
-                            mode_batch["video"],
-                            eye_mode=eye_mode,
-                            temporal_mode=temporal_mode,
-                            sample_posterior=False,
+                    for condition in conditions or (None,):
+                        if (
+                            condition is not None
+                            and condition.kind == "time_reverse"
+                            and temporal_mode != "four_frame"
+                        ):
+                            continue
+                        condition_batch = (
+                            mode_batch
+                            if condition is None
+                            else apply_student_condition(mode_batch, condition)
                         )
-                four_output = outputs.get(f"{eye_mode}/four_frame")
+                        model_kwargs = {
+                            "eye_mode": eye_mode,
+                            "temporal_mode": temporal_mode,
+                            "sample_posterior": False,
+                        }
+                        if (
+                            condition is not None
+                            and condition.fusion_scale_override is not None
+                        ):
+                            model_kwargs["fusion_scale_override"] = (
+                                condition.fusion_scale_override
+                            )
+                        with torch.autocast(
+                            device_type=device.type,
+                            dtype=torch.bfloat16,
+                            enabled=args.bf16,
+                        ):
+                            output = model(
+                                condition_batch["video"], **model_kwargs
+                            )
+                        output_key = (
+                            mode_id
+                            if condition is None
+                            else f"{condition.name}/{mode_id}"
+                        )
+                        outputs[output_key] = output
                 source_indices = (
                     requested_single_frame_source_indices(args)
                     if "single_frame" in temporal_modes
                     else (None,)
                 )
-                for source_index in source_indices:
-                    display_outputs = {}
-                    if source_index is not None:
-                        single_key = f"{eye_mode}/single_frame"
-                        if len(source_indices) > 1:
-                            single_key += f"/source_{source_index}"
-                        display_outputs["single_frame"] = outputs[single_key]
-                    if four_output is not None:
-                        display_outputs["four_frame"] = four_output
-                    suffix = (
-                        f"-source-{source_index}"
-                        if source_index is not None and len(source_indices) > 1
-                        else ""
+                for condition in conditions or (None,):
+                    condition_prefix = (
+                        "" if condition is None else f"{condition.name}/"
                     )
-                    filename = f"case-{slot:02d}{suffix}.png"
-                    depth_filename = f"depth-case-{slot:02d}{suffix}.png"
-                    visualization_source_index = (
-                        source_index
-                        if source_index is not None
-                        else int(args.single_frame_source_index)
+                    condition_suffix = (
+                        "" if condition is None else f"-{condition.name}"
                     )
-                    save_case_visualization(
-                        eye_directory / filename,
-                        tensor_batch["sample_id"][0],
-                        tensor_batch["episode_id"][0],
-                        tensor_batch["video"],
-                        display_outputs,
-                        view_names,
-                        visualization_source_index,
+                    condition_video = (
+                        tensor_batch["video"]
+                        if condition is None
+                        else apply_student_condition(
+                            tensor_batch, condition
+                        )["video"]
                     )
-                    save_depth_case_visualization(
-                        eye_directory / depth_filename,
-                        tensor_batch,
-                        display_outputs,
-                        visualization_source_index,
-                        args.relative_depth_epsilon,
-                        view_names,
-                    )
-                    local_records.append(
-                        {
-                            "slot": slot,
-                            "eye_mode": eye_mode,
-                            "temporal_modes": list(temporal_modes),
-                            "source_frame_index": source_index,
-                            "sample_id": tensor_batch["sample_id"][0],
-                            "episode_id": tensor_batch["episode_id"][0],
-                            "file": f"{eye_mode}/{filename}",
-                            "depth_file": f"{eye_mode}/{depth_filename}",
-                        }
-                    )
+                    for source_index in source_indices:
+                        display_outputs = {}
+                        if source_index is not None:
+                            single_key = f"{eye_mode}/single_frame"
+                            if len(source_indices) > 1:
+                                single_key += f"/source_{source_index}"
+                            output_key = condition_prefix + single_key
+                            if output_key in outputs:
+                                display_outputs["single_frame"] = outputs[
+                                    output_key
+                                ]
+                        four_key = condition_prefix + f"{eye_mode}/four_frame"
+                        if four_key in outputs:
+                            display_outputs["four_frame"] = outputs[four_key]
+                        if not display_outputs:
+                            continue
+                        suffix = (
+                            f"-source-{source_index}"
+                            if source_index is not None
+                            and len(source_indices) > 1
+                            else ""
+                        )
+                        filename = (
+                            f"case-{slot:02d}{condition_suffix}{suffix}.png"
+                        )
+                        depth_filename = (
+                            f"depth-case-{slot:02d}{condition_suffix}{suffix}.png"
+                        )
+                        visualization_source_index = (
+                            source_index
+                            if source_index is not None
+                            else int(args.single_frame_source_index)
+                        )
+                        save_case_visualization(
+                            eye_directory / filename,
+                            tensor_batch["sample_id"][0],
+                            tensor_batch["episode_id"][0],
+                            condition_video,
+                            display_outputs,
+                            view_names,
+                            visualization_source_index,
+                        )
+                        save_depth_case_visualization(
+                            eye_directory / depth_filename,
+                            tensor_batch,
+                            display_outputs,
+                            visualization_source_index,
+                            args.relative_depth_epsilon,
+                            view_names,
+                        )
+                        local_records.append(
+                            {
+                                "slot": slot,
+                                "condition": (
+                                    "real_stereo"
+                                    if condition is None
+                                    else condition.name
+                                ),
+                                "eye_mode": eye_mode,
+                                "temporal_modes": list(temporal_modes),
+                                "source_frame_index": source_index,
+                                "sample_id": tensor_batch["sample_id"][0],
+                                "episode_id": tensor_batch["episode_id"][0],
+                                "file": f"{eye_mode}/{filename}",
+                                "depth_file": f"{eye_mode}/{depth_filename}",
+                            }
+                        )
         if world_size > 1:
             gathered = [None] * world_size if rank == 0 else None
             dist.gather_object(local_records, gathered, dst=0)
@@ -1525,7 +2011,46 @@ def build_evaluation_result(
         "datasets": datasets_metadata,
         "teachers": teachers_metadata,
         "visualizations": visualizations_by_eye,
+        "ablation_conditions": [
+            condition.name for condition in requested_ablation_conditions(args)
+        ],
     }
+
+
+def _jsonable_args(args):
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in sorted(vars(args).items())
+    }
+
+
+def _git_sha():
+    try:
+        return subprocess.check_output(
+            ("git", "rev-parse", "HEAD"),
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _validate_paired_teacher_checksums(records):
+    checksums = defaultdict(set)
+    for record in records:
+        identity = (
+            record["sample_id"],
+            record["mode_id"],
+            record["view"],
+        )
+        checksums[identity].add(record["teacher_checksum"])
+    failures = [identity for identity, values in checksums.items() if len(values) != 1]
+    if failures:
+        raise RuntimeError(
+            "student ablations did not share one frozen teacher target: "
+            f"{failures[:5]}"
+        )
+    return sorted({next(iter(values)) for values in checksums.values()})
 
 
 def main():
@@ -1533,7 +2058,7 @@ def main():
     validate_args(args)
     eye_modes = requested_eye_modes(args)
     temporal_modes = requested_temporal_modes(args)
-    mode_ids = requested_mode_ids(args)
+    mode_ids = requested_evaluation_keys(args)
     preflight_teacher_assets(args, eye_modes)
     datasets = {
         eye_mode: build_eval_dataset(args, eye_mode) for eye_mode in eye_modes
@@ -1558,9 +2083,14 @@ def main():
             args.visualization_dir.mkdir(parents=True, exist_ok=False)
         if world_size > 1:
             dist.barrier()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    evaluation_started = time.perf_counter()
 
     metrics_by_mode = {}
     visualizations_by_eye = {}
+    local_paired_records = []
+    flops_by_mode = {}
     for eye_mode in eye_modes:
         teacher = build_online_teacher(args, eye_mode, device)
         eye_metrics, eye_visualizations = evaluate_eye_mode(
@@ -1573,6 +2103,8 @@ def main():
             device,
             rank,
             world_size,
+            paired_records=local_paired_records,
+            flops_by_mode=flops_by_mode,
         )
         metrics_by_mode.update(eye_metrics)
         visualizations_by_eye[eye_mode] = eye_visualizations
@@ -1593,6 +2125,21 @@ def main():
         visualizations_by_eye,
         world_size,
     )
+    elapsed_seconds = time.perf_counter() - evaluation_started
+    if world_size > 1:
+        gathered_records = [None] * world_size if rank == 0 else None
+        dist.gather_object(local_paired_records, gathered_records, dst=0)
+        paired_records = (
+            [
+                record
+                for rank_records in gathered_records
+                for record in rank_records
+            ]
+            if rank == 0
+            else []
+        )
+    else:
+        paired_records = local_paired_records
     if rank == 0:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(
@@ -1600,6 +2147,87 @@ def main():
             encoding="utf-8",
         )
         print(json.dumps(result, indent=2, sort_keys=True))
+        if requested_ablation_conditions(args):
+            teacher_checksums = _validate_paired_teacher_checksums(
+                paired_records
+            )
+            args.paired_output_dir.mkdir(parents=True, exist_ok=False)
+            (args.paired_output_dir / "paired_records.jsonl").write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in paired_records
+                ),
+                encoding="utf-8",
+            )
+            (args.paired_output_dir / "teacher_checksums.json").write_text(
+                json.dumps(teacher_checksums, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            unique_samples = len(
+                {record["sample_id"] for record in paired_records}
+            )
+            provenance = {
+                "schema": "stereo-input-ablation-provenance-v1",
+                "git_sha": _git_sha(),
+                "checkpoint": str(args.stereo_vae_ckpt.resolve()),
+                "checkpoint_sha256": sha256_file(args.stereo_vae_ckpt),
+                "data_manifest_sha256": sha256_file(
+                    args.canonical_v3_manifest
+                ),
+                "data_gate_sha256": sha256_file(args.data_gate_json),
+                "teacher_cache_fingerprint": _teacher_cache_fingerprint(args),
+                "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+                "slurm_nodes": os.environ.get("SLURM_JOB_NODELIST"),
+                "world_size": world_size,
+                "elapsed_seconds": elapsed_seconds,
+                "unique_sample_count": unique_samples,
+                "paired_record_count": len(paired_records),
+                "student_forwards_per_second": (
+                    len(paired_records) / len(STEREO_VIEW_NAMES)
+                    / max(elapsed_seconds, 1e-12)
+                ),
+                "peak_cuda_memory_bytes": (
+                    int(torch.cuda.max_memory_allocated(device))
+                    if device.type == "cuda"
+                    else 0
+                ),
+                "parameter_count": sum(
+                    parameter.numel() for parameter in model.parameters()
+                ),
+                "flops": flops_by_mode,
+                "retraining_triggered": False,
+                "fusion_alpha": float(
+                    model.encoder.stereo_fusion.alpha.detach().float().item()
+                ),
+                "metric_contract": (
+                    "per_sample_per_view_scale_free_relative_log"
+                ),
+                "metric_limitation": (
+                    "canonical-v3 does not publish fx/baseline; no metric "
+                    "depth, EPE, or D1 claim"
+                ),
+                "args": _jsonable_args(args),
+            }
+            visual_paths = (
+                sorted(args.visualization_dir.rglob("*.png"))
+                if args.visualization_dir is not None
+                else ()
+            )
+            if len(visual_paths) > 48:
+                indices = np.linspace(
+                    0, len(visual_paths) - 1, num=48, dtype=np.int64
+                )
+                visual_paths = tuple(visual_paths[int(index)] for index in indices)
+            decision = write_ablation_report(
+                args.report_dir,
+                records=paired_records,
+                evaluation_result=result,
+                provenance=provenance,
+                visual_paths=visual_paths,
+                bootstrap_iterations=args.bootstrap_iterations,
+                seed=int(getattr(args, "seed", 1234)),
+            )
+            print(json.dumps({"ablation_decision": decision}, sort_keys=True))
     if world_size > 1:
         dist.barrier()
         dist.destroy_process_group()

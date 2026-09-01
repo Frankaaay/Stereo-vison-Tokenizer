@@ -79,6 +79,35 @@ class StereoFusionTest(unittest.TestCase):
         self.assertIsNotNone(self.fusion.to_q.weight.grad)
         self.assertIsNotNone(self.fusion.to_v.weight.grad)
 
+    def test_fusion_scale_zero_is_exact_left_identity(self) -> None:
+        with torch.no_grad():
+            self.fusion.alpha.fill_(1.0)
+        left = torch.randn(1, 3, 4, 1, 4, 8)
+        first_right = torch.randn_like(left)
+        second_right = torch.randn_like(left)
+        first = self.fusion(
+            left, first_right, fusion_scale_override=0.0
+        ).features
+        second = self.fusion(
+            left, second_right, fusion_scale_override=0.0
+        ).features
+        torch.testing.assert_close(first, left, rtol=0, atol=0)
+        torch.testing.assert_close(second, left, rtol=0, atol=0)
+
+    def test_default_scale_matches_explicit_one(self) -> None:
+        left = torch.randn(1, 3, 4, 1, 4, 8)
+        right = torch.randn_like(left)
+        default = self.fusion(left, right)
+        explicit = self.fusion(left, right, fusion_scale_override=1.0)
+        torch.testing.assert_close(default.features, explicit.features)
+        torch.testing.assert_close(default.attention, explicit.attention)
+        torch.testing.assert_close(default.confidence, explicit.confidence)
+
+    def test_fusion_scale_override_must_be_finite(self) -> None:
+        left = torch.randn(1, 3, 4, 1, 4, 8)
+        with self.assertRaisesRegex(ValueError, "must be finite"):
+            self.fusion(left, left, fusion_scale_override=float("nan"))
+
 
 if __name__ == "__main__":
     unittest.main()
