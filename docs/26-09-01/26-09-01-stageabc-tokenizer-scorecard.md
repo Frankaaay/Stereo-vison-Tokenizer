@@ -91,3 +91,27 @@ Stage C 162,500-update checkpoint 加真实 UMI test window 的定向 probe 表�
 four-frame 分别为：head `L1=0.02362, LPIPS=0.04919, SSIM=0.88767`；left wrist `0.04718, 0.15002, 0.74141`；right wrist `0.05906, 0.16461, 0.74933`。
 
 腕部相机相对 head 的退化远大于 source 0/1/2/3 间差异，说明主要问题是训练只覆盖 Hy `cam_high` 带来的相机域偏移。可视化抽查与指标一致：腕部细节更模糊，并有更明显的局部高饱和彩色伪影；head 也存在物体区域的局部彩色伪影，支持继续调查 GAN 阶段异常值的必要性。该结论仅来自 4 个固定 case，用于快速方向判断，不替代全 split 统计。
+
+## Stereo joint-vs-separate 与 GAN 爆点归因快检
+
+使用 4 个固定 UMI test case，对 single-frame 与 four-frame 分别生成：左右眼输入、三 view joint encode 重建、逐 stereo pair 诊断 encode 重建、自动按该 case 的 p99.9 差值放大的热图；同时用同样 case 比较 Stage A/B/C。输出复制到：
+
+`C:\Users\Frank\Desktop\stereo-joint-vs-separate-stageabc-quick-cases-20260901`
+
+Joint-vs-separate：
+
+- FP32：single/four 的 RGB mean abs diff 分别约 `6.17e-8`/`6.77e-8`，最大约 `2.67e-5`/`6.52e-5`；latent、RGB、depth 全部通过 `atol=rtol=1e-4`。两种 encode 在网络语义与可视重建上等价。
+- BF16：RGB mean abs diff 约 `5.33e-4`/`4.16e-4`，p99.9 均约 `0.00977`，但异常像素最大差可到 `0.25`/`0.75`。整体质量与 L1 几乎不变，差异集中在模型本身已经不稳定的极端位置。热图为看清差异做了强烈自动放大，不能按热图亮度理解为可见重建误差。
+
+同 case 的 GAN 阶段归因：
+
+| Stage | Mode | output range | `abs(output)>1` | p99.9 abs error | max abs error |
+|---|---|---|---:|---:|---:|
+| A no GAN | single | `[-0.727,0.656]` | 0 | 0.354 | 0.922 |
+| A no GAN | four | `[-0.598,0.699]` | 0 | 0.389 | 0.943 |
+| B image GAN | single | `[-9.19,5.31]` | 0.253% | 1.772 | 8.793 |
+| B image GAN | four | `[-9.50,5.72]` | 0.248% | 1.771 | 9.455 |
+| C video GAN | single | `[-40.5,39.0]` | 0.157% | 1.612 | 40.098 |
+| C video GAN | four | `[-86.5,64.5]` | 0.199% | 2.237 | 86.353 |
+
+Stage A 没有 `|output|>1` 像素；Stage B 首次出现明显彩色爆点与大幅越界；Stage C 的异常像素比例略低于 Stage B，但极值幅度进一步扩大约一个数量级。因此在这 4 个固定 case 上，Image GAN 是爆点首次出现的明确阶段，Video GAN 进一步放大极值；腕部 OOD 不是其必要原因，只会改变暴露位置和严重程度。
