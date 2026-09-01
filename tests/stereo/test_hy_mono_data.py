@@ -9,7 +9,7 @@ from stereo_tokenizer.data import _load_root_aliases
 from stereo_tokenizer.pretrain_data import HY_SCHEMA, HyLanceMonoDataset
 
 
-class HyCamHighManifestTest(unittest.TestCase):
+class HyThreeCameraManifestTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -31,6 +31,11 @@ class HyCamHighManifestTest(unittest.TestCase):
                     "episode_index": 1,
                     "length": 24,
                     "dataset_from_index": 100,
+                    "camera_columns": {
+                        "cam_high": "observation_images_cam_high",
+                        "cam_left_wrist": "observation_images_cam_left_wrist",
+                        "cam_right_wrist": "observation_images_cam_right_wrist",
+                    },
                     "window_count": 2,
                     "source_contract_sha256": "a" * 64,
                 }
@@ -41,13 +46,16 @@ class HyCamHighManifestTest(unittest.TestCase):
         )
         return path
 
-    def test_hy_manifest_expands_only_cam_high_windows(self):
+    def test_hy_manifest_expands_three_cameras_equally(self):
         dataset = HyLanceMonoDataset(
             self._manifest(), {"hy_primary": self.root}, split="train"
         )
-        self.assertEqual(dataset.camera_column, "observation_images_cam_high")
-        self.assertEqual([span.variant for span in dataset.spans], ["cam_high"])
-        self.assertEqual(len(dataset), 2)
+        self.assertEqual(
+            [span.variant for span in dataset.spans],
+            ["cam_high", "cam_left_wrist", "cam_right_wrist"],
+        )
+        self.assertEqual([span.sample_count for span in dataset.spans], [2, 2, 2])
+        self.assertEqual(len(dataset), 6)
 
     def test_root_alias_json_is_node_local(self):
         mapping = _load_root_aliases(

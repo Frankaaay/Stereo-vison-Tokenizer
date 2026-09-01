@@ -22,7 +22,7 @@ from .geometry import GeometryMapping
 from .lerobot_data import _AVContainerCache, _matrix, validate_calibration
 
 
-HY_SCHEMA = "hy-cam-high-episode-v1"
+HY_SCHEMA = "hy-mono-three-camera-episode-v2"
 LIBERO_SCHEMA = "libero-mono-episode-v1"
 UMI_SCHEMA = "umi-raw-stereo-episode-v1"
 UMI_VIEWS = ("head", "lefthand", "righthand")
@@ -168,12 +168,10 @@ def _mono_sample(
 
 
 class HyLanceMonoDataset(_ManifestWindowDataset):
-    """Read only Hy cam_high from node-local Lance tables."""
+    """Read the three equally sampled Hy mono cameras from Lance tables."""
 
     offsets = (0, 3, 6, 9)
     stride = 12
-    camera_column = "observation_images_cam_high"
-
     def __init__(
         self,
         manifest_path,
@@ -196,12 +194,22 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
                 "episode_index",
                 "length",
                 "dataset_from_index",
+                "camera_columns",
                 "window_count",
                 "source_contract_sha256",
             }
             if not required.issubset(record):
                 raise ValueError(f"incomplete Hy manifest record: {record.get('episode_id')}")
-        self._build_spans(lambda record: ("cam_high",))
+            camera_columns = record["camera_columns"]
+            if not isinstance(camera_columns, dict) or set(camera_columns) != {
+                "cam_high",
+                "cam_left_wrist",
+                "cam_right_wrist",
+            }:
+                raise ValueError(
+                    f"invalid Hy camera contract: {record.get('episode_id')}"
+                )
+        self._build_spans(lambda record: tuple(record["camera_columns"]))
         self._lance_handles: dict[tuple[str, str], Any] = {}
         self._lance_pid = os.getpid()
 
@@ -236,7 +244,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         with Image.open(io.BytesIO(payload)) as image:
             rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if rgb.shape != (240, 424, 3):
-            raise ValueError(f"Hy cam_high must be [240,424,3], got {rgb.shape}")
+            raise ValueError(f"Hy mono camera must be [240,424,3], got {rgb.shape}")
         return rgb.transpose(2, 0, 1).copy()
 
     @staticmethod
@@ -271,7 +279,8 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         )
 
     def get_mode_item(self, index, temporal_mode):
-        record, _, start = self._sample_address(index)
+        record, camera_id, start = self._sample_address(index)
+        camera_column = record["camera_columns"][camera_id]
         offsets = self._frame_offsets(temporal_mode)
         relative = np.asarray([start + offset for offset in offsets], np.int64)
         rows = self._take_episode_frames(
@@ -282,7 +291,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
                 "episode_index",
                 "frame_index",
                 "timestamp",
-                self.camera_column,
+                camera_column,
             ],
         )
         if [int(row["episode_index"]) for row in rows] != [
@@ -296,17 +305,20 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             timestamps, relative, record.get("fps", 30.0)
         ):
             raise ValueError("Hy timestamps disagree with frame_index/fps")
-        rgb = np.stack([self._decode_jpeg(row[self.camera_column]) for row in rows])
+        rgb = np.stack([self._decode_jpeg(row[camera_column]) for row in rows])
         return _mono_sample(
             rgb,
-            sample_id=f"hy/{record['table_name']}/{record['episode_id']}/{start:06d}",
+            sample_id=(
+                f"hy/{record['table_name']}/{record['episode_id']}/"
+                f"{camera_id}/{start:06d}"
+            ),
             episode_id=record["episode_id"],
             dataset_id="hy",
             frame_indices=relative,
             timestamps=timestamps,
             contract_sha256=record["source_contract_sha256"],
             temporal_mode=temporal_mode,
-            extra={"table_name": record["table_name"], "camera_id": "cam_high"},
+            extra={"table_name": record["table_name"], "camera_id": camera_id},
         )
 
 

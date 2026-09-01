@@ -12,6 +12,7 @@ from stereo_tokenizer.mode_sampling import (
     parse_weight_spec,
 )
 from stereo_tokenizer.modules.attention import PEG
+from train_stereo_vae import _load_continuation_checkpoint
 
 
 class StereoVAEIntegrationTest(unittest.TestCase):
@@ -431,6 +432,69 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
         self.assertEqual(restored.mode_updates, model.mode_updates)
         self.assertEqual(restored.mode_samples, model.mode_samples)
+
+    def test_continuation_checkpoint_preserves_historical_samples_across_new_batch(self):
+        source_args = self._args()
+        source_args.four_mode_mixed_training = True
+        source_args.mode_batch_sizes = "24:24:24:24"
+        source_args.mode_grad_accumulates = "1:1:1:1"
+        source_args.devices = 8
+        source_args.node_manifest_contracts = "old"
+        source = StereoVAE(source_args)
+        source.generator_updates = 20
+        source.mode_updates = mode_occurrences_before(
+            source_args.mode_schedule_seed,
+            source.generator_updates,
+            parse_weight_spec(source_args.mode_update_weights, MODE_IDS),
+        )
+        source.four_frame_updates = sum(
+            count
+            for mode_id, count in source.mode_updates.items()
+            if mode_id.endswith("four_frame")
+        )
+        source.single_frame_updates = (
+            source.generator_updates - source.four_frame_updates
+        )
+        source.mode_samples = {
+            mode_id: count * 192
+            for mode_id, count in source.mode_updates.items()
+        }
+        source.batch_updates = 20
+        checkpoint = {"state_dict": source.state_dict()}
+        source.on_save_checkpoint(checkpoint)
+
+        target_args = self._args()
+        target_args.four_mode_mixed_training = True
+        target_args.mode_batch_sizes = "48:48:48:24"
+        target_args.mode_grad_accumulates = "1:1:1:2"
+        target_args.devices = 8
+        target_args.node_manifest_contracts = "new"
+        target_args.continuation_checkpoint = "stage-a.ckpt"
+        target = StereoVAE(target_args)
+        _load_continuation_checkpoint(target, checkpoint, "stage-a.ckpt")
+
+        self.assertEqual(target.generator_updates, 20)
+        self.assertEqual(target.mode_samples, source.mode_samples)
+        next_mode = mode_for_update(
+            target_args.mode_schedule_seed,
+            target.generator_updates,
+            parse_weight_spec(target_args.mode_update_weights, MODE_IDS),
+        )
+        target.generator_updates += 1
+        target.mode_updates[next_mode] += 1
+        target.mode_samples[next_mode] += 384
+        target.batch_updates += target.mode_grad_accumulates[next_mode]
+        if next_mode.endswith("four_frame"):
+            target.four_frame_updates += 1
+        else:
+            target.single_frame_updates += 1
+        continued = {}
+        target.on_save_checkpoint(continued)
+
+        restored = StereoVAE(target_args)
+        restored.on_load_checkpoint(continued)
+        self.assertEqual(restored.generator_updates, 21)
+        self.assertEqual(restored.mode_samples, target.mode_samples)
 
     def test_stereo_four_ga2_steps_once_and_counts_384_samples(self) -> None:
         args = self._args()

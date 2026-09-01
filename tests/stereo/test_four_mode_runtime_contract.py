@@ -3,10 +3,16 @@ from argparse import Namespace
 from types import SimpleNamespace
 from unittest import mock
 
-from stereo_tokenizer.mode_sampling import MODE_IDS, mode_for_update, parse_weight_spec
+from stereo_tokenizer.mode_sampling import (
+    MODE_IDS,
+    mode_for_update,
+    mode_occurrences_before,
+    parse_weight_spec,
+)
 from train_stereo_vae import (
     DiscriminatorExpansionOptimizerCallback,
     StepTimingCallback,
+    _load_continuation_checkpoint,
     _load_discriminator_expansion_checkpoint,
     _load_stage_transition_checkpoint,
     _resolve_val_check_interval,
@@ -15,6 +21,81 @@ from train_stereo_vae import (
 
 
 class ThreeSourceRuntimeContractTest(unittest.TestCase):
+    def test_continuation_adapts_runtime_contract_and_preserves_counters(self):
+        mode_updates = mode_occurrences_before(
+            1234, 20, parse_weight_spec("35:35:15:15", MODE_IDS)
+        )
+        source = {
+            "generator_updates": 20,
+            "discriminator_updates": 0,
+            "four_frame_updates": 10,
+            "single_frame_updates": 10,
+            "mode_updates": mode_updates,
+            "mode_samples": {
+                mode_id: count * 192 for mode_id, count in mode_updates.items()
+            },
+            "batch_updates": 20,
+            "mode_contract": list(MODE_IDS),
+            "mode_update_weights": parse_weight_spec("35:35:15:15", MODE_IDS),
+            "mono_dataset_weights": "9:1",
+            "node_manifest_contracts": "old",
+            "per_device_batch_size": 24,
+            "grad_accumulates": 1,
+            "mode_batch_sizes": {mode_id: 24 for mode_id in MODE_IDS},
+            "mode_grad_accumulates": {mode_id: 1 for mode_id in MODE_IDS},
+            "mode_effective_global_batch_sizes": {
+                mode_id: 192 for mode_id in MODE_IDS
+            },
+            "logical_update_contract_version": 1,
+            "mode_schedule_seed": 1234,
+            "world_size_contract": 8,
+        }
+
+        class Model:
+            gan_enabled = False
+            grad_accumulates = 1
+            mode_batch_sizes = dict(zip(MODE_IDS, (48, 48, 48, 24)))
+            mode_grad_accumulates = dict(zip(MODE_IDS, (1, 1, 1, 2)))
+            args = SimpleNamespace(
+                mode_update_weights="35:35:15:15",
+                mono_dataset_weights="9:1",
+                mode_schedule_seed=1234,
+                node_manifest_contracts="new",
+                batch_size=48,
+                devices=8,
+                num_nodes=1,
+            )
+
+            def load_state_dict(self, state_dict, strict):
+                self.loaded_state_dict = state_dict
+                self.loaded_strict = strict
+
+            def on_load_checkpoint(self, checkpoint):
+                self.loaded_checkpoint = checkpoint
+
+        model = Model()
+        _load_continuation_checkpoint(
+            model,
+            {
+                "state_dict": {"encoder.weight": object()},
+                "stereo_update_counters": source,
+            },
+            "stage-a.ckpt",
+        )
+
+        adapted = model.loaded_checkpoint["stereo_update_counters"]
+        self.assertTrue(model.loaded_strict)
+        self.assertEqual(adapted["generator_updates"], 20)
+        self.assertEqual(adapted["logical_update_contract_version"], 2)
+        self.assertEqual(adapted["node_manifest_contracts"], "new")
+        self.assertEqual(adapted["mode_effective_global_batch_sizes"], {
+            mode_id: 384 for mode_id in MODE_IDS
+        })
+        self.assertEqual(
+            adapted["counter_transition"]["source_mode_samples"],
+            source["mode_samples"],
+        )
+
     def test_discriminator_expansion_preserves_image_and_adds_only_video(self):
         checkpoint = {
             "state_dict": {

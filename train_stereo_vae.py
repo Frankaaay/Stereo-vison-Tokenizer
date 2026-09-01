@@ -462,6 +462,7 @@ def build_parser():
     parser.add_argument("--max_steps", type=int, required=True)
     parser.add_argument("--default_root_dir", type=str, required=True)
     parser.add_argument("--resume_from_checkpoint", type=Path, default=None)
+    parser.add_argument("--continuation_checkpoint", type=Path, default=None)
     parser.add_argument("--stage_transition_checkpoint", type=Path, default=None)
     parser.add_argument(
         "--discriminator_expansion_checkpoint", type=Path, default=None
@@ -724,12 +725,14 @@ def _bind_node_manifest_contracts(args):
 def validate_runtime_args(args):
     checkpoint_args = (
         getattr(args, "resume_from_checkpoint", None),
+        getattr(args, "continuation_checkpoint", None),
         getattr(args, "stage_transition_checkpoint", None),
         getattr(args, "discriminator_expansion_checkpoint", None),
     )
     if sum(value is not None for value in checkpoint_args) > 1:
         raise ValueError(
-            "resume_from_checkpoint, stage_transition_checkpoint, and "
+            "resume_from_checkpoint, continuation_checkpoint, "
+            "stage_transition_checkpoint, and "
             "discriminator_expansion_checkpoint are mutually exclusive"
         )
     if (
@@ -765,6 +768,7 @@ def validate_runtime_args(args):
             raise ValueError("mode_schedule_start_update must be non-negative")
         if (
             getattr(args, "resume_from_checkpoint", None) is None
+            and getattr(args, "continuation_checkpoint", None) is None
             and getattr(args, "stage_transition_checkpoint", None) is None
             and getattr(args, "discriminator_expansion_checkpoint", None) is None
             and args.mode_schedule_start_update != 0
@@ -1106,6 +1110,15 @@ def write_online_gt_run_metadata(args):
         "distributed": distributed,
         "online_gt": online_gt,
     }
+    if getattr(args, "continuation_checkpoint", None) is not None:
+        run_manifest["continuation"] = {
+            "checkpoint": str(args.continuation_checkpoint.resolve()),
+            "checkpoint_sha256": args.continuation_checkpoint_sha256,
+            "source_generator_updates": args.continuation_source_generator_updates,
+            "source_contract": args.continuation_source_contract,
+            "optimizer_restored": False,
+            "scheduler_aligned_to_source_update": True,
+        }
     if args.four_mode_mixed_training:
         mode_batch_sizes = resolve_mode_int_spec(
             args.mode_batch_sizes,
@@ -1232,6 +1245,83 @@ def _load_stage_transition_checkpoint(model, checkpoint, checkpoint_path):
     model.stage_transition_source = str(Path(checkpoint_path).resolve())
 
 
+def _load_continuation_checkpoint(model, checkpoint, checkpoint_path):
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError("continuation checkpoint has no model state_dict")
+    model.load_state_dict(state_dict, strict=True)
+    source = checkpoint.get("stereo_update_counters")
+    if not isinstance(source, dict):
+        raise ValueError("continuation checkpoint has no stereo update counters")
+    if source.get("logical_update_contract_version") != 1:
+        raise ValueError("continuation source must use logical-update contract v1")
+    if source.get("discriminator_updates") != 0 or model.gan_enabled:
+        raise ValueError("continuation requires GAN-free source and target")
+    mode_weights = parse_weight_spec(model.args.mode_update_weights, MODE_IDS)
+    if source.get("mode_contract") != list(MODE_IDS):
+        raise ValueError("continuation source four-mode contract mismatch")
+    if source.get("mode_update_weights") != mode_weights:
+        raise ValueError("continuation source mode weights mismatch")
+    if source.get("mono_dataset_weights") != model.args.mono_dataset_weights:
+        raise ValueError("continuation source mono dataset weights mismatch")
+    if source.get("mode_schedule_seed") != model.args.mode_schedule_seed:
+        raise ValueError("continuation source mode schedule seed mismatch")
+    generator_updates = source.get("generator_updates")
+    mode_updates = source.get("mode_updates")
+    mode_samples = source.get("mode_samples")
+    if type(generator_updates) is not int or generator_updates < 0:
+        raise ValueError("continuation source generator counter is invalid")
+    if not isinstance(mode_updates, dict) or set(mode_updates) != set(MODE_IDS):
+        raise ValueError("continuation source mode counters mismatch")
+    if not isinstance(mode_samples, dict) or set(mode_samples) != set(MODE_IDS):
+        raise ValueError("continuation source sample counters mismatch")
+    expected_mode_updates = mode_occurrences_before(
+        model.args.mode_schedule_seed, generator_updates, mode_weights
+    )
+    if mode_updates != expected_mode_updates:
+        raise ValueError("continuation source counters disagree with schedule")
+    world_size = int(model.args.devices * model.args.num_nodes)
+    transition = {
+        "source_generator_updates": generator_updates,
+        "source_batch_updates": int(source["batch_updates"]),
+        "source_mode_updates": dict(mode_updates),
+        "source_mode_samples": dict(mode_samples),
+        "source_contract": {
+            key: source.get(key)
+            for key in (
+                "node_manifest_contracts",
+                "per_device_batch_size",
+                "grad_accumulates",
+                "mode_batch_sizes",
+                "mode_grad_accumulates",
+                "mode_effective_global_batch_sizes",
+                "world_size_contract",
+            )
+        },
+    }
+    adapted = dict(source)
+    adapted.update(
+        {
+            "node_manifest_contracts": model.args.node_manifest_contracts,
+            "per_device_batch_size": int(model.args.batch_size),
+            "grad_accumulates": int(model.grad_accumulates),
+            "mode_batch_sizes": dict(model.mode_batch_sizes),
+            "mode_grad_accumulates": dict(model.mode_grad_accumulates),
+            "mode_effective_global_batch_sizes": {
+                mode_id: model.mode_batch_sizes[mode_id]
+                * model.mode_grad_accumulates[mode_id]
+                * world_size
+                for mode_id in MODE_IDS
+            },
+            "logical_update_contract_version": 2,
+            "world_size_contract": world_size,
+            "counter_transition": transition,
+        }
+    )
+    model.on_load_checkpoint({"stereo_update_counters": adapted})
+    model.continuation_source = str(Path(checkpoint_path).resolve())
+
+
 def _load_discriminator_expansion_checkpoint(model, checkpoint, checkpoint_path):
     state_dict = checkpoint.get("state_dict")
     if not isinstance(state_dict, dict):
@@ -1290,22 +1380,18 @@ def main():
     args = parser.parse_args()
     checkpoint_args = (
         args.resume_from_checkpoint,
+        args.continuation_checkpoint,
         args.stage_transition_checkpoint,
         args.discriminator_expansion_checkpoint,
     )
     if sum(value is not None for value in checkpoint_args) > 1:
         raise ValueError(
-            "resume_from_checkpoint, stage_transition_checkpoint, and "
+            "resume_from_checkpoint, continuation_checkpoint, "
+            "stage_transition_checkpoint, and "
             "discriminator_expansion_checkpoint are mutually exclusive"
         )
-    checkpoint_path = (
-        args.resume_from_checkpoint
-        if args.resume_from_checkpoint is not None
-        else (
-            args.stage_transition_checkpoint
-            if args.stage_transition_checkpoint is not None
-            else args.discriminator_expansion_checkpoint
-        )
+    checkpoint_path = next(
+        (value for value in checkpoint_args if value is not None), None
     )
     checkpoint = None
     counters = None
@@ -1317,6 +1403,27 @@ def main():
         if not isinstance(counters, dict):
             raise ValueError("resume checkpoint has no stereo update counters")
         args.mode_schedule_start_update = int(counters["generator_updates"])
+        if args.continuation_checkpoint is not None:
+            digest = hashlib.sha256()
+            with args.continuation_checkpoint.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            args.continuation_checkpoint_sha256 = digest.hexdigest()
+            args.continuation_source_generator_updates = int(
+                counters["generator_updates"]
+            )
+            args.continuation_source_contract = {
+                key: counters.get(key)
+                for key in (
+                    "node_manifest_contracts",
+                    "per_device_batch_size",
+                    "grad_accumulates",
+                    "mode_batch_sizes",
+                    "mode_grad_accumulates",
+                    "mode_effective_global_batch_sizes",
+                    "world_size_contract",
+                )
+            }
     _bind_node_manifest_contracts(args)
     validate_runtime_args(args)
     if checkpoint_path is not None and args.four_mode_mixed_training:
@@ -1333,7 +1440,13 @@ def main():
 
     data = StereoDataModule(args)
     model = StereoVAE(args)
-    if args.stage_transition_checkpoint is not None:
+    if args.continuation_checkpoint is not None:
+        _load_continuation_checkpoint(
+            model,
+            checkpoint,
+            args.continuation_checkpoint,
+        )
+    elif args.stage_transition_checkpoint is not None:
         _load_stage_transition_checkpoint(
             model,
             checkpoint,
@@ -1403,7 +1516,12 @@ def main():
         num_nodes=args.num_nodes,
         strategy=strategy,
         precision=precision,
-        max_steps=-1 if args.gan_enabled else args.max_steps,
+        max_steps=(
+            -1
+            if args.gan_enabled
+            or getattr(args, "continuation_checkpoint", None) is not None
+            else args.max_steps
+        ),
         max_epochs=-1,
         default_root_dir=args.default_root_dir,
         logger=logger,

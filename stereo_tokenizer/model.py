@@ -351,7 +351,8 @@ class StereoVAE(pl.LightningModule):
         world_size_contract = int(
             getattr(self.args, "devices", 1) * getattr(self.args, "num_nodes", 1)
         )
-        checkpoint["stereo_update_counters"] = {
+        counter_transition = getattr(self, "_counter_transition", None)
+        counters = {
             "generator_updates": self.generator_updates,
             "discriminator_updates": self.discriminator_updates,
             "four_frame_updates": self.four_frame_updates,
@@ -375,12 +376,17 @@ class StereoVAE(pl.LightningModule):
                 * world_size_contract
                 for mode_id in MODE_IDS
             },
-            "logical_update_contract_version": 1,
+            "logical_update_contract_version": (
+                2 if counter_transition is not None else 1
+            ),
             "mode_schedule_seed": int(
                 getattr(self.args, "mode_schedule_seed", 1234)
             ),
             "world_size_contract": world_size_contract,
         }
+        if counter_transition is not None:
+            counters["counter_transition"] = dict(counter_transition)
+        checkpoint["stereo_update_counters"] = counters
 
     def on_load_checkpoint(self, checkpoint) -> None:
         counters = checkpoint.get("stereo_update_counters")
@@ -421,7 +427,8 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("checkpoint per-device batch size mismatch")
         if counters.get("grad_accumulates") != int(self.grad_accumulates):
             raise ValueError("checkpoint gradient accumulation mismatch")
-        if counters.get("logical_update_contract_version") != 1:
+        contract_version = counters.get("logical_update_contract_version")
+        if contract_version not in (1, 2):
             raise ValueError("checkpoint logical-update contract version mismatch")
         if counters.get("mode_batch_sizes") != self.mode_batch_sizes:
             raise ValueError("checkpoint per-mode batch size mismatch")
@@ -465,10 +472,58 @@ class StereoVAE(pl.LightningModule):
             raise ValueError("discriminator updates cannot exceed generator updates")
         if not self.gan_enabled and discriminator_updates != 0:
             raise ValueError("GAN-disabled checkpoint has discriminator updates")
+        counter_transition = counters.get("counter_transition")
+        if contract_version == 2:
+            if not isinstance(counter_transition, Mapping):
+                raise ValueError("checkpoint counter transition is missing")
+            source_generator_updates = self._read_checkpoint_counter(
+                counter_transition, "source_generator_updates"
+            )
+            source_batch_updates = self._read_checkpoint_counter(
+                counter_transition, "source_batch_updates"
+            )
+            source_mode_updates = counter_transition.get("source_mode_updates")
+            source_mode_samples = counter_transition.get("source_mode_samples")
+            if (
+                not isinstance(source_mode_updates, Mapping)
+                or set(source_mode_updates) != set(MODE_IDS)
+                or not isinstance(source_mode_samples, Mapping)
+                or set(source_mode_samples) != set(MODE_IDS)
+            ):
+                raise ValueError("checkpoint counter transition modes mismatch")
+            source_mode_updates = {
+                mode_id: self._read_checkpoint_counter(source_mode_updates, mode_id)
+                for mode_id in MODE_IDS
+            }
+            source_mode_samples = {
+                mode_id: self._read_checkpoint_counter(source_mode_samples, mode_id)
+                for mode_id in MODE_IDS
+            }
+            if source_generator_updates != sum(source_mode_updates.values()):
+                raise ValueError("counter transition source updates mismatch")
+            if source_generator_updates > generator_updates:
+                raise ValueError("counter transition starts after checkpoint")
+            expected_source_modes = mode_occurrences_before(
+                schedule_seed, source_generator_updates, mode_weights
+            )
+            if source_mode_updates != expected_source_modes:
+                raise ValueError("counter transition source schedule mismatch")
+            mode_update_deltas = {
+                mode_id: mode_updates[mode_id] - source_mode_updates[mode_id]
+                for mode_id in MODE_IDS
+            }
+            if any(value < 0 for value in mode_update_deltas.values()):
+                raise ValueError("counter transition has negative mode delta")
+        else:
+            if counter_transition is not None:
+                raise ValueError("legacy checkpoint cannot contain counter transition")
+            source_batch_updates = 0
+            source_mode_samples = {mode_id: 0 for mode_id in MODE_IDS}
+            mode_update_deltas = dict(mode_updates)
         if bool(getattr(self.args, "four_mode_mixed_training", False)):
-            expected_batch_updates = sum(
-                mode_updates_count * self.mode_grad_accumulates[mode_id]
-                for mode_id, mode_updates_count in mode_updates.items()
+            expected_batch_updates = source_batch_updates + sum(
+                mode_update_deltas[mode_id] * self.mode_grad_accumulates[mode_id]
+                for mode_id in MODE_IDS
             )
             if batch_updates != expected_batch_updates:
                 raise ValueError(
@@ -501,11 +556,12 @@ class StereoVAE(pl.LightningModule):
                     "checkpoint mode counters disagree with seeded schedule"
                 )
             expected_mode_samples = {
-                mode_id: updates
+                mode_id: source_mode_samples[mode_id]
+                + mode_update_deltas[mode_id]
                 * self.mode_batch_sizes[mode_id]
                 * self.mode_grad_accumulates[mode_id]
                 * expected_world_size
-                for mode_id, updates in mode_updates.items()
+                for mode_id in MODE_IDS
             }
             if mode_samples != expected_mode_samples:
                 raise ValueError(
@@ -523,6 +579,8 @@ class StereoVAE(pl.LightningModule):
         self._logical_mode_id = None
         self._logical_dataset_id = None
         self._logical_global_samples = 0
+        if contract_version == 2:
+            self._counter_transition = dict(counter_transition)
 
     @staticmethod
     def _flatten_view_videos(video: torch.Tensor) -> torch.Tensor:
@@ -1392,7 +1450,10 @@ class StereoVAE(pl.LightningModule):
         return optimizers, schedulers
 
     def on_train_start(self) -> None:
-        if getattr(self.args, "stage_transition_checkpoint", None) is None:
+        if (
+            getattr(self.args, "stage_transition_checkpoint", None) is None
+            and getattr(self.args, "continuation_checkpoint", None) is None
+        ):
             return
         schedulers = self._as_sequence(self.lr_schedulers())
         if not schedulers:

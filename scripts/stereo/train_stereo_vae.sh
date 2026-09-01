@@ -272,6 +272,7 @@ RESUME_ARGS=()
 CHECKPOINT_ARG_COUNT=0
 for checkpoint_value in \
   "${RESUME_FROM_CHECKPOINT:-}" \
+  "${CONTINUATION_CHECKPOINT:-}" \
   "${STAGE_TRANSITION_CHECKPOINT:-}" \
   "${DISCRIMINATOR_EXPANSION_CHECKPOINT:-}"; do
   if [[ -n "${checkpoint_value}" ]]; then
@@ -284,6 +285,9 @@ if (( CHECKPOINT_ARG_COUNT > 1 )); then
 fi
 if [[ -n "${RESUME_FROM_CHECKPOINT:-}" ]]; then
   RESUME_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+fi
+if [[ -n "${CONTINUATION_CHECKPOINT:-}" ]]; then
+  RESUME_ARGS+=(--continuation_checkpoint "${CONTINUATION_CHECKPOINT}")
 fi
 if [[ -n "${STAGE_TRANSITION_CHECKPOINT:-}" ]]; then
   RESUME_ARGS+=(--stage_transition_checkpoint "${STAGE_TRANSITION_CHECKPOINT}")

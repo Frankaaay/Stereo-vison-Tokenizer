@@ -19,6 +19,12 @@ OFFSETS_AND_STRIDE = {
     "umi": ((0, 3, 6, 9), 12),
 }
 
+HY_CAMERA_COLUMNS = {
+    "cam_high": "observation_images_cam_high",
+    "cam_left_wrist": "observation_images_cam_left_wrist",
+    "cam_right_wrist": "observation_images_cam_right_wrist",
+}
+
 
 def _window_count(length, dataset_id):
     offsets, stride = OFFSETS_AND_STRIDE[dataset_id]
@@ -51,9 +57,10 @@ def _aliases(values):
 
 def build_hy(roots):
     try:
+        import lance
         import pyarrow.dataset as ds
     except ImportError as error:
-        raise ImportError("Hy manifest generation requires pyarrow") from error
+        raise ImportError("Hy manifest generation requires pylance and pyarrow") from error
     for alias, root in roots.items():
         for table_root in sorted(root.glob("table_*")):
             table_name = table_root.name
@@ -61,6 +68,14 @@ def build_hy(roots):
             meta_root = table_root / "meta" / "episodes"
             if not lance_path.is_dir() or not meta_root.is_dir():
                 continue
+            missing_columns = set(HY_CAMERA_COLUMNS.values()).difference(
+                lance.dataset(str(lance_path)).schema.names
+            )
+            if missing_columns:
+                raise ValueError(
+                    f"{table_name}: missing Hy mono camera columns "
+                    f"{sorted(missing_columns)}"
+                )
             metadata = ds.dataset(str(meta_root), format="parquet").to_table(
                 columns=[
                     "episode_index",
@@ -80,11 +95,11 @@ def build_hy(roots):
                     "episode_index": int(row["episode_index"]),
                     "length": length,
                     "dataset_from_index": int(row["dataset_from_index"]),
-                    "camera_column": "observation_images_cam_high",
+                    "camera_columns": dict(HY_CAMERA_COLUMNS),
                     "fps": 30.0,
                 }
                 yield {
-                    "schema": "hy-cam-high-episode-v1",
+                    "schema": "hy-mono-three-camera-episode-v2",
                     "split": _split(episode_id),
                     "episode_id": episode_id,
                     "window_count": _window_count(length, "hy"),
