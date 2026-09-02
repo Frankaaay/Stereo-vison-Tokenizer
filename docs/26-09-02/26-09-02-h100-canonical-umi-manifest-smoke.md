@@ -40,3 +40,11 @@
 - teacher 源码 clean 且 SHA 分别为 LAS2-H `8c97bd4c4da3712c2ac60003a23201dfdb5935f4`、DA3 `3d835ec1a5802d64a8b8b15f817a1ab54809bfe4`；checkpoint SHA256 分别为 `758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4`、`e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5`。
 - GPU smoke 计划为单卡、4 updates、四模式权重 `1:1:1:1`、mono 数据权重 `1:1`、batch `24:24:24:12`、accumulation `1:1:1:2`。seed 1234 的顺序为 stereo/four、mono/single(LIBERO)、mono/four(Hy)、stereo/single，覆盖全部模式和三个数据源。
 - 当前唯一未闭合门禁：固定 train runtime 缺少 lock 中的 `pylance==10.0.0`，因此 Hy 真实 DataLoader 与 GPU job 尚未提交。另一个 `hy-export` 环境只有 `lance==8.0.0` 且 NumPy 2.5.2，不能混入训练环境作为生产替代；需获得远端环境写入授权后在 train runtime 安装精确锁定版本，再完成 Hy decode 与 GPU smoke。
+
+### 8 卡 smoke 提交
+
+- 用户授权在既有 `/gpfs/jiuquyun/projects/Frank/stereo-vae/runtime/train` 环境安装锁定依赖并将 smoke 扩为 8 卡。`uv pip install ... pylance==10.0.0` 仅新增 `pylance==10.0.0`、`lance-namespace==0.8.6` 和 `lance-namespace-urllib3-client==0.8.6`；随后 `uv pip check` 通过，Torch 2.7.1+cu126、NumPy 1.26.2、PyArrow 23.0.0、Lightning 2.5.6 和 PyAV 16.0.1 均未漂移。
+- Hy 真实解码 Job `2266`：QOS `cpu`，exit 0，50 秒；single/four 输出为 `[1,1,3,1/4,256,256]`、float32、finite，train sample count 49,106,151。
+- 8 卡运行源码：H100 clean clone `hezhou-las2-h@907664b61b06006bcad634fbea8fad20b9e8c460`，H100 Bash syntax 通过。debug QOS 实时上限为单作业 16 GPU；本作业申请 1 节点、8 GPU、64 CPU、512 GiB、1 小时。
+- `sbatch --test-only` 通过，正式 Job ID `2269`，名称 `stereo-smoke8-907664b`。提交后快照为 `PENDING (Resources)`，Slurm 预测开始时间 `2026-09-03 00:00:43 +08:00`，候选节点 `xn01-gpu1-0062`。
+- 输出目录：`/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/h100-canonical-smoke4-907664b-v1`；Slurm 日志：`/gpfs/jiuquyun/home/Frank/logs/stereo-smoke8-907664b-2269.out`。作业启动时才创建输出目录；当前未产生训练结果，不能宣称 smoke 通过。
