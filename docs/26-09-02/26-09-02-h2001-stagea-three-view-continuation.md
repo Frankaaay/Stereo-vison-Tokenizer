@@ -98,3 +98,31 @@ is copied or re-encoded, and the existing manifest is not overwritten.
   sequence 25 and only surfaced the secondary NCCL timeout after 30 minutes.
   Offline W&B run `offline-run-20260902_011444-eaejdrn8` was created, but no
   optimizer update or new checkpoint was produced. All eight GPUs were released.
+
+## Validated three-camera manifest regeneration
+
+- Commit `ebcdee5b78fc993fe93c192bb7a88955a0c4b797` adds an immutable Hy
+  manifest filter that checks the first, middle, and last four-frame training
+  windows of every episode using the loader's `(episode_index, frame_index)`
+  identity contract. Any invalid camera anchor rejects the entire episode, so
+  the accepted head/left-wrist/right-wrist spans remain exactly equal.
+- The H200 filter tests passed: 4 tests in 0.03 seconds. Two earlier generation
+  attempts stopped at identity gates because Lance physical row indices are not
+  the manifest's episode/frame identity; neither wrote a manifest. Their output
+  directories were preserved.
+- Final manifest:
+  `/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260902-threeview-v4/manifests/hy_formal_90_5_5_threeview_validated_v3.jsonl`,
+  SHA256 `821fb1d2610bc9113471cd8150b9cd791488cf52fcb81f36091a89d7d099907a`.
+- Validation checked 2,084,868 JPEG payloads. It rejected 10,422 of 57,913
+  episodes: 10,422 had right-wrist failures and 2,571 of those also had
+  left-wrist failures. Every failure was a one-byte placeholder payload.
+- Accepted episode counts are train/val/test = 42,709/2,394/2,388. Accepted
+  windows per camera are train/val/test = 3,303,048/183,142/183,150, or
+  11,008,020 windows across all three equally represented cameras.
+- Rejected records are preserved in the adjacent `.rejected.jsonl` file,
+  SHA256 `642fc695a4aca0bbc5b4f48a20872471146eeceadb374769298d7b3da24a8eec`;
+  the summary SHA256 is
+  `260a569a8698ea28bac8ae308ba1d3d3f59b85e434d71cb0fac52078497228c9`.
+- Deterministic replay of rank 4's first update produced the same
+  `mono/four_frame`, Hy, batch-size-48 request and decoded without an invalid
+  payload. Training was not relaunched as part of manifest regeneration.
