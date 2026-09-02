@@ -270,11 +270,19 @@ def build_canonical_selection(
     }
     selection["umi_publish_ledger"] = ledger_provenance
     selection["identity_mapping"] = {
-        "checkpoint_split_episode_count": len(split_records),
+        "identity_schema": identity["schema"],
+        "identity_split_episode_count": len(split_records),
         "mapped_complete_episode_count": len(candidates),
         "missing_episode_count": len(missing),
         "missing_episode_ids_sha256": canonical_sha256(sorted(missing)),
         "policy": "sample_only_from_exact_episode_identity_intersection",
+    }
+    repo_root = Path.cwd().resolve()
+    selection["generation"] = {
+        "cwd": str(repo_root),
+        "git_branch": _git(repo_root, "branch", "--show-current"),
+        "git_commit": _git(repo_root, "rev-parse", "HEAD"),
+        "git_status_porcelain": _git(repo_root, "status", "--porcelain"),
     }
     selection.pop("selection_sha256")
     selection["selection_sha256"] = canonical_sha256(selection)
