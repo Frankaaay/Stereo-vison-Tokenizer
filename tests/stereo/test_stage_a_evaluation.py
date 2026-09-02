@@ -156,6 +156,29 @@ class StageASelectionTest(unittest.TestCase):
         digest = payload.pop("selection_sha256")
         self.assertEqual(digest, canonical_sha256(payload))
 
+    def test_selection_resamples_decode_failures_deterministically(self):
+        def validator(row):
+            if int(row["legacy_episode_id"].rsplit("-", 1)[1]) % 2:
+                raise RuntimeError("row identity mismatch")
+
+        payload = select_episode_windows(
+            self._candidates(),
+            dataset_id="umi",
+            split="test",
+            sample_count=4,
+            seed=1234,
+            identity_contract=self._identity(),
+            candidate_validator=validator,
+        )
+        self.assertTrue(
+            all(
+                int(row["legacy_episode_id"].rsplit("-", 1)[1]) % 2 == 0
+                for row in payload["records"]
+            )
+        )
+        self.assertEqual(payload["decode_validation"]["accepted_count"], 4)
+        self.assertGreater(payload["decode_validation"]["rejected_count"], 0)
+
     def test_stage_a_parser_does_not_require_training_hyperparameters(self):
         args = _run_parser().parse_args(
             [

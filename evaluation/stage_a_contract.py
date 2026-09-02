@@ -7,7 +7,7 @@ import json
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 IDENTITY_SCHEMA = "stereo-tokenizer-checkpoint-split-identities-v1"
@@ -135,6 +135,7 @@ def select_episode_windows(
     sample_count: int,
     seed: int,
     identity_contract: dict[str, Any],
+    candidate_validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Choose one deterministic non-overlapping window from distinct episodes."""
 
@@ -169,12 +170,28 @@ def select_episode_windows(
             seed, "episode", dataset_id, row["legacy_episode_id"]
         )
     )
-    if len(usable) < sample_count:
+    selected = []
+    rejected = []
+    for row in usable:
+        if candidate_validator is not None:
+            try:
+                candidate_validator(row)
+            except Exception as error:
+                rejected.append(
+                    {
+                        "episode_id": row["legacy_episode_id"],
+                        "reason": f"{type(error).__name__}: {str(error).splitlines()[0]}",
+                    }
+                )
+                continue
+        selected.append(row)
+        if len(selected) == sample_count:
+            break
+    if len(selected) < sample_count:
         raise ValueError(
-            f"{dataset_id}/{split} has {len(usable)} mapped complete episodes, "
-            f"needs {sample_count}"
+            f"{dataset_id}/{split} has {len(selected)} decode-valid episodes after "
+            f"checking {len(selected) + len(rejected)}, needs {sample_count}"
         )
-    selected = usable[:sample_count]
     for selection_index, row in enumerate(selected):
         row["selection_index"] = selection_index
     contract = {
@@ -193,6 +210,18 @@ def select_episode_windows(
             "source_manifest_sha256": identity_contract[
                 "source_manifest_sha256"
             ],
+        },
+        "decode_validation": {
+            "enabled": candidate_validator is not None,
+            "checked_candidate_count": len(selected) + len(rejected),
+            "accepted_count": len(selected),
+            "rejected_count": len(rejected),
+            "rejection_reasons": dict(
+                sorted(Counter(row["reason"] for row in rejected).items())
+            ),
+            "rejected_episode_ids_sha256": canonical_sha256(
+                sorted(row["episode_id"] for row in rejected)
+            ),
         },
         "records": selected,
     }

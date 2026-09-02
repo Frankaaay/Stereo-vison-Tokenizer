@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from stereo_tokenizer.geometry import GeometryMapping
 
 from .stage_a_contract import (
+    CANONICAL_SPLIT_SCHEMA,
     canonical_sha256,
     read_identity_contract,
     read_selection,
@@ -256,6 +257,32 @@ def build_canonical_selection(
                 "window_count": window_count,
             }
         )
+
+    candidate_validator = None
+    if identity["schema"] == CANONICAL_SPLIT_SCHEMA:
+        def validate_decode(row: dict[str, Any]) -> None:
+            config = row["canonical_config"]
+            dataset, addresses = catalogs[config]
+            start, _ = addresses[int(row["canonical_episode_index"])]
+            source = dataset[start + int(row["anchor_rgb_index"])]
+            if source["frame_offsets"].tolist() != row["expected_frame_offsets"]:
+                raise ValueError("decoded frame offsets disagree with selection")
+            if (
+                source["source_frame_indices"].tolist()
+                != row["expected_source_frame_indices"]
+            ):
+                raise ValueError("decoded source frames disagree with selection")
+            if not bool(source["frame_valid"].all()):
+                raise ValueError("decoded candidate contains invalid frames")
+            if tuple(source["video"].shape) != (4, 6, 3, 256, 256):
+                raise ValueError("decoded candidate has unexpected video shape")
+            if not torch.isfinite(source["video"]).all():
+                raise ValueError("decoded candidate video contains NaN or Inf")
+            if tuple(source["image_pixel_mask"].shape) != (4, 6, 256, 256):
+                raise ValueError("decoded candidate has unexpected pixel-mask shape")
+
+        candidate_validator = validate_decode
+
     selection = select_episode_windows(
         candidates,
         dataset_id=dataset_id,
@@ -263,6 +290,7 @@ def build_canonical_selection(
         sample_count=sample_count,
         seed=seed,
         identity_contract=identity,
+        candidate_validator=candidate_validator,
     )
     selection["canonical_loader"] = {
         "path": str(Path(loader_root).expanduser().resolve()),
