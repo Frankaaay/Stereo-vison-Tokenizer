@@ -69,3 +69,31 @@ layouts. Both formal runs remained active at the second snapshot. The snapshot
 progress inferred generator updates 52,445 on H200-1 and 44,576 on H200-2; the
 H200-2 resolved config, rather than this inference, is the direct evidence for
 the 44,000 continuation source.
+
+## Longer-window result and control shutdown
+
+A later pair of snapshots used an approximately 13.4-minute interval:
+
+| Run | Delta samples | Delta training-loop seconds | Samples/s |
+|---|---:|---:|---:|
+| H200-1 mode-aware BS48/24, GA1/2 | 200,832 | 803 | 250.10 |
+| H200-2 fixed BS24, GA1 | 177,600 | 801 | 221.72 |
+
+The observed mode-aware speedup was `12.80%`. This remained in the same range
+as the initial `12.19%` window and the historical strict equal-sample result of
+`14.56%`. Per the experiment stop criterion, the H200-2 control received a
+normal `Ctrl-C` through tmux after this snapshot.
+
+Post-stop checks confirmed that the H200-2 tmux session no longer existed,
+there were no matching training processes, and `nvidia-smi` reported no compute
+processes. The wrapper recorded `exit_code.txt=1`, which reflects the requested
+interrupt rather than a training fault; the log ended at physical batch 1,581
+without a traceback. Offline W&B artifact `run-55ljq1oa.wandb` is nonempty.
+
+The latest completed checkpoint is
+`stereo-vae/55ljq1oa/checkpoints/last.ckpt` (729,458,299 bytes). Direct checkpoint
+fields report Lightning `global_step=1000` and
+`stereo_update_counters.generator_updates=45000`; its counter transition records
+the source generator update as 44,000. Work completed after update 45,000 and
+before the interrupt is represented in the log/W&B run but not in a newer
+checkpoint. The H200-1 formal run remained active after the control shutdown.
