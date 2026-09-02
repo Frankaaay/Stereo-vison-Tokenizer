@@ -29,3 +29,13 @@
 - 本机缺少 `pytest`、`torch` 与 `pytorch_lightning`，因此本地动态测试未运行；不能将静态检查描述为 runtime 验证。
 - H100 manifest、真实视频解码、DataLoader 和 GPU smoke 结果在完成后补充，记录精确 commit、命令、Job ID、日志与输出路径。
 - 初次全量 UMI builder 在登录节点被 signal 9 终止，峰值 RSS 1,414,828 KiB。根因是一次性读取全部 parquet 并为每条 episode 重复序列化完整标定；已改为 1,024 行批流式读取和独立标定 catalog，后续生成改由 Slurm 执行。
+
+### H100 实际结果
+
+- H100 clean clone 与本地最终运行代码同步到 `ba496c199aea2d059d021ba241417285a5f88ad5`；canonical UMI/Hy 定向回归在前序实现 SHA 上分别通过 15 和 20 个测试，最终变更仅增加解码 smoke 入口。
+- UMI manifest Job `2258`：QOS `cpu`，exit 0，57 秒，MaxRSS 1,708,620 KiB。90,174 条 episode 全部完成映射核对；17 条没有完整四帧窗口，训练 manifest 保留 90,157 条、1,661,796 samples。manifest SHA256 `18cd5f460864c21866d9d2c9690c9398248d6429eb320bc0ab2ad9644fc91bb8`，40 套标定 catalog SHA256 `2ee39845da49fad9d6cdf0aeb27cf41e37bfafcb8d91b317a208fc33ff6201da`。
+- Hy/LIBERO manifest Job `2262`：exit 0，7 秒。Hy 为 215,577 records、16,703,900 windows，SHA256 `6d6f9a6cf14bc502f4471cd4c9e5617e5fe35b4d9de1412b44eb3d8293ba5497`；LIBERO 为 1,712 records、34,192 windows，SHA256 `ffa8c06d4aadf5ef1dfa72222384c5c9ef60e8b454d1cadfdeb83fe83938f4d9`。
+- UMI/LIBERO 真实解码 Job `2264`：exit 0，28 秒。single/four 输出分别为 UMI `[3,2,3,1/4,256,256]`、LIBERO `[1,1,3,1/4,256,256]`，均为 float32 且 finite。
+- teacher 源码 clean 且 SHA 分别为 LAS2-H `8c97bd4c4da3712c2ac60003a23201dfdb5935f4`、DA3 `3d835ec1a5802d64a8b8b15f817a1ab54809bfe4`；checkpoint SHA256 分别为 `758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4`、`e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5`。
+- GPU smoke 计划为单卡、4 updates、四模式权重 `1:1:1:1`、mono 数据权重 `1:1`、batch `24:24:24:12`、accumulation `1:1:1:2`。seed 1234 的顺序为 stereo/four、mono/single(LIBERO)、mono/four(Hy)、stereo/single，覆盖全部模式和三个数据源。
+- 当前唯一未闭合门禁：固定 train runtime 缺少 lock 中的 `pylance==10.0.0`，因此 Hy 真实 DataLoader 与 GPU job 尚未提交。另一个 `hy-export` 环境只有 `lance==8.0.0` 且 NumPy 2.5.2，不能混入训练环境作为生产替代；需获得远端环境写入授权后在 train runtime 安装精确锁定版本，再完成 Hy decode 与 GPU smoke。
