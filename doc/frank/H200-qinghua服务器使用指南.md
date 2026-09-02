@@ -2,11 +2,11 @@
 
 > 适用账号：`Frank`/`frank`。本文中的个人开发位置、目录、数据和资产约定不作为其他用户的默认值。
 
-本文面向 Stereo-vison-Tokenizer 项目组。服务器地址、账号、分支、资源占用和资产状态均可能变化；SSH 配置和实时检查优先于本文。本文不构成远端写入、安装、训练、评估、预处理、删除或占用 GPU 的授权。
+本文记录 Frank 使用 Stereo-vison-Tokenizer 项目时的 H200 连接、个人资产和运行约定。服务器地址、账号、分支、资源占用和资产状态均可能变化；SSH 配置和实时检查优先于本文。本文不构成远端写入、安装、训练、评估、预处理、删除或占用 GPU 的授权。
 
 ## 1. 连接与节点
 
-本机 `~/.ssh/config` 是 HostName、端口、用户名、密钥和 ProxyJump 的唯一来源。组员使用各自账号，不在仓库中固定登录用户。
+本机 `~/.ssh/config` 是 HostName、端口、Frank 登录账号、密钥和 ProxyJump 的唯一来源；仓库不记录具体连接凭据。
 
 ```powershell
 ssh.exe jump-h200-qinghua
@@ -34,7 +34,7 @@ df -h /data
 两台 H200 的 `/data` 和 `/data/shared` 都是 node-local 视图。同名路径不代表内容相同；数据、manifest、runtime、checkpoint 和输出必须在目标节点分别核对。
 
 ```text
-/data/home/<username>/     用户代码、runtime 和实验目录
+/data/home/frank/          Frank 的代码、runtime、资产和实验目录
 /data/shared/              当前节点的共享数据视图
 /data/cache/               当前节点缓存
 /data/tmp/                 临时文件
@@ -47,14 +47,14 @@ df -h /data
 /data-214-30-239-42  -> H200-2 /data
 ```
 
-NFS 路径可以用于 Git fetch 和文件传输，但不能据此假定两台节点内容一致。`/data/shared/datasets` 只放数据；代码、环境、checkpoint、日志和实验输出放到当前执行用户自己的 `/data/home/<username>` 路径。
+NFS 路径可以用于 Git fetch 和文件传输，但不能据此假定两台节点内容一致。`/data/shared/datasets` 只放数据；Frank 的代码、环境、checkpoint、日志和实验输出放到 `/data/home/frank`。
 
-## 3. 项目仓库与 Git 同步
+## 3. 本地开发、远端推送与 H200 测试
 
-每位组员使用自己的独立 clone：
+生产代码只在本机目标 worktree 开发和验证。Frank 的 H200 clone 位于：
 
 ```text
-/data/home/<username>/projects/Stereo-vison-Tokenizer
+/data/home/frank/projects/Stereo-vison-Tokenizer
 ```
 
 项目 origin 应为：
@@ -63,31 +63,59 @@ NFS 路径可以用于 Git fetch 和文件传输，但不能据此假定两台�
 https://github.com/Frankaaay/Stereo-vison-Tokenizer.git
 ```
 
-目标分支和精确 SHA 由当前任务指定，不在指南中固定为某个用户分支。源码只在本地目标 worktree 修改、验证并按授权 commit/push；H200 clone 不现场编辑、commit 或 push。
+目标分支和精确 SHA 由当前任务指定，不在指南中固定。标准工作流是：本地开发与测试 → commit/push 到 origin → H200 fast-forward 同步该分支 → 在同一精确 SHA 上执行服务器测试。H200 clone 不现场编辑、commit、push 或创建修复分支。
+
+### 3.1 本地开发与 push
+
+在本机仓库开始修改前：
+
+```powershell
+Set-Location "C:\Project\Stereo-vison-Tokenizer"
+git status --short --branch
+git fetch origin
+$targetBranch = git branch --show-current
+git pull --ff-only origin $targetBranch
+```
+
+worktree 必须 clean，当前分支必须是用户指定的目标分支，且 pull 必须 fast-forward 成功。随后只修改当前任务需要的文件并执行定向验证；按授权只暂存具名文件、使用中文 conventional commit，并推送当前分支：
+
+```powershell
+git add -- path/to/changed-file
+git commit -m "docs: 更新相关文档"
+git push origin $targetBranch
+git rev-parse HEAD
+```
+
+记录 push 后的精确 SHA；未获得 commit/push 授权时，流程停在本地修改和验证阶段。
+
+### 3.2 H200 同步与测试
 
 同步前在目标节点检查：
 
 ```bash
-git -C /data/home/<username>/projects/Stereo-vison-Tokenizer status --short --branch
-git -C /data/home/<username>/projects/Stereo-vison-Tokenizer branch --show-current
-git -C /data/home/<username>/projects/Stereo-vison-Tokenizer rev-parse HEAD
-git -C /data/home/<username>/projects/Stereo-vison-Tokenizer remote get-url origin
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer status --short --branch
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer branch --show-current
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer rev-parse HEAD
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer remote get-url origin
 ```
 
-H200 不能直接访问 GitHub。通过跳板机分别更新两份 clone 的 remote ref：
+H200 不能直接访问 GitHub，因此服务器侧的 pull 固定拆成两步：先通过跳板机更新目标节点 clone 的 remote ref，再在 H200 上执行 fast-forward merge。只更新本次实际使用的节点：
 
 ```bash
-git -C /data-214-30-239-40/home/<username>/projects/Stereo-vison-Tokenizer fetch --prune origin refs/heads/<target-branch>:refs/remotes/origin/<target-branch>
-git -C /data-214-30-239-42/home/<username>/projects/Stereo-vison-Tokenizer fetch --prune origin refs/heads/<target-branch>:refs/remotes/origin/<target-branch>
+target_branch='替换为当前任务指定分支'
+git -C /data-214-30-239-40/home/frank/projects/Stereo-vison-Tokenizer fetch --prune origin "refs/heads/$target_branch:refs/remotes/origin/$target_branch"
+git -C /data-214-30-239-42/home/frank/projects/Stereo-vison-Tokenizer fetch --prune origin "refs/heads/$target_branch:refs/remotes/origin/$target_branch"
 ```
 
 跳板机只更新 remote ref，不执行 merge、checkout 或修改 working tree。随后在需要使用的 H200 节点执行：
 
 ```bash
-git -C /data/home/<username>/projects/Stereo-vison-Tokenizer merge --ff-only origin/<target-branch>
+target_branch='替换为当前任务指定分支'
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer merge --ff-only "origin/$target_branch"
+git -C /data/home/frank/projects/Stereo-vison-Tokenizer rev-parse HEAD
 ```
 
-任一节点 dirty、分支/upstream/origin 不符、fetch 失败、不能 fast-forward 或最终 SHA 不一致时立即停止；不得 rebase、reset、force checkout、删除重建或新建替代 branch/worktree。用户指定精确 SHA 时，最终以 `rev-parse HEAD` 的实时结果为准。
+`rev-parse HEAD` 必须等于本机 push 后记录的 SHA，才能在 H200 上执行当前任务指定的同一组定向测试。任一节点 dirty、分支/upstream/origin 不符、fetch 失败、不能 fast-forward 或最终 SHA 不一致时立即停止；不得 rebase、reset、force checkout、删除重建或新建替代 branch/worktree。
 
 ## 4. Python 环境与依赖
 
@@ -98,7 +126,7 @@ git -C /data/home/<username>/projects/Stereo-vison-Tokenizer merge --ff-only ori
 |H200-1|`/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260828/venv`|
 |H200-2|`/data/home/frank/runtime/stereo-tokenizer-unified-v1`|
 
-这些路径属于当前已验证资产，不设置登录用户；组员仍按本机 SSH 配置使用各自账号。使用前检查 Python、依赖、权限和目标代码 SHA；需要新环境或安装依赖时必须取得当前任务授权。
+这些路径是 Frank 最近验证过的个人资产。使用前检查 Python、依赖、权限和目标代码 SHA；需要新环境或安装依赖时必须取得当前任务授权。
 
 系统内网源由管理员配置，具体地址和端口不写入仓库：
 
@@ -171,13 +199,20 @@ DA3 repo:
 DA3 checkpoint:
   /data/home/frank/artifacts/depth-anything-3/DA3-BASE/f4a6c9b3c95e41c82048423d3493a81ec3fa810e
 
-LAS2-H repo:
-  /data/home/hezhou/projects/LiteAnyStereo
-LAS2-H checkpoint:
+LAS2-H repo（H200-1）:
+  /data/home/frank/runtime/lite-any-stereo/8c97bd4c4da3712c2ac60003a23201dfdb5935f4
+LAS2-H checkpoint（H200-1）:
+  /data/home/frank/artifacts/lite-any-stereo/LAS2_H.pth
+
+LAS2-H repo（H200-2）:
+  /data/home/frank/runtime/lite-any-stereo-8c97bd4-clean
+LAS2-H checkpoint（H200-2）:
   /data/home/hezhou/artifacts/lite-any-stereo/checkpoints/LAS2_H.pth
 ```
 
-DA3 与 LAS2-H 的 source/checkpoint SHA、运行参数和可见性必须从目标 resolved config 与实时文件核对。跨用户 LAS2-H 路径只作为已授权只读输入，不向其中写入代码、缓存或日志。
+2026-09-02 只读核验结果：两台节点的 LAS2-H repo HEAD 都是 `8c97bd4c4da3712c2ac60003a23201dfdb5935f4`。H200-1 repo worktree 有未提交修改，不能作为 clean canonical source；其 checkpoint 属于 `frank:ai-users`，大小为 `46,698,761` 字节，SHA256 为 `758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4`。H200-2 repo clean；上述 checkpoint 对 `frank` 可读，属于 `hezhou:ai-users`、权限为 `0644`，大小和 SHA256 与 H200-1 的 Frank checkpoint 相同。由于存储是 node-local，不能让 H200-2 直接引用 H200-1 路径，也不能仅凭资产存在宣称 teacher 已运行就绪。
+
+DA3 与 LAS2-H 的 source/checkpoint SHA、worktree、运行参数和可见性必须从目标节点、resolved config 与实时文件重新核对。H200-2 仅将上述精确 checkpoint 路径作为已授权只读输入，不向 Hezhou 目录写入代码、缓存或日志，也不扩大到其他 Hezhou 资产；H200-1 dirty source 未处理前停止使用。
 
 ## 6. 文件传输
 
