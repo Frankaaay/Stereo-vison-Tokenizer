@@ -12,6 +12,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
+
 
 OFFSETS_AND_STRIDE = {
     "hy": ((0, 3, 6, 9), 12),
@@ -24,6 +26,14 @@ HY_CAMERA_COLUMNS = {
     "cam_left_wrist": "observation_images_cam_left_wrist",
     "cam_right_wrist": "observation_images_cam_right_wrist",
 }
+HY_CANONICAL_CAMERA_COLUMNS = {
+    "cam_high": "observation_images_cam_head",
+    "cam_left_wrist": "observation_images_cam_left_wrist",
+    "cam_right_wrist": "observation_images_cam_right_wrist",
+}
+HY_CANONICAL_MASK = Path(
+    "dataset_configs/masks/image_pixel_mask_hy_embodied.npz"
+)
 
 
 def _window_count(length, dataset_id):
@@ -40,6 +50,42 @@ def _digest(payload):
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hy_camera_contract(root, schema_names):
+    schema_names = set(schema_names)
+    if set(HY_CAMERA_COLUMNS.values()).issubset(schema_names):
+        return dict(HY_CAMERA_COLUMNS), None
+    if not set(HY_CANONICAL_CAMERA_COLUMNS.values()).issubset(schema_names):
+        missing = set(HY_CANONICAL_CAMERA_COLUMNS.values()).difference(schema_names)
+        raise ValueError(f"missing Hy mono camera columns {sorted(missing)}")
+    mask_path = root / HY_CANONICAL_MASK
+    if not mask_path.is_file():
+        raise FileNotFoundError(mask_path)
+    with np.load(mask_path) as payload:
+        mask = payload["mask"]
+    if mask.shape != (256, 256) or mask.dtype != np.bool_:
+        raise ValueError("canonical Hy mask must be bool [256,256]")
+    y, x = np.where(mask)
+    bbox = [int(y.min()), int(x.min()), int(y.max()) + 1, int(x.max()) + 1]
+    if bbox != [55, 0, 200, 256] or not mask[55:200, :].all() or int(mask.sum()) != 37120:
+        raise ValueError("canonical Hy mask content rectangle mismatch")
+    return dict(HY_CANONICAL_CAMERA_COLUMNS), {
+        "encoded_size_hw": [256, 256],
+        "source_size_hw": [240, 424],
+        "transform": "source_240x424_letterbox_256",
+        "content_bbox_yxyx": bbox,
+        "pixel_mask_relative_path": HY_CANONICAL_MASK.as_posix(),
+        "pixel_mask_sha256": _sha256_file(mask_path),
+    }
 
 
 def _aliases(values):
@@ -68,14 +114,9 @@ def build_hy(roots):
             meta_root = table_root / "meta" / "episodes"
             if not lance_path.is_dir() or not meta_root.is_dir():
                 continue
-            missing_columns = set(HY_CAMERA_COLUMNS.values()).difference(
-                lance.dataset(str(lance_path)).schema.names
+            camera_columns, stored_image = _hy_camera_contract(
+                root, lance.dataset(str(lance_path)).schema.names
             )
-            if missing_columns:
-                raise ValueError(
-                    f"{table_name}: missing Hy mono camera columns "
-                    f"{sorted(missing_columns)}"
-                )
             metadata = ds.dataset(str(meta_root), format="parquet").to_table(
                 columns=[
                     "episode_index",
@@ -95,9 +136,11 @@ def build_hy(roots):
                     "episode_index": int(row["episode_index"]),
                     "length": length,
                     "dataset_from_index": int(row["dataset_from_index"]),
-                    "camera_columns": dict(HY_CAMERA_COLUMNS),
+                    "camera_columns": camera_columns,
                     "fps": 30.0,
                 }
+                if stored_image is not None:
+                    contract["stored_image"] = stored_image
                 yield {
                     "schema": "hy-mono-three-camera-episode-v2",
                     "split": _split(episode_id),

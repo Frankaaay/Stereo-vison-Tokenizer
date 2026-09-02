@@ -19,7 +19,7 @@ from PIL import Image
 from torch.utils import data
 
 from .geometry import GeometryMapping
-from .lerobot_data import _AVContainerCache, _matrix, validate_calibration
+from .lerobot_data import _AVContainerCache, _matrix, sha256_file, validate_calibration
 
 
 HY_SCHEMA = "hy-mono-three-camera-episode-v2"
@@ -136,12 +136,14 @@ def _mono_sample(
     contract_sha256: str,
     temporal_mode: str,
     extra: dict[str, Any],
+    source_hw_override: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     if rgb.dtype != np.uint8 or rgb.ndim != 4 or rgb.shape[1] != 3:
         raise ValueError("mono RGB must be uint8 [T,3,H,W]")
     raw_rgb = torch.from_numpy(rgb.copy())
-    source_hw = tuple(int(value) for value in rgb.shape[-2:])
-    geometry = GeometryMapping.create(source_hw, source_hw=source_hw)
+    rectified_hw = tuple(int(value) for value in rgb.shape[-2:])
+    source_hw = source_hw_override or rectified_hw
+    geometry = GeometryMapping.create(rectified_hw, source_hw=source_hw)
     letterboxed, non_padding = geometry.student_letterbox(raw_rgb)
     da3_images = geometry.da3_preprocess(raw_rgb)
     video = letterboxed.div(255.0).sub(0.5)
@@ -186,6 +188,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         if not 0 <= self.single_frame_source_index < 4:
             raise ValueError("single-frame source index must be in [0,3]")
         self.records = _read_jsonl(self.manifest_path, HY_SCHEMA, split)
+        stored_image_assets = {}
         for record in self.records:
             required = {
                 "root_alias",
@@ -209,6 +212,43 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
                 raise ValueError(
                     f"invalid Hy camera contract: {record.get('episode_id')}"
                 )
+            stored_image = record.get("stored_image")
+            if stored_image is not None:
+                expected = {
+                    "encoded_size_hw": [256, 256],
+                    "source_size_hw": [240, 424],
+                    "transform": "source_240x424_letterbox_256",
+                    "content_bbox_yxyx": [55, 0, 200, 256],
+                }
+                if not isinstance(stored_image, dict) or any(
+                    stored_image.get(key) != value for key, value in expected.items()
+                ):
+                    raise ValueError(
+                        f"invalid canonical Hy image contract: {record.get('episode_id')}"
+                    )
+                relative = Path(stored_image.get("pixel_mask_relative_path", ""))
+                expected_sha256 = stored_image.get("pixel_mask_sha256", "")
+                root = _resolve_alias_path(
+                    self.root_aliases, record["root_alias"]
+                )
+                mask_path = (root / relative).resolve()
+                if (
+                    relative.is_absolute()
+                    or not relative.parts
+                    or not mask_path.is_relative_to(root)
+                    or not mask_path.is_file()
+                ):
+                    raise ValueError(
+                        f"invalid canonical Hy pixel mask: {record.get('episode_id')}"
+                    )
+                previous_sha256 = stored_image_assets.setdefault(
+                    mask_path, expected_sha256
+                )
+                if previous_sha256 != expected_sha256:
+                    raise ValueError(f"conflicting canonical Hy pixel mask: {mask_path}")
+        for mask_path, expected_sha256 in stored_image_assets.items():
+            if len(expected_sha256) != 64 or sha256_file(mask_path) != expected_sha256:
+                raise ValueError(f"canonical Hy pixel mask SHA256 mismatch: {mask_path}")
         self._build_spans(lambda record: tuple(record["camera_columns"]))
         self._lance_handles: dict[tuple[str, str], Any] = {}
         self._lance_pid = os.getpid()
@@ -240,11 +280,11 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         return self._lance_handles[key]
 
     @staticmethod
-    def _decode_jpeg(payload: bytes) -> np.ndarray:
+    def _decode_jpeg(payload: bytes, expected_hw=(240, 424)) -> np.ndarray:
         with Image.open(io.BytesIO(payload)) as image:
             rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        if rgb.shape != (240, 424, 3):
-            raise ValueError(f"Hy mono camera must be [240,424,3], got {rgb.shape}")
+        if rgb.shape != (*expected_hw, 3):
+            raise ValueError(f"Hy mono camera must be {[*expected_hw, 3]}, got {rgb.shape}")
         return rgb.transpose(2, 0, 1).copy()
 
     @staticmethod
@@ -305,7 +345,16 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             timestamps, relative, record.get("fps", 30.0)
         ):
             raise ValueError("Hy timestamps disagree with frame_index/fps")
-        rgb = np.stack([self._decode_jpeg(row[camera_column]) for row in rows])
+        stored_image = record.get("stored_image")
+        expected_hw = (256, 256) if stored_image is not None else (240, 424)
+        rgb = np.stack(
+            [self._decode_jpeg(row[camera_column], expected_hw) for row in rows]
+        )
+        source_hw_override = None
+        if stored_image is not None:
+            top, left, bottom, right = stored_image["content_bbox_yxyx"]
+            rgb = rgb[:, :, top:bottom, left:right]
+            source_hw_override = tuple(stored_image["source_size_hw"])
         return _mono_sample(
             rgb,
             sample_id=(
@@ -319,6 +368,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             contract_sha256=record["source_contract_sha256"],
             temporal_mode=temporal_mode,
             extra={"table_name": record["table_name"], "camera_id": camera_id},
+            source_hw_override=source_hw_override,
         )
 
 

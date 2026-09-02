@@ -1,12 +1,18 @@
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
+from scripts.data.build_pretrain_manifest import (
+    HY_CANONICAL_CAMERA_COLUMNS,
+    _hy_camera_contract,
+)
 from stereo_tokenizer.data import _load_root_aliases
-from stereo_tokenizer.pretrain_data import HY_SCHEMA, HyLanceMonoDataset
+from stereo_tokenizer.pretrain_data import HY_SCHEMA, HyLanceMonoDataset, _mono_sample
 
 
 class HyThreeCameraManifestTest(unittest.TestCase):
@@ -56,6 +62,45 @@ class HyThreeCameraManifestTest(unittest.TestCase):
         )
         self.assertEqual([span.sample_count for span in dataset.spans], [2, 2, 2])
         self.assertEqual(len(dataset), 6)
+
+    def test_canonical_hy_contract_crops_padding_before_geometry(self):
+        mask_path = (
+            self.root
+            / "dataset_configs"
+            / "masks"
+            / "image_pixel_mask_hy_embodied.npz"
+        )
+        mask_path.parent.mkdir(parents=True)
+        mask = np.zeros((256, 256), dtype=bool)
+        mask[55:200, :] = True
+        np.savez(mask_path, mask=mask)
+        camera_columns, stored_image = _hy_camera_contract(
+            self.root, HY_CANONICAL_CAMERA_COLUMNS.values()
+        )
+        self.assertEqual(camera_columns, HY_CANONICAL_CAMERA_COLUMNS)
+        self.assertEqual(stored_image["content_bbox_yxyx"], [55, 0, 200, 256])
+
+        canonical = np.zeros((256, 256, 3), dtype=np.uint8)
+        canonical[55:200] = 127
+        encoded = io.BytesIO()
+        Image.fromarray(canonical).save(encoded, format="JPEG")
+        decoded = HyLanceMonoDataset._decode_jpeg(encoded.getvalue(), (256, 256))
+        cropped = decoded[:, 55:200, :][None]
+        sample = _mono_sample(
+            cropped,
+            sample_id="hy/sample",
+            episode_id="episode",
+            dataset_id="hy",
+            frame_indices=np.asarray([0], dtype=np.int64),
+            timestamps=np.asarray([0.0], dtype=np.float64),
+            contract_sha256="a" * 64,
+            temporal_mode="single_frame",
+            extra={},
+            source_hw_override=(240, 424),
+        )
+        self.assertEqual(sample["geometry_mapping"]["source_hw"].tolist(), [240, 424])
+        self.assertEqual(sample["geometry_mapping"]["rectified_hw"].tolist(), [145, 256])
+        self.assertEqual(int(sample["non_padding_mask"].sum()), 37120)
 
     def test_root_alias_json_is_node_local(self):
         mapping = _load_root_aliases(

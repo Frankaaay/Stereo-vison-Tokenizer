@@ -14,7 +14,7 @@
 - 每条 episode 按 `calibration_bundle_sha256` 选择 K/D/R/P；交付键 `left_wrist/right_wrist` 在 manifest 中规范为训练代码的 `lefthand/righthand`。
 - rectification 状态按用户转述的数据侧确认记录为 `verified_pre_rectified / data_side_confirmed_by_user`，本任务不再执行像素级极线审计；原始审计文件 SHA256 仍写入 manifest 合同。
 - pixel mask 必须为数据根下 `image_pixel_mask_umi.npz`，reader 初始化时校验其 SHA256；有效区域为 `[32:224, 0:256]`。
-- Hy 当前 19 张已转换 Lance 表仍使用三路 `cam_high/cam_left_wrist/cam_right_wrist`、240×424，符合现有 reader，无需代码改动。LIBERO 继续使用现有 LeRobot v2.1 manifest 路径。
+- Hy 当前 19 张 Lance 表统一使用物理列 `cam_head/cam_left_wrist/cam_right_wrist`，JPEG 已存储为 256×256；有效矩形为 `[55:200,0:256]`，对应源 240×424 等比缩放并居中 padding。manifest 固化列名、mask SHA 和 bbox，reader 裁出有效矩形后复用原几何管线，避免 DA3 将黑边当成内容。LIBERO 继续使用现有 LeRobot v2.1 manifest 路径。
 
 ## 代码改动
 
