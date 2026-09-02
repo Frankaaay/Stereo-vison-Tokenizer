@@ -60,6 +60,8 @@ class CanonicalUMIManifestTest(unittest.TestCase):
     def test_builder_maps_flat_canonical_videos_and_reader_skips_second_resize(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            (root / "meta" / "episodes").mkdir(parents=True)
+            (root / "meta" / "info.json").write_text("{}", encoding="utf-8")
             for source_key in BUILDER.CANONICAL_VIDEO_KEYS.values():
                 path = root / "videos" / source_key / "chunk-000" / "file-007.mp4"
                 path.parent.mkdir(parents=True, exist_ok=True)
