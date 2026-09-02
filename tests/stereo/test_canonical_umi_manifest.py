@@ -43,6 +43,14 @@ def calibration():
 
 
 class CanonicalUMIManifestTest(unittest.TestCase):
+    def test_outer_dataset_root_resolves_one_published_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            table_root = root / "table_000"
+            (table_root / "meta" / "episodes").mkdir(parents=True)
+            (table_root / "meta" / "info.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(BUILDER._canonical_table_root(root), table_root)
+
     def test_delivery_calibration_view_names_are_normalized(self):
         source = calibration()
         normalized = BUILDER._normalize_calibration(source, "a" * 64)

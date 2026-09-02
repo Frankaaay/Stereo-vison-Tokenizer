@@ -153,6 +153,22 @@ def _load_inputs(input_root: Path):
     return mappings, bundles, transform, provenance, hashes
 
 
+def _canonical_table_root(dataset_root: Path) -> Path:
+    if (dataset_root / "meta" / "info.json").is_file():
+        return dataset_root
+    candidates = [
+        path
+        for path in sorted(dataset_root.glob("table_*"))
+        if (path / "meta" / "info.json").is_file()
+        and (path / "meta" / "episodes").is_dir()
+    ]
+    if len(candidates) != 1:
+        raise ValueError(
+            "canonical UMI dataset root must contain exactly one published table"
+        )
+    return candidates[0]
+
+
 def _episode_rows(dataset_root: Path):
     try:
         import pyarrow.dataset as ds
@@ -168,18 +184,22 @@ def _episode_rows(dataset_root: Path):
                 f"videos/{source_key}/to_timestamp",
             ]
         )
-    table = ds.dataset(
-        str(dataset_root / "meta" / "episodes"), format="parquet"
-    ).to_table(columns=columns)
+    table_root = _canonical_table_root(dataset_root)
+    table = ds.dataset(str(table_root / "meta" / "episodes"), format="parquet").to_table(
+        columns=columns
+    )
     return table.to_pylist()
 
 
-def _video_record(dataset_root: Path, row, source_key: str, length: int):
+def _video_record(
+    dataset_root: Path, table_root: Path, row, source_key: str, length: int
+):
     chunk = int(row[f"videos/{source_key}/chunk_index"])
     file_index = int(row[f"videos/{source_key}/file_index"])
-    relative = Path(
+    table_relative = Path(
         "videos", source_key, f"chunk-{chunk:03d}", f"file-{file_index:03d}.mp4"
     )
+    relative = table_root.relative_to(dataset_root) / table_relative
     path = dataset_root / relative
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -198,6 +218,7 @@ def _video_record(dataset_root: Path, row, source_key: str, length: int):
 
 def collect_records(dataset_root: Path, mappings, bundles, audit_sha256: str, mask):
     records = []
+    table_root = _canonical_table_root(dataset_root)
     seen_episode_indices = set()
     seen_episode_ids = set()
     for row in _episode_rows(dataset_root):
@@ -223,7 +244,9 @@ def collect_records(dataset_root: Path, mappings, bundles, audit_sha256: str, ma
         shard_coordinates = set()
         for pair, manifest_key in VIDEO_KEYS.items():
             source_key = CANONICAL_VIDEO_KEYS[pair]
-            videos[manifest_key] = _video_record(dataset_root, row, source_key, length)
+            videos[manifest_key] = _video_record(
+                dataset_root, table_root, row, source_key, length
+            )
             shard_coordinates.add(
                 (
                     int(row[f"videos/{source_key}/chunk_index"]),
@@ -399,8 +422,9 @@ def main():
         raise FileNotFoundError("dataset and calibration input roots must exist")
     mappings, bundles, _, provenance, input_hashes = _load_inputs(args.input_root)
     expected_count = int(provenance["audit_episode_count"])
+    table_root = _canonical_table_root(args.dataset_root)
     dataset_info = json.loads(
-        (args.dataset_root / "meta" / "info.json").read_text(encoding="utf-8")
+        (table_root / "meta" / "info.json").read_text(encoding="utf-8")
     )
     if int(dataset_info["total_episodes"]) != expected_count:
         raise ValueError("dataset and audit episode counts disagree")

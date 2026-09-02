@@ -9,6 +9,7 @@
 ## 数据合同
 
 - UMI canonical episode 总数：90,174；episode 到原始 UUID、sidecar 和 40 套六相机标定的映射由数据侧交付目录提供。
+- H100 发布目录的实际结构是外层数据根下唯一的 `table_000`；episode parquet、`info.json` 和视频位于该表内，pixel mask 位于外层数据根。builder 显式校验并解析这一层级。
 - 六路图像已存储为 256×256；源图像变换为 640×480 等比缩放到 256×192，再上下各补 32 像素黑边。reader 必须跳过旧路径中的二次 resize/pad。
 - 每条 episode 按 `calibration_bundle_sha256` 选择 K/D/R/P；交付键 `left_wrist/right_wrist` 在 manifest 中规范为训练代码的 `lefthand/righthand`。
 - rectification 状态按用户转述的数据侧确认记录为 `verified_pre_rectified / data_side_confirmed_by_user`，本任务不再执行像素级极线审计；原始审计文件 SHA256 仍写入 manifest 合同。
