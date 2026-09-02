@@ -21,6 +21,7 @@
 - `scripts/data/build_canonical_umi_stereo_manifest.py`：流式读取 canonical episode parquet、数据侧映射/标定/转换 provenance，生成确定性 90/5/5 split、manifest、40 套标定 catalog 与 summary；拒绝覆盖既有输出。
 - `stereo_tokenizer/lerobot_data.py`：对带 `stored_image` 合同的 256×256 canonical 视频跳过二次空间变换，并校验 mask 路径与哈希；按 catalog SHA 和 bundle SHA 解析共享标定，旧 640×480 manifest 行为保持不变。
 - `tests/stereo/test_canonical_umi_manifest.py`：覆盖标定视角名规范化、flat canonical 视频映射、reader 直通、fx/baseline 与确定性 split。
+- `scripts/data/smoke_pretrain_manifests.py`：由 Slurm 调用，对选定 manifest 各解码一个 single-frame 与 four-frame 样本并输出 shape、dtype、finite 和 sample ID。
 
 ## 验证记录
 
