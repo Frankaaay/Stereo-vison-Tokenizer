@@ -8,6 +8,7 @@ from scripts.data.filter_hy_manifest_valid_cameras import (
     anchor_frame_indices,
     index_rows_by_identity,
     jpeg_error,
+    upgrade_legacy_record,
 )
 
 
@@ -43,6 +44,28 @@ class HyCameraManifestFilterTest(unittest.TestCase):
         )
         self.assertIn("episode_index = 7 AND frame_index IN (0, 3, 6, 9)", value)
         self.assertIn("episode_index = 9 AND frame_index IN (0, 3, 6, 9, 12, 15, 18, 21)", value)
+
+    def test_legacy_head_record_is_upgraded_without_changing_split(self):
+        upgraded = upgrade_legacy_record(
+            {
+                "schema": "hy-cam-high-episode-v1",
+                "split": "val",
+                "episode_id": "table_013:7",
+                "root_alias": "hy_rest",
+                "table_name": "table_013",
+                "episode_index": 7,
+                "length": 100,
+                "dataset_from_index": 900,
+                "camera_column": "observation_images_cam_high",
+                "fps": 30.0,
+                "window_count": 8,
+                "source_contract_sha256": "legacy",
+            }
+        )
+        self.assertEqual(upgraded["schema"], "hy-mono-three-camera-episode-v2")
+        self.assertEqual(upgraded["split"], "val")
+        self.assertEqual(set(upgraded["camera_columns"]), {"cam_high", "cam_left_wrist", "cam_right_wrist"})
+        self.assertNotEqual(upgraded["source_contract_sha256"], "legacy")
 
 
 if __name__ == "__main__":

@@ -17,15 +17,47 @@ FRAME_OFFSETS = (0, 3, 6, 9)
 FRAME_STRIDE = 12
 
 
+def _digest(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def upgrade_legacy_record(record: dict) -> dict:
+    if record.get("schema") == "hy-mono-three-camera-episode-v2":
+        return record
+    if record.get("schema") != "hy-cam-high-episode-v1":
+        raise ValueError(f"unsupported Hy schema {record.get('schema')!r}")
+    contract = {
+        "root_alias": record["root_alias"],
+        "table_name": record["table_name"],
+        "episode_index": int(record["episode_index"]),
+        "length": int(record["length"]),
+        "dataset_from_index": int(record["dataset_from_index"]),
+        "camera_columns": {
+            "cam_high": "observation_images_cam_high",
+            "cam_left_wrist": "observation_images_cam_left_wrist",
+            "cam_right_wrist": "observation_images_cam_right_wrist",
+        },
+        "fps": float(record.get("fps", 30.0)),
+    }
+    return {
+        "schema": "hy-mono-three-camera-episode-v2",
+        "split": record["split"],
+        "episode_id": record["episode_id"],
+        "window_count": int(record["window_count"]),
+        "source_contract_sha256": _digest(contract),
+        **contract,
+    }
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     records = []
     with path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
-            record = json.loads(line)
-            if record.get("schema") != "hy-mono-three-camera-episode-v2":
-                raise ValueError(f"{path}:{line_number}: invalid Hy schema")
+            record = upgrade_legacy_record(json.loads(line))
             if set(record.get("camera_columns", {})) != set(CAMERA_IDS):
                 raise ValueError(f"{path}:{line_number}: invalid camera contract")
             records.append(record)
