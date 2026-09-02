@@ -38,6 +38,8 @@ SOURCE_HW = (480, 640)
 RESIZE_HW = (192, 256)
 OUTPUT_HW = (256, 256)
 PADDING_LTRB = (0, 32, 0, 32)
+CANONICAL_STORED_HW = (256, 256)
+CANONICAL_STORED_TRANSFORM = "source_640x480_scale_0.4_pad_y32"
 SUPPORTED_DISTORTION_MODELS = {"plumb_bob", "rational_polynomial"}
 
 
@@ -192,6 +194,7 @@ class LeRobotStereoDataset(data.Dataset):
             raise ValueError("single-frame source index is out of range")
 
         self.records = self._read_manifest()
+        self._validate_stored_image_assets()
         self.episode_spans = []
         self._ends = []
         sample_count = 0
@@ -282,6 +285,34 @@ class LeRobotStereoDataset(data.Dataset):
                 f"{record['episode_id']}: rectification audit SHA mismatch"
             )
         validate_calibration(record["calibration"], record["episode_id"])
+        stored_image = record.get("stored_image")
+        if stored_image is not None:
+            expected = {
+                "encoded_size_hw": list(CANONICAL_STORED_HW),
+                "transform": CANONICAL_STORED_TRANSFORM,
+                "source_size_hw": list(SOURCE_HW),
+                "resize_size_hw": list(RESIZE_HW),
+                "padding_ltrb": list(PADDING_LTRB),
+            }
+            if not isinstance(stored_image, dict):
+                raise ValueError(
+                    f"{record['episode_id']}: stored_image must be an object"
+                )
+            for key, value in expected.items():
+                if stored_image.get(key) != value:
+                    raise ValueError(
+                        f"{record['episode_id']}: stored_image {key} mismatch"
+                    )
+            mask_path = Path(stored_image.get("pixel_mask_relative_path", ""))
+            mask_sha256 = stored_image.get("pixel_mask_sha256", "")
+            if mask_path.is_absolute() or not mask_path.parts:
+                raise ValueError(
+                    f"{record['episode_id']}: invalid stored-image pixel mask path"
+                )
+            if len(mask_sha256) != 64:
+                raise ValueError(
+                    f"{record['episode_id']}: invalid stored-image pixel mask SHA256"
+                )
         for key in VIDEO_KEYS.values():
             video = record["videos"].get(key)
             if not isinstance(video, dict):
@@ -291,6 +322,24 @@ class LeRobotStereoDataset(data.Dataset):
                 raise ValueError(f"{record['episode_id']}: invalid video path {key}")
             if "from_timestamp" not in video or "to_timestamp" not in video:
                 raise ValueError(f"{record['episode_id']}: missing interval for {key}")
+
+    def _validate_stored_image_assets(self):
+        expected_assets = {}
+        for record in self.records:
+            stored_image = record.get("stored_image")
+            if stored_image is None:
+                continue
+            relative = Path(stored_image["pixel_mask_relative_path"])
+            expected_sha256 = stored_image["pixel_mask_sha256"]
+            previous = expected_assets.setdefault(relative, expected_sha256)
+            if previous != expected_sha256:
+                raise ValueError(f"conflicting pixel mask SHA256 for {relative}")
+        for relative, expected_sha256 in expected_assets.items():
+            path = (self.dataset_root / relative).resolve()
+            if not path.is_relative_to(self.dataset_root) or not path.is_file():
+                raise FileNotFoundError(path)
+            if sha256_file(path) != expected_sha256:
+                raise ValueError(f"pixel mask SHA256 mismatch: {path}")
 
     def __len__(self):
         return self.sample_count
@@ -363,6 +412,13 @@ class LeRobotStereoDataset(data.Dataset):
         return maps
 
     def _prepare_image(self, image, record, view, eye):
+        if record.get("stored_image") is not None:
+            if image.shape != (*CANONICAL_STORED_HW, 3) or image.dtype != np.uint8:
+                raise ValueError(
+                    f"{record['episode_id']}: expected stored uint8 "
+                    f"{CANONICAL_STORED_HW}x3 image"
+                )
+            return image
         if image.shape != (*SOURCE_HW, 3) or image.dtype != np.uint8:
             raise ValueError(
                 f"{record['episode_id']}: expected uint8 {SOURCE_HW}x3 image"
