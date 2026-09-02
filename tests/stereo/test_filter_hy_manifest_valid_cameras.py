@@ -4,6 +4,7 @@ import unittest
 from PIL import Image
 
 from scripts.data.filter_hy_manifest_valid_cameras import (
+    anchor_filter,
     anchor_frame_indices,
     index_rows_by_identity,
     jpeg_error,
@@ -32,6 +33,16 @@ class HyCameraManifestFilterTest(unittest.TestCase):
         indexed = index_rows_by_identity(rows)
         self.assertIs(indexed[(1, 0)], rows[1])
         self.assertIs(indexed[(2, 3)], rows[0])
+
+    def test_anchor_filter_uses_episode_and_frame_identity(self):
+        value = anchor_filter(
+            [
+                {"episode_index": 7, "window_count": 1},
+                {"episode_index": 9, "window_count": 2},
+            ]
+        )
+        self.assertIn("episode_index = 7 AND frame_index IN (0, 3, 6, 9)", value)
+        self.assertIn("episode_index = 9 AND frame_index IN (0, 3, 6, 9, 12, 15, 18, 21)", value)
 
 
 if __name__ == "__main__":

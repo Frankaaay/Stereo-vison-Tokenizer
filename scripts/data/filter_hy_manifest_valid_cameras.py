@@ -83,6 +83,21 @@ def index_rows_by_identity(rows: list[dict]) -> dict[tuple[int, int], dict]:
     return indexed
 
 
+def anchor_filter(records: list[dict]) -> str:
+    clauses = []
+    for record in records:
+        frames = ", ".join(
+            str(value) for value in anchor_frame_indices(int(record["window_count"]))
+        )
+        clauses.append(
+            f"(episode_index = {int(record['episode_index'])} AND "
+            f"frame_index IN ({frames}))"
+        )
+    if not clauses:
+        raise ValueError("cannot build an empty anchor filter")
+    return " OR ".join(clauses)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
@@ -126,21 +141,21 @@ def main() -> None:
         for batch_start in range(0, len(table_records), args.episode_batch_size):
             batch = table_records[batch_start : batch_start + args.episode_batch_size]
             requests = []
-            absolute_indices = []
             for record in batch:
                 for frame_index in anchor_frame_indices(int(record["window_count"])):
                     requests.append((record, frame_index))
-                    absolute_indices.append(int(record["dataset_from_index"]) + frame_index)
-            rows = dataset.take(absolute_indices, columns=columns).to_pylist()
+            rows = dataset.to_table(
+                filter=anchor_filter(batch), columns=columns
+            ).to_pylist()
             if len(rows) != len(requests):
-                raise ValueError(f"{table_name}: Lance take row count mismatch")
+                raise ValueError(f"{table_name}: Lance anchor row count mismatch")
             indexed_rows = index_rows_by_identity(rows)
             requested_identities = {
                 (int(record["episode_index"]), frame_index)
                 for record, frame_index in requests
             }
             if set(indexed_rows) != requested_identities:
-                raise ValueError(f"{table_name}: Lance take identity mismatch")
+                raise ValueError(f"{table_name}: Lance anchor identity mismatch")
             for record, frame_index in requests:
                 row = indexed_rows[(int(record["episode_index"]), frame_index)]
                 for camera_id, column in camera_columns.items():
