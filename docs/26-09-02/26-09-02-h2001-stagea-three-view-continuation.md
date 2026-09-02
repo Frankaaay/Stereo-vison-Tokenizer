@@ -88,3 +88,13 @@ is copied or re-encoded, and the existing manifest is not overwritten.
   because H200 could not resolve `github.com`; launch proceeded on the already
   verified and previously synced SHA per the user's instruction to start
   immediately.
+- Attempt v3 subsequently exited with code 134 before completing generator
+  update 44,001. The first root-cause exception was not NCCL: rank 4 raised
+  `PIL.UnidentifiedImageError` while fetching its first Hy
+  `mono/four_frame` batch. Deterministic replay located sample index 9,881,756
+  at `hy_rest/table_020`, episode `table_020:10932` (episode index 10,932),
+  camera `cam_right_wrist`, window start 0, frame 0. The Lance payload was one
+  byte `0x00`, so it was not a JPEG. The other ranks then waited at collective
+  sequence 25 and only surfaced the secondary NCCL timeout after 30 minutes.
+  Offline W&B run `offline-run-20260902_011444-eaejdrn8` was created, but no
+  optimizer update or new checkpoint was produced. All eight GPUs were released.
