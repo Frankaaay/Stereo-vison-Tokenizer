@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 
 IDENTITY_SCHEMA = "stereo-tokenizer-checkpoint-split-identities-v1"
+CANONICAL_SPLIT_SCHEMA = "stereo-tokenizer-canonical-split-manifest-v1"
 SELECTION_SCHEMA = "stereo-tokenizer-stage-a-selection-v1"
 IDENTITY_CONTRACT_SHA256 = {
     "hy": "fc0075580bbb5a353a9ae151ad8a604a5665b78bca0bf98f92eafcb6f0a17caf",
@@ -53,18 +55,32 @@ def read_identity_contract(
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
-    actual = sha256_file(source)
-    expected = IDENTITY_CONTRACT_SHA256[dataset_id]
-    if actual != expected:
-        raise ValueError(
-            f"{source}: identity SHA256 mismatch, expected {expected}, got {actual}"
-        )
     payload = json.loads(source.read_text(encoding="utf-8"))
-    expected_header = {
-        "schema": IDENTITY_SCHEMA,
-        "dataset_id": dataset_id,
-        "source_manifest_sha256": SOURCE_MANIFEST_SHA256[dataset_id],
-    }
+    actual = sha256_file(source)
+    schema = payload.get("schema")
+    if schema == IDENTITY_SCHEMA:
+        expected = IDENTITY_CONTRACT_SHA256[dataset_id]
+        if actual != expected:
+            raise ValueError(
+                f"{source}: identity SHA256 mismatch, expected {expected}, got {actual}"
+            )
+        expected_header = {
+            "schema": IDENTITY_SCHEMA,
+            "dataset_id": dataset_id,
+            "source_manifest_sha256": SOURCE_MANIFEST_SHA256[dataset_id],
+        }
+    elif schema == CANONICAL_SPLIT_SCHEMA:
+        digest = payload.pop("manifest_sha256", None)
+        if digest != canonical_sha256(payload):
+            raise ValueError(f"{source}: canonical split manifest SHA256 mismatch")
+        payload["manifest_sha256"] = digest
+        payload["source_manifest_sha256"] = digest
+        expected_header = {
+            "schema": CANONICAL_SPLIT_SCHEMA,
+            "dataset_id": dataset_id,
+        }
+    else:
+        raise ValueError(f"{source}: unsupported identity schema {schema!r}")
     mismatches = {
         key: (payload.get(key), value)
         for key, value in expected_header.items()
@@ -80,6 +96,32 @@ def read_identity_contract(
         episode_ids
     ):
         raise ValueError(f"{source}: empty or duplicate episode identities")
+    invalid_splits = {
+        record.get("split") for record in records
+    } - {"train", "val", "test"}
+    if invalid_splits:
+        raise ValueError(f"{source}: invalid split labels {sorted(map(str, invalid_splits))}")
+    if schema == CANONICAL_SPLIT_SCHEMA:
+        required = {
+            "episode_id",
+            "split",
+            "canonical_config",
+            "canonical_config_sha256",
+            "canonical_episode_index",
+            "canonical_rgb_target_length",
+            "source_fps",
+        }
+        if any(not required.issubset(record) for record in records):
+            raise ValueError(f"{source}: canonical episode record fields are incomplete")
+        policy = payload.get("split_policy", {})
+        if policy.get("name") != "sha256_global_episode_rank_exact_90_5_5_v1":
+            raise ValueError(f"{source}: unsupported canonical split policy")
+        actual_counts = dict(Counter(record["split"] for record in records))
+        if actual_counts != policy.get("counts"):
+            raise ValueError(f"{source}: canonical split counts mismatch")
+        loader = payload.get("canonical_loader", {})
+        if loader.get("git_sha") != "d51377ac450b0066bc0c8eb13939bcfae47275ff":
+            raise ValueError(f"{source}: canonical loader SHA mismatch")
     payload["identity_contract_path"] = str(source)
     payload["identity_contract_sha256"] = actual
     return payload

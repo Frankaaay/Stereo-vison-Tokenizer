@@ -7,11 +7,14 @@ from types import SimpleNamespace
 import torch
 
 from evaluation.stage_a_contract import (
+    CANONICAL_SPLIT_SCHEMA,
     canonical_sha256,
+    read_identity_contract,
     read_selection,
     select_episode_windows,
     write_selection,
 )
+from evaluation.stage_a_manifest import _apportion_counts, assign_splits
 from evaluation.stage_a_metrics import StageA1MetricSuite, _content_crop
 from evaluation.tokenizer_stage_a import _run_parser
 
@@ -38,6 +41,58 @@ class StageASelectionTest(unittest.TestCase):
             }
             for index in range(8)
         ]
+
+    def test_canonical_split_counts_and_assignment_are_exact_and_deterministic(self):
+        self.assertEqual(
+            _apportion_counts(90174),
+            {"train": 81156, "val": 4509, "test": 4509},
+        )
+        records = [{"episode_id": f"episode-{index}"} for index in range(20)]
+        first, counts = assign_splits(records, dataset_id="umi", seed=3407)
+        second, _ = assign_splits(
+            list(reversed(records)), dataset_id="umi", seed=3407
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(counts, {"train": 18, "val": 1, "test": 1})
+
+    def test_canonical_manifest_detects_tampering(self):
+        payload = {
+            "schema": CANONICAL_SPLIT_SCHEMA,
+            "dataset_id": "umi",
+            "split_policy": {
+                "name": "sha256_global_episode_rank_exact_90_5_5_v1",
+                "counts": {"train": 1, "val": 1, "test": 1},
+            },
+            "canonical_loader": {
+                "git_sha": "d51377ac450b0066bc0c8eb13939bcfae47275ff"
+            },
+            "records": [
+                {
+                    "episode_id": identity,
+                    "split": split,
+                    "canonical_config": "/configs/umi.yaml",
+                    "canonical_config_sha256": "a" * 64,
+                    "canonical_episode_index": index,
+                    "canonical_rgb_target_length": 16,
+                    "source_fps": 30.0,
+                }
+                for index, (identity, split) in enumerate(
+                    (("train", "train"), ("val", "val"), ("test", "test"))
+                )
+            ],
+        }
+        payload["manifest_sha256"] = canonical_sha256(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(payload))
+            loaded = read_identity_contract(path, dataset_id="umi")
+            self.assertEqual(
+                loaded["source_manifest_sha256"], payload["manifest_sha256"]
+            )
+            payload["records"][0]["split"] = "test"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "manifest SHA256 mismatch"):
+                read_identity_contract(path, dataset_id="umi")
 
     def test_selection_is_deterministic_distinct_and_four_frame(self):
         first = select_episode_windows(

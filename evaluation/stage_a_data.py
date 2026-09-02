@@ -113,6 +113,11 @@ def _episode_addresses(dataset) -> dict[int, tuple[int, dict[str, Any]]]:
 def _config_for_identity(
     dataset_id: str, record: dict[str, Any], config_root: Path
 ) -> Path:
+    if "canonical_config" in record:
+        config = Path(record["canonical_config"]).expanduser().resolve()
+        if not config.is_file():
+            raise FileNotFoundError(config)
+        return config
     if dataset_id == "umi":
         filename = "umi_table_000.yaml"
     elif dataset_id == "hy":
@@ -173,9 +178,13 @@ def build_canonical_selection(
     config_root = Path(canonical_config_root).expanduser().resolve()
     umi_mapping = None
     ledger_provenance = None
-    if dataset_id == "umi":
+    direct_identity = all(
+        "canonical_config" in record and "canonical_episode_index" in record
+        for record in split_records
+    )
+    if dataset_id == "umi" and not direct_identity:
         if umi_publish_ledger is None:
-            raise ValueError("UMI mapping requires --umi-publish-ledger")
+            raise ValueError("legacy UMI mapping requires --umi-publish-ledger")
         umi_mapping, ledger_provenance = _umi_ledger(umi_publish_ledger)
 
     config_by_episode = {}
@@ -186,6 +195,10 @@ def build_canonical_selection(
             config_by_episode[episode_id] = _config_for_identity(
                 dataset_id, record, config_root
             )
+            if direct_identity and sha256_file(config_by_episode[episode_id]) != record[
+                "canonical_config_sha256"
+            ]:
+                raise ValueError(f"{episode_id}: canonical config drifted after manifest freeze")
         except FileNotFoundError:
             missing.append(episode_id)
     configs = set(config_by_episode.values())
@@ -200,7 +213,9 @@ def build_canonical_selection(
         config = config_by_episode.get(episode_id)
         if config is None:
             continue
-        if dataset_id == "umi":
+        if direct_identity:
+            canonical_index = int(record["canonical_episode_index"])
+        elif dataset_id == "umi":
             canonical_index = umi_mapping.get(episode_id)
             if canonical_index is None:
                 missing.append(episode_id)
@@ -218,6 +233,14 @@ def build_canonical_selection(
         if not isinstance(root_meta, list):
             raise RuntimeError("pinned canonical loader root metadata ABI is unavailable")
         source_fps = float(root_meta[int(episode["root_index"])]["source_fps"])
+        if "source_fps" in record and source_fps != float(record["source_fps"]):
+            raise ValueError(f"{episode_id}: source FPS drifted after manifest freeze")
+        if "canonical_rgb_target_length" in record and target_length != int(
+            record["canonical_rgb_target_length"]
+        ):
+            raise ValueError(
+                f"{episode_id}: RGB target length drifted after manifest freeze"
+            )
         window_count = max(0, (target_length - 4) // 4 + 1)
         candidates.append(
             {
@@ -287,6 +310,15 @@ class CanonicalStageADataset(Dataset):
         identity = read_identity_contract(
             identity_meta["path"], dataset_id=self.dataset_id
         )
+        if identity["identity_contract_sha256"] != identity_meta["sha256"]:
+            raise ValueError("identity contract file drifted after selection creation")
+        if (
+            identity["source_manifest_sha256"]
+            != identity_meta["source_manifest_sha256"]
+        ):
+            raise ValueError(
+                "identity contract semantic digest drifted after selection creation"
+            )
         split_ids = {
             str(record["episode_id"])
             for record in identity["records"]
