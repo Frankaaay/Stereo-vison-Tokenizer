@@ -73,6 +73,16 @@ def jpeg_error(payload) -> str | None:
     return None
 
 
+def index_rows_by_identity(rows: list[dict]) -> dict[tuple[int, int], dict]:
+    indexed = {}
+    for row in rows:
+        key = (int(row["episode_index"]), int(row["frame_index"]))
+        if key in indexed:
+            raise ValueError(f"duplicate Lance row identity {key}")
+        indexed[key] = row
+    return indexed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
@@ -124,11 +134,15 @@ def main() -> None:
             rows = dataset.take(absolute_indices, columns=columns).to_pylist()
             if len(rows) != len(requests):
                 raise ValueError(f"{table_name}: Lance take row count mismatch")
-            for (record, frame_index), row in zip(requests, rows, strict=True):
-                if int(row["episode_index"]) != int(record["episode_index"]):
-                    raise ValueError(f"{record['episode_id']}: episode identity mismatch")
-                if int(row["frame_index"]) != frame_index:
-                    raise ValueError(f"{record['episode_id']}: frame identity mismatch")
+            indexed_rows = index_rows_by_identity(rows)
+            requested_identities = {
+                (int(record["episode_index"]), frame_index)
+                for record, frame_index in requests
+            }
+            if set(indexed_rows) != requested_identities:
+                raise ValueError(f"{table_name}: Lance take identity mismatch")
+            for record, frame_index in requests:
+                row = indexed_rows[(int(record["episode_index"]), frame_index)]
                 for camera_id, column in camera_columns.items():
                     checked_payloads += 1
                     error = jpeg_error(row[column])

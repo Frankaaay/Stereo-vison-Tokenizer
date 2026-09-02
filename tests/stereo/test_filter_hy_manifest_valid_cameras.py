@@ -5,6 +5,7 @@ from PIL import Image
 
 from scripts.data.filter_hy_manifest_valid_cameras import (
     anchor_frame_indices,
+    index_rows_by_identity,
     jpeg_error,
 )
 
@@ -22,6 +23,15 @@ class HyCameraManifestFilterTest(unittest.TestCase):
         stream = io.BytesIO()
         Image.new("RGB", (424, 240)).save(stream, format="JPEG")
         self.assertIsNone(jpeg_error(stream.getvalue()))
+
+    def test_lance_take_rows_are_indexed_without_assuming_return_order(self):
+        rows = [
+            {"episode_index": 2, "frame_index": 3},
+            {"episode_index": 1, "frame_index": 0},
+        ]
+        indexed = index_rows_by_identity(rows)
+        self.assertIs(indexed[(1, 0)], rows[1])
+        self.assertIs(indexed[(2, 3)], rows[0])
 
 
 if __name__ == "__main__":
