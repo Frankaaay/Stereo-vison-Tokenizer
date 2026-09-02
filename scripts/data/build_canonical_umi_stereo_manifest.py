@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, str(ROOT))
 
 from stereo_tokenizer.lerobot_data import (  # noqa: E402
+    CALIBRATION_CATALOG_SCHEMA,
     CANONICAL_STORED_TRANSFORM,
     EYES,
     FRAME_OFFSETS,
@@ -185,10 +186,11 @@ def _episode_rows(dataset_root: Path):
             ]
         )
     table_root = _canonical_table_root(dataset_root)
-    table = ds.dataset(str(table_root / "meta" / "episodes"), format="parquet").to_table(
-        columns=columns
-    )
-    return table.to_pylist()
+    scanner = ds.dataset(
+        str(table_root / "meta" / "episodes"), format="parquet"
+    ).scanner(columns=columns, batch_size=1024, use_threads=False)
+    for batch in scanner.to_batches():
+        yield from batch.to_pylist()
 
 
 def _video_record(
@@ -276,7 +278,6 @@ def collect_records(dataset_root: Path, mappings, bundles, audit_sha256: str, ma
                 "source_episode_json_sha256": mapping["sidecar_sha256"],
                 "calibration_bundle_sha256": calibration_sha256,
                 "videos": videos,
-                "calibration": bundles[calibration_sha256],
                 "rectification": {
                     "mode": "verified_pre_rectified",
                     "status": "data_side_confirmed_by_user",
@@ -318,8 +319,30 @@ def assign_splits(records, seed):
             record["split"] = "test"
 
 
-def write_outputs(args, records, input_hashes, provenance):
+def write_outputs(args, records, bundles, input_hashes, provenance):
     audit_sha256 = input_hashes["rectification_calibration_audit.json"]
+    manifest_path = args.output_manifest.resolve()
+    summary_path = args.output_summary.resolve()
+    catalog_path = args.output_calibration_catalog.resolve()
+    for path in (manifest_path, summary_path, catalog_path):
+        if path.exists():
+            raise FileExistsError(f"refusing to overwrite existing output: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        catalog_relative = catalog_path.relative_to(manifest_path.parent).as_posix()
+    except ValueError as error:
+        raise ValueError("calibration catalog must be beside or below the manifest") from error
+    catalog_temporary = catalog_path.with_name(catalog_path.name + f".tmp-{os.getpid()}")
+    catalog_payload = {
+        "schema": CALIBRATION_CATALOG_SCHEMA,
+        "calibration_bundles": bundles,
+    }
+    catalog_temporary.write_text(
+        json.dumps(catalog_payload, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    catalog_sha256 = sha256_file(catalog_temporary)
     contract = {
         "schema": SCHEMA,
         "dataset_root": str(args.dataset_root),
@@ -347,17 +370,14 @@ def write_outputs(args, records, input_hashes, provenance):
             "note": args.rectification_confirmation,
         },
         "image_pixel_mask": provenance["image_pixel_mask"],
+        "calibration_catalog_relative_path": catalog_relative,
+        "calibration_catalog_sha256": catalog_sha256,
     }
     contract_sha256 = _sha256_json(contract)
     for record in records:
         record["contract_sha256"] = contract_sha256
-
-    manifest_path = args.output_manifest.resolve()
-    summary_path = args.output_summary.resolve()
-    for path in (manifest_path, summary_path):
-        if path.exists():
-            raise FileExistsError(f"refusing to overwrite existing output: {path}")
-        path.parent.mkdir(parents=True, exist_ok=True)
+        record["calibration_catalog_relative_path"] = catalog_relative
+        record["calibration_catalog_sha256"] = catalog_sha256
     manifest_temporary = manifest_path.with_name(
         manifest_path.name + f".tmp-{os.getpid()}"
     )
@@ -380,6 +400,7 @@ def write_outputs(args, records, input_hashes, provenance):
             "contract": contract,
             "contract_sha256": contract_sha256,
             "manifest_sha256": manifest_sha256,
+            "calibration_catalog_sha256": catalog_sha256,
             "episode_count": len(records),
             "sample_count": sum(record["window_count"] for record in records),
             "calibration_bundle_count": len(
@@ -393,10 +414,11 @@ def write_outputs(args, records, input_hashes, provenance):
             encoding="utf-8",
             newline="\n",
         )
+        os.replace(catalog_temporary, catalog_path)
         os.replace(manifest_temporary, manifest_path)
         os.replace(summary_temporary, summary_path)
     except BaseException:
-        for path in (manifest_temporary, summary_temporary):
+        for path in (catalog_temporary, manifest_temporary, summary_temporary):
             if path.exists():
                 path.unlink()
         raise
@@ -411,6 +433,7 @@ def build_parser():
     parser.add_argument("--rectification-confirmation", required=True)
     parser.add_argument("--output-manifest", type=Path, required=True)
     parser.add_argument("--output-summary", type=Path, required=True)
+    parser.add_argument("--output-calibration-catalog", type=Path, required=True)
     return parser
 
 
@@ -438,7 +461,7 @@ def main():
         provenance["image_pixel_mask"],
     )
     assign_splits(records, args.split_seed)
-    summary = write_outputs(args, records, input_hashes, provenance)
+    summary = write_outputs(args, records, bundles, input_hashes, provenance)
     print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
 
 

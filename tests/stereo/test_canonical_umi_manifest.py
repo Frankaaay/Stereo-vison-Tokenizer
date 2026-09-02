@@ -9,6 +9,7 @@ from unittest import mock
 import numpy as np
 
 from stereo_tokenizer.lerobot_data import (
+    CALIBRATION_CATALOG_SCHEMA,
     CANONICAL_STORED_TRANSFORM,
     LeRobotStereoDataset,
     VIDEO_KEYS,
@@ -107,6 +108,19 @@ class CanonicalUMIManifestTest(unittest.TestCase):
 
             record["split"] = "train"
             record["contract_sha256"] = "d" * 64
+            catalog = root / "calibration-catalog.json"
+            catalog.write_text(
+                json.dumps(
+                    {
+                        "schema": CALIBRATION_CATALOG_SCHEMA,
+                        "calibration_bundles": bundles,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            record["calibration_catalog_relative_path"] = catalog.name
+            record["calibration_catalog_sha256"] = sha256_file(catalog)
             manifest = root / "manifest.jsonl"
             manifest.write_text(json.dumps(record) + "\n", encoding="utf-8")
             dataset = LeRobotStereoDataset(
@@ -118,7 +132,7 @@ class CanonicalUMIManifestTest(unittest.TestCase):
             image = np.arange(256 * 256 * 3, dtype=np.uint8).reshape(256, 256, 3)
             prepared = dataset._prepare_image(image, record, "head", "left")
             self.assertIs(prepared, image)
-            fx, baseline = dataset._output_calibration(record)
+            fx, baseline = dataset._output_calibration(dataset.records[0])
             np.testing.assert_allclose(fx, [80.0, 80.0, 80.0])
             np.testing.assert_allclose(baseline, [0.055, 0.055, 0.055])
 

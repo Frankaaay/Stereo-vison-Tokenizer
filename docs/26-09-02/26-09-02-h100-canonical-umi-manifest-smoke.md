@@ -18,8 +18,8 @@
 
 ## 代码改动
 
-- `scripts/data/build_canonical_umi_stereo_manifest.py`：读取 canonical episode parquet、数据侧映射/标定/转换 provenance，生成确定性 90/5/5 split、manifest 与 summary；拒绝覆盖既有输出。
-- `stereo_tokenizer/lerobot_data.py`：对带 `stored_image` 合同的 256×256 canonical 视频跳过二次空间变换，并校验 mask 路径与哈希；旧 640×480 manifest 行为保持不变。
+- `scripts/data/build_canonical_umi_stereo_manifest.py`：流式读取 canonical episode parquet、数据侧映射/标定/转换 provenance，生成确定性 90/5/5 split、manifest、40 套标定 catalog 与 summary；拒绝覆盖既有输出。
+- `stereo_tokenizer/lerobot_data.py`：对带 `stored_image` 合同的 256×256 canonical 视频跳过二次空间变换，并校验 mask 路径与哈希；按 catalog SHA 和 bundle SHA 解析共享标定，旧 640×480 manifest 行为保持不变。
 - `tests/stereo/test_canonical_umi_manifest.py`：覆盖标定视角名规范化、flat canonical 视频映射、reader 直通、fx/baseline 与确定性 split。
 
 ## 验证记录
@@ -27,3 +27,4 @@
 - 本地 `python -m py_compile`：通过。
 - 本机缺少 `pytest`、`torch` 与 `pytorch_lightning`，因此本地动态测试未运行；不能将静态检查描述为 runtime 验证。
 - H100 manifest、真实视频解码、DataLoader 和 GPU smoke 结果在完成后补充，记录精确 commit、命令、Job ID、日志与输出路径。
+- 初次全量 UMI builder 在登录节点被 signal 9 终止，峰值 RSS 1,414,828 KiB。根因是一次性读取全部 parquet 并为每条 episode 重复序列化完整标定；已改为 1,024 行批流式读取和独立标定 catalog，后续生成改由 Slurm 执行。

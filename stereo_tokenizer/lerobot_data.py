@@ -40,6 +40,7 @@ OUTPUT_HW = (256, 256)
 PADDING_LTRB = (0, 32, 0, 32)
 CANONICAL_STORED_HW = (256, 256)
 CANONICAL_STORED_TRANSFORM = "source_640x480_scale_0.4_pad_y32"
+CALIBRATION_CATALOG_SCHEMA = "lerobot-stereo-calibration-catalog-v1"
 SUPPORTED_DISTORTION_MODELS = {"plumb_bob", "rational_polynomial"}
 
 
@@ -230,6 +231,7 @@ class LeRobotStereoDataset(data.Dataset):
 
     def _read_manifest(self):
         records = []
+        calibration_catalogs = {}
         with self.manifest_path.open("r", encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, start=1):
                 if not line.strip():
@@ -246,11 +248,57 @@ class LeRobotStereoDataset(data.Dataset):
                     )
                 if record.get("split") != self.split:
                     continue
+                if "calibration" not in record:
+                    self._resolve_catalog_calibration(
+                        record, line_number, calibration_catalogs
+                    )
                 self._validate_record(record, line_number)
                 records.append(record)
         if not records:
             raise ValueError(f"manifest contains no {self.split} episodes")
         return records
+
+    def _resolve_catalog_calibration(self, record, line_number, catalogs):
+        required = {
+            "calibration_bundle_sha256",
+            "calibration_catalog_relative_path",
+            "calibration_catalog_sha256",
+        }
+        missing = required.difference(record)
+        if missing:
+            raise ValueError(
+                f"{self.manifest_path}:{line_number}: missing {sorted(missing)}"
+            )
+        relative = Path(record["calibration_catalog_relative_path"])
+        if relative.is_absolute() or not relative.parts:
+            raise ValueError("invalid calibration catalog path")
+        path = (self.manifest_path.parent / relative).resolve()
+        if not path.is_relative_to(self.manifest_path.parent) or not path.is_file():
+            raise FileNotFoundError(path)
+        expected_sha256 = record["calibration_catalog_sha256"]
+        if len(expected_sha256) != 64:
+            raise ValueError("invalid calibration catalog SHA256")
+        if path not in catalogs:
+            if sha256_file(path) != expected_sha256:
+                raise ValueError(f"calibration catalog SHA256 mismatch: {path}")
+            catalog = json.loads(path.read_text(encoding="utf-8"))
+            if catalog.get("schema") != CALIBRATION_CATALOG_SCHEMA:
+                raise ValueError(f"unsupported calibration catalog: {path}")
+            bundles = catalog.get("calibration_bundles")
+            if not isinstance(bundles, dict) or not bundles:
+                raise ValueError(f"empty calibration catalog: {path}")
+            for bundle_sha256, calibration in bundles.items():
+                if len(bundle_sha256) != 64:
+                    raise ValueError(f"invalid calibration bundle key: {path}")
+                validate_calibration(calibration, bundle_sha256)
+            catalogs[path] = (expected_sha256, bundles)
+        catalog_sha256, bundles = catalogs[path]
+        if catalog_sha256 != expected_sha256:
+            raise ValueError(f"conflicting calibration catalog SHA256: {path}")
+        bundle_sha256 = record["calibration_bundle_sha256"]
+        if bundle_sha256 not in bundles:
+            raise ValueError(f"missing calibration bundle {bundle_sha256}")
+        record["calibration"] = bundles[bundle_sha256]
 
     def _validate_record(self, record, line_number):
         required = {
