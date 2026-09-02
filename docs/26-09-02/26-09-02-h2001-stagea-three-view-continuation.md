@@ -126,3 +126,22 @@ is copied or re-encoded, and the existing manifest is not overwritten.
 - Deterministic replay of rank 4's first update produced the same
   `mono/four_frame`, Hy, batch-size-48 request and decoded without an invalid
   payload. Training was not relaunched as part of manifest regeneration.
+
+## Validated-manifest relaunch
+
+- Attempt v4 was launched from clean commit
+  `6dd7d56f124cc5e2db5d7af44dff26bcd29cca63` in tmux session
+  `stereo-stagea-threeview-bs384-h2001-v4` with output root
+  `/data/home/frank/experiments/stereo-three-source-stagea-threeview-bs384-h2001-20260902-v4`.
+- The v4 launch script SHA256 is
+  `1cb440a885f06f5ac76a5685fa6471dcf9c67e77ea4678e82bbe1114e62984f3`.
+  The only training-contract changes from v3 are the validated Hy manifest path
+  and its SHA256; continuation counters, optimizer/scheduler policy, batch/GA,
+  mode weights, losses, teachers, target update, and offline W&B remain fixed.
+- Offline W&B run ID is `852e9jwo`, stored at
+  `/data/home/frank/experiments/stereo-three-source-stagea-threeview-bs384-h2001-20260902-v4/wandb/offline-run-20260902_103655-852e9jwo`.
+- The post-launch health gate observed all eight ranks training, 34 completed
+  physical batches, no exit marker, traceback, invalid image, or OOM, and GPU
+  memory usage of approximately 119--124 GiB per H200. The first scheduled mode
+  is Hy `mono/four_frame` with GA1, so this proves the run passed generator
+  update 44,001 rather than merely completing distributed initialization.
