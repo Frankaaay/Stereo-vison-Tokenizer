@@ -46,3 +46,6 @@
 - 输出：`/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/mono-joint-smoke-44ceaa9-2841`
 - 根因：joint-view 后 `mono/four_frame` 将 `24 x 3 views x 4 frames = 288` 张图一次展平送入 LPIPS；每卡已有约 `74.13 GiB` PyTorch allocation，LPIPS `normalize_tensor(x ** 2)` 继续申请 `4.50 GiB` 时失败。这不是 allocator 碎片或单卡故障
 - 修复：保持训练 BS/GA 和联合 encoder 合同不变，仅将 LPIPS 按 `(view, frame)` 分块，每次处理 `[B,C,H,W]`，再按元素总数恢复原有全局 mean 语义
+- LPIPS 修复 SHA：`fdc5831b35c8578e9f5db602b68ad7c3acaddebf`；定向 pytest Job `2854` 为 `COMPLETED`、exit code `0:0`，`21 passed, 3 warnings`
+- 修复后 smoke Job `2859` 已完成 4/4 training updates 并生成 `epoch=0-step=4.ckpt` 与 `last.ckpt`，证明原 LPIPS OOM 已消失；随后 validation rank 6 的 DA3 在申请 `7.59 GiB` 时 OOM，当时 `24.18 GiB` 为 reserved but unallocated。其余 rank 已到 20/20，作业无法健康收敛，确认失败后手动取消释放 8 卡
+- validation OOM 属于混合尺寸 teacher workload 的 allocator 碎片，启动脚本默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，同时保留外部显式覆盖能力；需重跑同合同 smoke 验证最终 exit code

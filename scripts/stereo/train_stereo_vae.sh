@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 : "${OUTPUT_ROOT:?set a repository-external output directory}"
 : "${GPU_COUNT:?set the number of visible GPUs}"
 : "${GLOBAL_BATCH_SIZE:?set the intended global batch size}"

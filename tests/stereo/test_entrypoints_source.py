@@ -97,6 +97,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             self.assertIn(f"${{{name}:?", source)
         self.assertIn('TRAIN_LAUNCHER=(python3)', source)
         self.assertIn(
+            'PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True', source
+        )
+        self.assertIn(
             'DISTRIBUTED_MODE}" == "single" && "${GPU_COUNT}" -gt 1', source
         )
         self.assertIn("--standalone", source)
