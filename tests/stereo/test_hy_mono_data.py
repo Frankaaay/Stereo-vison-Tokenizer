@@ -52,16 +52,16 @@ class HyThreeCameraManifestTest(unittest.TestCase):
         )
         return path
 
-    def test_hy_manifest_expands_three_cameras_equally(self):
+    def test_hy_manifest_bundles_three_cameras_per_window(self):
         dataset = HyLanceMonoDataset(
             self._manifest(), {"hy_primary": self.root}, split="train"
         )
         self.assertEqual(
             [span.variant for span in dataset.spans],
-            ["cam_high", "cam_left_wrist", "cam_right_wrist"],
+            ["all_views"],
         )
-        self.assertEqual([span.sample_count for span in dataset.spans], [2, 2, 2])
-        self.assertEqual(len(dataset), 6)
+        self.assertEqual([span.sample_count for span in dataset.spans], [2])
+        self.assertEqual(len(dataset), 2)
 
     def test_canonical_hy_contract_crops_padding_before_geometry(self):
         mask_path = (
@@ -85,10 +85,12 @@ class HyThreeCameraManifestTest(unittest.TestCase):
         encoded = io.BytesIO()
         Image.fromarray(canonical).save(encoded, format="JPEG")
         decoded = HyLanceMonoDataset._decode_jpeg(encoded.getvalue(), (256, 256))
-        cropped = decoded[:, 55:200, :][None]
+        cropped = decoded[:, 55:200, :][None, None]
         sample = _mono_sample(
             cropped,
             sample_id="hy/sample",
+            view_sample_ids=("hy/sample/cam_high",),
+            camera_ids=("cam_high",),
             episode_id="episode",
             dataset_id="hy",
             frame_indices=np.asarray([0], dtype=np.int64),
@@ -100,6 +102,7 @@ class HyThreeCameraManifestTest(unittest.TestCase):
         )
         self.assertEqual(sample["geometry_mapping"]["source_hw"].tolist(), [240, 424])
         self.assertEqual(sample["geometry_mapping"]["rectified_hw"].tolist(), [145, 256])
+        self.assertEqual(sample["video"].shape, (1, 1, 3, 1, 256, 256))
         self.assertEqual(int(sample["non_padding_mask"].sum()), 37120)
 
     def test_root_alias_json_is_node_local(self):

@@ -38,7 +38,10 @@ from stereo_tokenizer.online_gt import (
 
 
 STEREO_VIEW_NAMES = ("head", "lefthand", "righthand")
-MONO_VIEW_NAMES = ("cam_high",)
+MONO_VIEW_NAMES = {
+    "hy": ("cam_high", "cam_left_wrist", "cam_right_wrist"),
+    "libero": ("agentview", "wrist"),
+}
 CHECKPOINT_SEMANTIC_FIELDS = (
     "resolution",
     "image_channels",
@@ -693,8 +696,10 @@ def build_online_teacher(args, eye_mode, device):
 
 def attach_online_targets(args, eye_mode, teacher, batch):
     if eye_mode == "mono":
+        source = batch["da3_images"]
+        batch_size, views, time, channels, height, width = source.shape
         native_depth, native_confidence = teacher.infer_processed(
-            batch["da3_images"]
+            source.reshape(batch_size * views, time, channels, height, width)
         )
         attach_da3_student_targets(
             batch,
@@ -734,7 +739,7 @@ def batch_for_temporal_mode(batch, mode, source_index):
             result[key] = batch[key][..., source_index : source_index + 1, :, :]
     if "da3_images" in batch:
         result["da3_images"] = batch["da3_images"][
-            :, source_index : source_index + 1
+            :, :, source_index : source_index + 1
         ]
     eye_modes = result.get("eye_mode", ())
     if isinstance(eye_modes, str):
@@ -1313,7 +1318,11 @@ def evaluate_eye_mode(
 ):
     """Evaluate one native data/teacher contract across requested time modes."""
     loader = exact_eval_loader(args, dataset, eye_mode, rank, world_size)
-    view_names = MONO_VIEW_NAMES if eye_mode == "mono" else STEREO_VIEW_NAMES
+    view_names = (
+        MONO_VIEW_NAMES[args.mono_dataset]
+        if eye_mode == "mono"
+        else STEREO_VIEW_NAMES
+    )
     specs = evaluation_specs(args, eye_mode, temporal_modes)
     accumulators = {
         mode_id: empty_accumulator(device, len(view_names))

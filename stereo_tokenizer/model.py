@@ -662,9 +662,13 @@ class StereoVAE(pl.LightningModule):
             raise ValueError(f"unsupported temporal_mode {temporal_mode!r}")
         if mode_id != f"{eye_mode}/{temporal_mode}":
             raise ValueError("mode_id disagrees with eye/temporal metadata")
-        expected_view_count = 1 if eye_mode == "mono" else 3
-        if cls._uniform_batch_integer(batch, "view_count") != expected_view_count:
+        view_count = cls._uniform_batch_integer(batch, "view_count")
+        if view_count != int(batch["video"].shape[1]):
             raise ValueError("view_count metadata disagrees with eye_mode")
+        if eye_mode == "stereo" and view_count != 3:
+            raise ValueError("stereo eye mode requires view_count=3")
+        if eye_mode == "mono" and not 1 <= view_count <= 3:
+            raise ValueError("mono eye mode requires view_count in [1,3]")
         teacher_kind = cls._uniform_batch_metadata(batch, "teacher_kind")
         expected_teacher = "da3" if eye_mode == "mono" else "foundation_stereo"
         if teacher_kind != expected_teacher:
@@ -689,8 +693,8 @@ class StereoVAE(pl.LightningModule):
         _, views, eyes, channels, time, height, width = video.shape
         if eye_mode == "stereo" and (views, eyes) != (self.stereo_num_views, 2):
             raise ValueError("stereo eye mode requires V=3,E=2")
-        if eye_mode == "mono" and (views, eyes) != (1, 1):
-            raise ValueError("mono eye mode requires V=1,E=1")
+        if eye_mode == "mono" and (not 1 <= views <= self.stereo_num_views or eyes != 1):
+            raise ValueError("mono eye mode requires V in [1,3],E=1")
         if channels != 3:
             raise ValueError(f"expected RGB input, got {channels} channels")
         if time != expected_time:
@@ -778,8 +782,8 @@ class StereoVAE(pl.LightningModule):
                 f"latent must use [B,V,C,1,H,W], got {tuple(latent.shape)}"
             )
         view_count = latent.shape[1]
-        if view_count not in (1, self.stereo_num_views):
-            raise ValueError("latent view count must be one or three")
+        if not 1 <= view_count <= self.stereo_num_views:
+            raise ValueError("latent view count must be in [1,3]")
         if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
             raise ValueError("latent must contain 48 channels and one temporal slot")
         flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
@@ -1807,8 +1811,8 @@ class StereoEncoder(nn.Module):
             raise ValueError(f"expected RGB inputs, got {channels} channels")
         if eye_mode == "stereo" and (views, eyes) != (self.stereo_num_views, 2):
             raise ValueError("stereo mode requires V=3,E=2")
-        if eye_mode == "mono" and (views, eyes) != (1, 1):
-            raise ValueError("mono mode requires V=1,E=1")
+        if eye_mode == "mono" and (not 1 <= views <= self.stereo_num_views or eyes != 1):
+            raise ValueError("mono mode requires V in [1,3],E=1")
         if (height, width) != self.image_size:
             raise ValueError(
                 f"expected stereo frame size {self.image_size}, got {(height, width)}"
@@ -2082,8 +2086,8 @@ class StereoDecoder(nn.Module):
             )
         if tokens.shape[2] != 1:
             raise ValueError("structured Stereo Decoder requires exactly one slot")
-        if view_count not in (1, self.stereo_num_views):
-            raise ValueError("decoder view_count must be one or three")
+        if not 1 <= view_count <= self.stereo_num_views:
+            raise ValueError("decoder view_count must be in [1,3]")
         if tokens.shape[0] % view_count:
             raise ValueError("flattened decoder batch must be divisible by views")
 

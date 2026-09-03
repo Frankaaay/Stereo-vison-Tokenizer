@@ -15,15 +15,17 @@ from stereo_tokenizer.mode_sampling import (
 
 
 class _Source:
-    def __init__(self, eye_mode, length=17):
+    def __init__(self, eye_mode, views, length=17):
         self.eye_mode = eye_mode
+        self.views = views
         self.length = length
 
     def __len__(self):
         return self.length
 
     def get_mode_item(self, index, temporal_mode):
-        views, eyes = ((1, 1) if self.eye_mode == "mono" else (3, 2))
+        views = self.views
+        eyes = 1 if self.eye_mode == "mono" else 2
         frames = 1 if temporal_mode == "single_frame" else 4
         return {"video": torch.zeros(views, eyes, 3, frames, 8, 8)}
 
@@ -126,9 +128,9 @@ class ThreeSourceScheduleTest(unittest.TestCase):
     def test_dispatches_hy_libero_and_umi_without_shape_conversion(self):
         dataset = MixedModeDataset(
             {
-                "hy": DatasetSource("mono", _Source("mono")),
-                "libero": DatasetSource("mono", _Source("mono")),
-                "umi": DatasetSource("stereo", _Source("stereo")),
+                "hy": DatasetSource("mono", _Source("mono", 3)),
+                "libero": DatasetSource("mono", _Source("mono", 2)),
+                "umi": DatasetSource("stereo", _Source("stereo", 3)),
             }
         )
         self.assertEqual(dataset[("mono/four_frame", "hy", 0)]["dataset_id"], "hy")

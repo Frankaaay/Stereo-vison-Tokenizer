@@ -60,13 +60,14 @@ class StructuredStereoEncoderTest(unittest.TestCase):
         self.assertEqual(output.features.shape, (3, 32, 1, 4, 4))
         self.assertIsNotNone(output.fusion)
 
-    def test_mono_mode_uses_one_view_one_eye_without_fusion(self) -> None:
+    def test_mono_mode_jointly_batches_all_views_without_fusion(self) -> None:
         encoder = self._encoder().eval()
-        video = torch.randn(2, 1, 1, 3, 4, 32, 32)
+        video = torch.randn(2, 3, 1, 3, 4, 32, 32)
         output = encoder.forward_stereo(
             video, eye_mode="mono", temporal_mode="four_frame"
         )
-        self.assertEqual(output.features.shape, (2, 32, 1, 4, 4))
+        self.assertEqual(output.features.shape, (6, 32, 1, 4, 4))
+        self.assertEqual(output.views, 3)
         self.assertIsNone(output.fusion)
 
     def test_spatial_encoder_keeps_frames_isolated(self) -> None:
@@ -172,6 +173,24 @@ class StructuredStereoEncoderTest(unittest.TestCase):
 
         torch.testing.assert_close(baseline[1:], perturbed[1:], rtol=0, atol=0)
         self.assertGreater((baseline[0] - perturbed[0]).abs().max().item(), 1e-6)
+
+    def test_joint_mono_views_remain_isolated(self) -> None:
+        torch.manual_seed(17)
+        encoder = self._encoder().eval()
+        video = torch.randn(1, 3, 1, 3, 4, 32, 32)
+        changed = video.clone()
+        changed[:, 1] += torch.randn_like(changed[:, 1])
+
+        with torch.no_grad():
+            baseline = encoder.forward_stereo(
+                video, eye_mode="mono", temporal_mode="four_frame"
+            ).features
+            perturbed = encoder.forward_stereo(
+                changed, eye_mode="mono", temporal_mode="four_frame"
+            ).features
+
+        torch.testing.assert_close(baseline[[0, 2]], perturbed[[0, 2]], rtol=0, atol=0)
+        self.assertGreater((baseline[1] - perturbed[1]).abs().max().item(), 1e-6)
 
     def test_temporal_projection_and_fusion_receive_gradients(self) -> None:
         encoder = self._encoder().train()

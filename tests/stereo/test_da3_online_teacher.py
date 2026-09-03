@@ -254,7 +254,7 @@ class GeometryMappingTest(unittest.TestCase):
             .unsqueeze(0)
             .unsqueeze(0)
             .unsqueeze(0),
-            "da3_images": mapping.da3_preprocess(raw).unsqueeze(0),
+            "da3_images": mapping.da3_preprocess(raw).unsqueeze(0).unsqueeze(0),
             "non_padding_mask": non_padding.permute(1, 0, 2, 3)
             .unsqueeze(0)
             .unsqueeze(0),
@@ -292,6 +292,48 @@ class GeometryMappingTest(unittest.TestCase):
         self.assertEqual(metrics["sample_count"], 1)
         self.assertEqual(metrics["rgb_l1"], 0.0)
         self.assertEqual(metrics["views"]["cam_high"]["relative_log_l1"], 0.0)
+
+    def test_joint_mono_views_share_one_da3_call_and_restore_view_axis(self):
+        mapping = GeometryMapping.create((240, 424))
+        raw = torch.zeros(4, 3, 240, 424, dtype=torch.uint8)
+        student, non_padding = mapping.student_letterbox(raw)
+        processed = mapping.da3_preprocess(raw)
+        views = 3
+        batch = {
+            "video": student.unsqueeze(0)
+            .expand(views, -1, -1, -1, -1)
+            .permute(0, 2, 1, 3, 4)
+            .unsqueeze(0)
+            .unsqueeze(2),
+            "da3_images": processed.unsqueeze(0)
+            .expand(views, -1, -1, -1, -1)
+            .unsqueeze(0),
+            "non_padding_mask": non_padding.permute(1, 0, 2, 3)
+            .unsqueeze(0)
+            .expand(views, -1, -1, -1, -1)
+            .unsqueeze(0),
+            "geometry_mapping": default_collate(
+                [mapping.to_collatable_metadata()]
+            ),
+            "eye_mode": ["mono"],
+            "temporal_mode": ["four_frame"],
+            "teacher_kind": ["da3"],
+        }
+        native_shape = (views, 4, *mapping.da3_processed_hw)
+
+        attach_da3_student_targets(
+            batch,
+            torch.ones(native_shape),
+            torch.ones(native_shape),
+            process_res=504,
+            process_res_method="upper_bound_resize",
+        )
+
+        self.assertEqual(
+            batch["da3_relative_depth"].shape,
+            (1, views, 1, 4, 256, 256),
+        )
+        self.assertEqual(batch["valid_mask"].shape, batch["da3_relative_depth"].shape)
 
     def test_mono_ddp_indices_are_exact_and_non_overlapping(self):
         dataset = list(range(7))

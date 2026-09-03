@@ -25,6 +25,7 @@ from .lerobot_data import _AVContainerCache, _matrix, sha256_file, validate_cali
 HY_SCHEMA = "hy-mono-three-camera-episode-v2"
 LIBERO_SCHEMA = "libero-mono-episode-v1"
 UMI_SCHEMA = "umi-raw-stereo-episode-v1"
+HY_MONO_CAMERA_IDS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 UMI_VIEWS = ("head", "lefthand", "righthand")
 UMI_EYES = ("left", "right")
 
@@ -129,6 +130,8 @@ def _mono_sample(
     rgb: np.ndarray,
     *,
     sample_id: str,
+    view_sample_ids: tuple[str, ...],
+    camera_ids: tuple[str, ...],
     episode_id: str,
     dataset_id: str,
     frame_indices: np.ndarray,
@@ -138,23 +141,35 @@ def _mono_sample(
     extra: dict[str, Any],
     source_hw_override: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    if rgb.dtype != np.uint8 or rgb.ndim != 4 or rgb.shape[1] != 3:
-        raise ValueError("mono RGB must be uint8 [T,3,H,W]")
-    raw_rgb = torch.from_numpy(rgb.copy())
+    if rgb.dtype != np.uint8 or rgb.ndim != 5 or rgb.shape[2] != 3:
+        raise ValueError("mono RGB must be uint8 [V,T,3,H,W]")
+    views, time = rgb.shape[:2]
+    if not 1 <= views <= 3 or len(view_sample_ids) != views or len(camera_ids) != views:
+        raise ValueError("mono view metadata must match V in [1,3]")
+    raw_rgb = torch.from_numpy(rgb.copy()).reshape(
+        views * time, *rgb.shape[2:]
+    )
     rectified_hw = tuple(int(value) for value in rgb.shape[-2:])
     source_hw = source_hw_override or rectified_hw
     geometry = GeometryMapping.create(rectified_hw, source_hw=source_hw)
     letterboxed, non_padding = geometry.student_letterbox(raw_rgb)
     da3_images = geometry.da3_preprocess(raw_rgb)
-    video = letterboxed.div(255.0).sub(0.5)
-    video = video.permute(1, 0, 2, 3).unsqueeze(0).unsqueeze(0)
-    non_padding = non_padding.permute(1, 0, 2, 3).unsqueeze(0)
+    video = letterboxed.reshape(views, time, 3, *letterboxed.shape[-2:])
+    video = video.div(255.0).sub(0.5).permute(0, 2, 1, 3, 4).unsqueeze(1)
+    da3_images = da3_images.reshape(
+        views, time, 3, *da3_images.shape[-2:]
+    )
+    non_padding = non_padding.reshape(
+        views, time, 1, *non_padding.shape[-2:]
+    ).permute(0, 2, 1, 3, 4)
     return {
         "video": video,
         "da3_images": da3_images,
         "non_padding_mask": non_padding,
         "geometry_mapping": geometry.to_collatable_metadata(),
         "sample_id": sample_id,
+        "view_sample_ids": view_sample_ids,
+        "camera_id": camera_ids,
         "episode_id": episode_id,
         "dataset_id": dataset_id,
         "frame_index": torch.from_numpy(frame_indices.copy()),
@@ -163,7 +178,7 @@ def _mono_sample(
         "mode_id": f"mono/{temporal_mode}",
         "eye_mode": "mono",
         "temporal_mode": temporal_mode,
-        "view_count": 1,
+        "view_count": views,
         "teacher_kind": "da3",
         **extra,
     }
@@ -204,11 +219,9 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
             if not required.issubset(record):
                 raise ValueError(f"incomplete Hy manifest record: {record.get('episode_id')}")
             camera_columns = record["camera_columns"]
-            if not isinstance(camera_columns, dict) or set(camera_columns) != {
-                "cam_high",
-                "cam_left_wrist",
-                "cam_right_wrist",
-            }:
+            if not isinstance(camera_columns, dict) or set(camera_columns) != set(
+                HY_MONO_CAMERA_IDS
+            ):
                 raise ValueError(
                     f"invalid Hy camera contract: {record.get('episode_id')}"
                 )
@@ -249,7 +262,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         for mask_path, expected_sha256 in stored_image_assets.items():
             if len(expected_sha256) != 64 or sha256_file(mask_path) != expected_sha256:
                 raise ValueError(f"canonical Hy pixel mask SHA256 mismatch: {mask_path}")
-        self._build_spans(lambda record: tuple(record["camera_columns"]))
+        self._build_spans(lambda _record: ("all_views",))
         self._lance_handles: dict[tuple[str, str], Any] = {}
         self._lance_pid = os.getpid()
 
@@ -333,8 +346,11 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         )
 
     def get_mode_item(self, index, temporal_mode):
-        record, camera_id, start = self._sample_address(index)
-        camera_column = record["camera_columns"][camera_id]
+        record, _variant, start = self._sample_address(index)
+        camera_ids = HY_MONO_CAMERA_IDS
+        camera_columns = [
+            record["camera_columns"][camera_id] for camera_id in camera_ids
+        ]
         offsets = self._frame_offsets(temporal_mode)
         relative = np.asarray([start + offset for offset in offsets], np.int64)
         rows = self._take_episode_frames(
@@ -345,7 +361,7 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
                 "episode_index",
                 "frame_index",
                 "timestamp",
-                camera_column,
+                *camera_columns,
             ],
         )
         if [int(row["episode_index"]) for row in rows] != [
@@ -362,26 +378,36 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
         stored_image = record.get("stored_image")
         expected_hw = (256, 256) if stored_image is not None else (240, 424)
         rgb = np.stack(
-            [self._decode_jpeg(row[camera_column], expected_hw) for row in rows]
+            [
+                np.stack(
+                    [self._decode_jpeg(row[column], expected_hw) for row in rows]
+                )
+                for column in camera_columns
+            ]
         )
         source_hw_override = None
         if stored_image is not None:
             top, left, bottom, right = stored_image["content_bbox_yxyx"]
-            rgb = rgb[:, :, top:bottom, left:right]
+            rgb = rgb[:, :, :, top:bottom, left:right]
             source_hw_override = tuple(stored_image["source_size_hw"])
         return _mono_sample(
             rgb,
             sample_id=(
                 f"hy/{record['table_name']}/{record['episode_id']}/"
-                f"{camera_id}/{start:06d}"
+                f"{start:06d}"
             ),
+            view_sample_ids=tuple(
+                f"hy/{record['table_name']}/{record['episode_id']}/{camera_id}/{start:06d}"
+                for camera_id in camera_ids
+            ),
+            camera_ids=camera_ids,
             episode_id=record["episode_id"],
             dataset_id="hy",
             frame_indices=relative,
             timestamps=timestamps,
             contract_sha256=record["source_contract_sha256"],
             temporal_mode=temporal_mode,
-            extra={"table_name": record["table_name"], "camera_id": camera_id},
+            extra={"table_name": record["table_name"]},
             source_hw_override=source_hw_override,
         )
 
@@ -431,7 +457,7 @@ class LiberoMonoDataset(_ManifestWindowDataset):
                 raise ValueError(
                     f"incomplete LIBERO manifest record: {record.get('episode_id')}"
                 )
-        self._build_spans(lambda record: self.camera_keys)
+        self._build_spans(lambda _record: ("all_views",))
         self._video_cache = None
 
     def __getstate__(self):
@@ -480,7 +506,7 @@ class LiberoMonoDataset(_ManifestWindowDataset):
         return np.stack(output).astype(np.uint8), np.asarray(actual, np.float64)
 
     def get_mode_item(self, index, temporal_mode):
-        record, camera_key, start = self._sample_address(index)
+        record, _variant, start = self._sample_address(index)
         offsets = self._frame_offsets(temporal_mode)
         frame_indices = np.asarray([start + offset for offset in offsets], np.int64)
         suite_root = _resolve_alias_path(
@@ -488,29 +514,45 @@ class LiberoMonoDataset(_ManifestWindowDataset):
         )
         episode_index = int(record["episode_index"])
         chunk = episode_index // int(record.get("chunks_size", 1000))
-        relative = str(record["video_path"]).format(
-            episode_chunk=chunk,
-            video_key=camera_key,
-            episode_index=episode_index,
-        )
-        video_path = _resolve_alias_path(
-            {"suite": suite_root}, "suite", relative
-        )
-        if not video_path.is_file():
-            raise FileNotFoundError(video_path)
         fps = float(record.get("fps", 20.0))
-        rgb, timestamps = self._decode_frames(video_path, frame_indices, fps)
-        camera_id = "agentview" if camera_key.endswith(".image") else "wrist"
+        camera_ids = ("agentview", "wrist")
+        decoded = []
+        decoded_timestamps = []
+        for camera_key in self.camera_keys:
+            relative = str(record["video_path"]).format(
+                episode_chunk=chunk,
+                video_key=camera_key,
+                episode_index=episode_index,
+            )
+            video_path = _resolve_alias_path(
+                {"suite": suite_root}, "suite", relative
+            )
+            if not video_path.is_file():
+                raise FileNotFoundError(video_path)
+            camera_rgb, camera_timestamps = self._decode_frames(
+                video_path, frame_indices, fps
+            )
+            decoded.append(camera_rgb)
+            decoded_timestamps.append(camera_timestamps)
+        rgb = np.stack(decoded)
+        timestamps = np.stack(decoded_timestamps)
+        if np.any(np.ptp(timestamps, axis=0) > self.maximum_timestamp_error_s):
+            raise ValueError("LIBERO mono view timestamps disagree")
         return _mono_sample(
             rgb,
-            sample_id=f"libero/{record['suite']}/{episode_index:06d}/{camera_id}/{start:06d}",
+            sample_id=f"libero/{record['suite']}/{episode_index:06d}/{start:06d}",
+            view_sample_ids=tuple(
+                f"libero/{record['suite']}/{episode_index:06d}/{camera_id}/{start:06d}"
+                for camera_id in camera_ids
+            ),
+            camera_ids=camera_ids,
             episode_id=record["episode_id"],
             dataset_id="libero",
             frame_indices=frame_indices,
-            timestamps=timestamps,
+            timestamps=timestamps[0],
             contract_sha256=record["source_contract_sha256"],
             temporal_mode=temporal_mode,
-            extra={"suite": record["suite"], "camera_id": camera_id},
+            extra={"suite": record["suite"]},
         )
 
 

@@ -1295,23 +1295,25 @@ def attach_da3_student_targets(
     )
     expected_frames = 1 if temporal_mode == "single_frame" else 4
     video = batch.get("video")
-    if (
-        video is None
-        or video.ndim != 7
-        or tuple(video.shape[1:4]) != (1, 1, 3)
-        or int(video.shape[4]) != expected_frames
-    ):
+    if video is None or video.ndim != 7:
         raise ValueError(
-            "mono video must use [B,1,1,3,T,H,W] with T matching temporal mode"
+            "mono video must use [B,V,1,3,T,H,W] with T matching temporal mode"
+        )
+    batch_size, views, eyes, channels, time = video.shape[:5]
+    if not 1 <= views <= 3 or eyes != 1 or channels != 3 or time != expected_frames:
+        raise ValueError(
+            "mono video must use [B,V,1,3,T,H,W] with V in [1,3] "
+            "and T matching temporal mode"
         )
     da3_images = batch.get("da3_images")
-    if da3_images is None or da3_images.ndim != 5:
+    if da3_images is None or da3_images.ndim != 6:
         raise ValueError("mono batch must provide DA3 processed images")
     geometry = GeometryMapping.from_collated(
-        batch.get("geometry_mapping"), int(da3_images.shape[0])
+        batch.get("geometry_mapping"), int(batch_size)
     )
     expected_input_shape = (
-        int(da3_images.shape[0]),
+        int(batch_size),
+        int(views),
         expected_frames,
         3,
         *geometry.da3_processed_hw,
@@ -1323,7 +1325,7 @@ def attach_da3_student_targets(
     ):
         raise ValueError("batch geometry disagrees with DA3 teacher settings")
     expected_output_shape = (
-        int(da3_images.shape[0]),
+        int(batch_size * views),
         expected_frames,
         *geometry.da3_processed_hw,
     )
@@ -1332,8 +1334,12 @@ def attach_da3_student_targets(
     ) != expected_output_shape:
         raise ValueError("native DA3 output disagrees with mono batch contract")
 
-    depth = geometry.map_da3_output_to_student(native_depth).unsqueeze(1)
-    confidence = geometry.map_da3_output_to_student(native_confidence).unsqueeze(1)
+    depth = geometry.map_da3_output_to_student(native_depth).reshape(
+        batch_size, views, expected_frames, *geometry.student_output_hw
+    ).unsqueeze(2)
+    confidence = geometry.map_da3_output_to_student(native_confidence).reshape(
+        batch_size, views, expected_frames, *geometry.student_output_hw
+    ).unsqueeze(2)
     non_padding = batch.get("non_padding_mask")
     if non_padding is None or non_padding.shape != depth.shape:
         raise ValueError("mono non-padding mask shape mismatch")
@@ -1514,11 +1520,33 @@ class OnlineDepthAnything3GTCallback(Callback):
             temporary.unlink(missing_ok=True)
 
     def _native_targets(self, batch, temporal_mode, geometry):
+        source = batch["da3_images"]
+        batch_size, views, time, channels, height, width = source.shape
+        flattened_source = source.reshape(
+            batch_size * views, time, channels, height, width
+        )
         if not self.cache_enabled:
-            depth, confidence = self.teacher.infer_processed(batch["da3_images"])
+            depth, confidence = self.teacher.infer_processed(flattened_source)
             return depth, confidence, int(depth.shape[0])
-        sample_ids = list(batch["sample_id"])
-        contract_hashes = list(batch["contract_sha256"])
+        view_sample_ids = list(batch.get("view_sample_ids", ()))
+        if len(view_sample_ids) != views:
+            raise ValueError("mono batch view_sample_ids must match view count")
+        per_view_ids = [list(values) for values in view_sample_ids]
+        if any(len(values) != batch_size for values in per_view_ids):
+            raise ValueError("mono batch view_sample_ids must match batch size")
+        sample_ids = [
+            per_view_ids[view][batch_index]
+            for batch_index in range(batch_size)
+            for view in range(views)
+        ]
+        batch_contract_hashes = list(batch["contract_sha256"])
+        if len(batch_contract_hashes) != batch_size:
+            raise ValueError("mono batch contract hashes must match batch size")
+        contract_hashes = [
+            batch_contract_hashes[batch_index]
+            for batch_index in range(batch_size)
+            for _view in range(views)
+        ]
         results = [None] * len(sample_ids)
         missing = []
         for index, (sample_id, contract_hash) in enumerate(
@@ -1532,11 +1560,10 @@ class OnlineDepthAnything3GTCallback(Callback):
             else:
                 results[index] = cached
         if missing:
-            source = batch["da3_images"]
             missing_tensor = torch.tensor(
-                missing, device=source.device, dtype=torch.long
+                missing, device=flattened_source.device, dtype=torch.long
             )
-            missing_rgb = source.index_select(0, missing_tensor)
+            missing_rgb = flattened_source.index_select(0, missing_tensor)
             depth, confidence = self.teacher.infer_processed(missing_rgb)
             for output_index, batch_index in enumerate(missing):
                 item = (
@@ -1576,10 +1603,11 @@ class OnlineDepthAnything3GTCallback(Callback):
             batch.get("temporal_mode", ()), "temporal mode"
         )
         da3_images = batch.get("da3_images")
-        if da3_images is None or da3_images.ndim != 5:
+        if da3_images is None or da3_images.ndim != 6:
             raise ValueError("mono batch must provide DA3 processed images")
+        batch_size = int(batch["video"].shape[0])
         geometry = GeometryMapping.from_collated(
-            batch.get("geometry_mapping"), int(da3_images.shape[0])
+            batch.get("geometry_mapping"), batch_size
         )
         started = time.perf_counter()
         with profile_region("stereo/online_gt/da3_teacher"):

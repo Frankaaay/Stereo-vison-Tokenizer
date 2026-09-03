@@ -199,8 +199,9 @@ class MixedModeDataset(data.Dataset):
             raise ValueError(f"{dataset_id} cannot provide {eye_mode} samples")
         sample = dict(source.dataset.get_mode_item(sample_index, temporal_mode))
         video = sample.get("video")
+        expected_views = {"hy": 3, "libero": 2, "umi": 3}[dataset_id]
         expected = (
-            1 if eye_mode == "mono" else 3,
+            expected_views,
             1 if eye_mode == "mono" else 2,
             3,
             1 if temporal_mode == "single_frame" else 4,
@@ -212,7 +213,7 @@ class MixedModeDataset(data.Dataset):
             dataset_id=dataset_id,
             eye_mode=eye_mode,
             temporal_mode=temporal_mode,
-            view_count=expected[0],
+            view_count=expected_views,
             teacher_kind="da3" if eye_mode == "mono" else "foundation_stereo",
         )
         return sample

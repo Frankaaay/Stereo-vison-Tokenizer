@@ -236,6 +236,7 @@ class FourModeEvaluationTest(unittest.TestCase):
             da3_process_res=504,
             da3_process_res_method="upper_bound_resize",
             da3_confidence_mask_mode="finite_positive_non_padding",
+            mono_dataset="hy",
         )
         calls = {"teachers": [], "models": []}
         batch = {"video": torch.zeros(1, 1, 1, 3, 4, 2, 2)}
@@ -368,6 +369,7 @@ class FourModeEvaluationTest(unittest.TestCase):
             da3_process_res_method="upper_bound_resize",
             da3_confidence_mask_mode="finite_positive_non_padding",
             seed=1,
+            mono_dataset="hy",
         )
         sample = {
             "video": torch.zeros(1, 1, 3, 4, 2, 2),

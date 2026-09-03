@@ -132,19 +132,19 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             output.raw_relative_log_depth.shape, (1, 3, 1, 4, 32, 32)
         )
 
-    def test_mono_entrypoint_uses_same_four_frame_temporal_path(self) -> None:
+    def test_mono_two_views_use_one_four_frame_forward(self) -> None:
         model = StereoVAE(self._args()).eval()
         output = model(
-            self._batch()["video"][:, :1, :1],
+            self._batch()["video"][:, :2, :1],
             eye_mode="mono",
             temporal_mode="four_frame",
             sample_posterior=False,
         )
         self.assertIsNone(output.fusion)
-        self.assertEqual(output.latent.shape, (1, 1, 48, 1, 4, 4))
-        self.assertEqual(output.rgb.shape, (1, 1, 3, 4, 32, 32))
+        self.assertEqual(output.latent.shape, (1, 2, 48, 1, 4, 4))
+        self.assertEqual(output.rgb.shape, (1, 2, 3, 4, 32, 32))
         self.assertEqual(
-            output.raw_relative_log_depth.shape, (1, 1, 1, 4, 32, 32)
+            output.raw_relative_log_depth.shape, (1, 2, 1, 4, 32, 32)
         )
 
     def test_constructor_applies_selected_peg_backend_to_reduced_model(self) -> None:
