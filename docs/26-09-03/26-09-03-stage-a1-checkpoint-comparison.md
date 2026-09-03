@@ -21,6 +21,8 @@
 
 指标公式、输入域、mask、teacher、时序模式和速度 benchmark 合同均未改变。
 
+首次 GPU smoke 还发现，mono 多视角联合训练提交后，DA3 teacher 合同已统一为 `[B,V,T,3,H,W]`，但 canonical Stage A adapter 仍输出旧的 `[B,T,3,H,W]`。这会在 `attach_online_targets()` 解包时以 `expected 6, got 5` 失败。修复仅在 canonical mono 的 `da3_images` 上补回 `V=1` 维，不改变像素、几何映射或 teacher 推理内容。
+
 ## 运行记录
 
 评测完成后补充精确代码 SHA、Slurm Job ID、checkpoint/output/log 路径、artifact 校验、主要指标、3 个案例和结论。

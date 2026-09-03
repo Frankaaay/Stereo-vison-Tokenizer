@@ -514,7 +514,7 @@ class CanonicalStageADataset(Dataset):
             "video": student.contiguous(),
             "rgb_valid_mask": rgb_mask.contiguous(),
             "non_padding_mask": rgb_mask.contiguous(),
-            "da3_images": geometry.da3_preprocess(raw_content),
+            "da3_images": geometry.da3_preprocess(raw_content).unsqueeze(0),
             "geometry_mapping": geometry.to_collatable_metadata(),
             "view_count": 1,
             "teacher_kind": "da3",
