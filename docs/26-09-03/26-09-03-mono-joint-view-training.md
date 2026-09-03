@@ -49,3 +49,7 @@
 - LPIPS 修复 SHA：`fdc5831b35c8578e9f5db602b68ad7c3acaddebf`；定向 pytest Job `2854` 为 `COMPLETED`、exit code `0:0`，`21 passed, 3 warnings`
 - 修复后 smoke Job `2859` 已完成 4/4 training updates 并生成 `epoch=0-step=4.ckpt` 与 `last.ckpt`，证明原 LPIPS OOM 已消失；随后 validation rank 6 的 DA3 在申请 `7.59 GiB` 时 OOM，当时 `24.18 GiB` 为 reserved but unallocated。其余 rank 已到 20/20，作业无法健康收敛，确认失败后手动取消释放 8 卡
 - validation OOM 属于混合尺寸 teacher workload 的 allocator 碎片，启动脚本默认设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，同时保留外部显式覆盖能力；需重跑同合同 smoke 验证最终 exit code
+- allocator 修复 SHA：`fb69ddd83b9a99397e5a1ed26d5b0f0ffc9e9844`；H100 `bash -n` 通过，定向 launcher + integration pytest 为 `22 passed, 3 warnings`。更宽的 source-test 另有一个与本改动无关的既有失败：测试仍要求无 source suffix 的 depth 文件名，而当前评估实现已带 suffix，本次未扩大范围修改
+- 最终 smoke Job `2871`：8×H100，BS `24:24:24:12`，GA `1:1:1:2`，`COMPLETED`，exit code `0:0`，elapsed `00:04:57`；training 4/4 updates、validation 20/20，有限 `val/mixed/total_loss=1.640`
+- checkpoint 直读：`global_step=4`、`generator_updates=4`、`discriminator_updates=0`，四种 mode 各 `1 update / 192 samples`，有效 global batch 均为 192；产物包含 `best-epoch=0-step=4.ckpt`、`epoch=0-step=4.ckpt`、`last.ckpt`、`resolved_config.json`、`run_manifest.json`、`step_timing.json`
+- 最终日志：`/gpfs/jiuquyun/home/Frank/logs/lpips-final-smoke-fb69ddd-2871.out`；输出：`/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/lpips-final-smoke-fb69ddd-2871`。`mono/four_frame` 峰值 allocated/reserved 分别约 `75.26/75.32 GiB`，仍接近 80GB H100 上限
