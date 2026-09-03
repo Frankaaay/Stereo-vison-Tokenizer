@@ -334,14 +334,25 @@ class CanonicalStageADataset(Dataset):
         self.selection = read_selection(selection_path)
         self.selection_path = Path(selection_path).expanduser().resolve()
         self.dataset_id = str(self.selection["dataset_id"])
-        expected_loader = Path(
-            self.selection["canonical_loader"]["path"]
-        ).expanduser().resolve()
         actual_loader = Path(loader_root).expanduser().resolve()
-        if actual_loader != expected_loader:
+        if not actual_loader.is_dir():
+            raise FileNotFoundError(f"canonical loader is missing: {actual_loader}")
+        expected_loader_sha = str(self.selection["canonical_loader"]["git_sha"])
+        actual_loader_sha = subprocess.check_output(
+            ("git", "-C", str(actual_loader), "rev-parse", "HEAD"),
+            text=True,
+        ).strip()
+        loader_status = subprocess.check_output(
+            ("git", "-C", str(actual_loader), "status", "--porcelain"),
+            text=True,
+        ).strip()
+        if actual_loader_sha != expected_loader_sha or loader_status:
             raise ValueError(
-                f"canonical loader path mismatch: {actual_loader} != {expected_loader}"
+                "canonical loader source mismatch: "
+                f"expected_sha={expected_loader_sha}, actual_sha={actual_loader_sha}, "
+                f"dirty={bool(loader_status)}"
             )
+        self.loader_root = actual_loader
         identity_meta = self.selection["identity_contract"]
         identity = read_identity_contract(
             identity_meta["path"], dataset_id=self.dataset_id
@@ -518,6 +529,7 @@ class CanonicalStageADataset(Dataset):
             "identity_contract": self.selection["identity_contract"],
             "canonical_configs": sorted(self._datasets),
             "canonical_loader": self.selection["canonical_loader"],
+            "canonical_loader_runtime_path": str(self.loader_root),
             "sample_count": len(self),
             "eye_mode": self.eye_mode,
             "camera_key": self.camera_key,

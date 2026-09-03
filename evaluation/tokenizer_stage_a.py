@@ -26,9 +26,6 @@ from .stage_a_metrics import StageA1MetricSuite
 from stereo_tokenizer.geometry import GeometryMapping
 
 
-CHECKPOINT_SHA256 = (
-    "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e"
-)
 DA3_SOURCE_SHA = "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
 DA3_CHECKPOINT_SHA256 = (
     "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5"
@@ -127,32 +124,39 @@ def _environment_provenance() -> dict:
 
 def _checkpoint_provenance(path: Path, expected_sha256: str) -> dict:
     checkpoint_path = path.expanduser().resolve()
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        raise ValueError("checkpoint SHA256 must contain exactly 64 hexadecimal characters")
+    try:
+        int(expected_sha256, 16)
+    except ValueError as error:
+        raise ValueError("checkpoint SHA256 must be hexadecimal") from error
     actual = sha256_file(checkpoint_path)
-    if expected_sha256 != CHECKPOINT_SHA256 or actual != expected_sha256:
+    if actual != expected_sha256:
         raise ValueError(
-            f"checkpoint SHA mismatch: frozen={CHECKPOINT_SHA256}, "
-            f"requested={expected_sha256}, actual={actual}"
+            f"checkpoint SHA mismatch: requested={expected_sha256}, actual={actual}"
         )
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     counters = checkpoint.get("stereo_update_counters")
     if not isinstance(counters, dict):
         raise ValueError("checkpoint is missing stereo_update_counters")
-    required = {
-        "generator_updates": 162500,
-        "discriminator_updates": 118500,
-        "batch_updates": 162500,
-        "four_frame_updates": 81250,
-        "single_frame_updates": 81250,
+    required_counters = (
+        "generator_updates",
+        "discriminator_updates",
+        "batch_updates",
+        "four_frame_updates",
+        "single_frame_updates",
+    )
+    invalid_counters = {
+        key: counters.get(key)
+        for key in required_counters
+        if not isinstance(counters.get(key), int) or counters[key] < 0
     }
-    mismatches = {
-        key: (counters.get(key), expected)
-        for key, expected in required.items()
-        if int(counters.get(key, -1)) != expected
-    }
-    if int(checkpoint.get("global_step", -1)) != 125000:
-        mismatches["global_step"] = (checkpoint.get("global_step"), 125000)
-    if mismatches:
-        raise ValueError(f"checkpoint training-counter mismatch: {mismatches}")
+    if invalid_counters:
+        raise ValueError(f"checkpoint has invalid training counters: {invalid_counters}")
+    if not isinstance(checkpoint.get("global_step"), int) or checkpoint["global_step"] < 0:
+        raise ValueError("checkpoint has invalid global_step")
+    if not isinstance(checkpoint.get("epoch"), int) or checkpoint["epoch"] < 0:
+        raise ValueError("checkpoint has invalid epoch")
     return {
         "path": str(checkpoint_path),
         "sha256": actual,
@@ -254,7 +258,7 @@ def _run_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage-a-selection", type=Path, required=True)
     parser.add_argument("--canonical-loader-root", type=Path, required=True)
     parser.add_argument("--stage-a-camera-key")
-    parser.add_argument("--checkpoint-sha256", default=CHECKPOINT_SHA256)
+    parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--rgb-only", action="store_true")
     runtime_required = {
         "stereo_vae_ckpt",
@@ -979,6 +983,8 @@ def _report_command(argv: list[str]) -> None:
     visualization_slots = set()
     source_fingerprints = set()
     environment_fingerprints = set()
+    checkpoint_fingerprint = None
+    checkpoint_sha256 = None
     selection_rows = {}
     for result in quality:
         if result.get("schema") != "stereo-tokenizer-stage-a1-result-v2":
@@ -1000,13 +1006,18 @@ def _report_command(argv: list[str]) -> None:
         if result.get("single_frame_source_indices") != [0, 1, 2, 3]:
             raise ValueError(f"single-frame source coverage mismatch for {key}")
         checkpoint = result["checkpoint"]
-        if checkpoint["sha256"] != CHECKPOINT_SHA256:
-            raise ValueError("checkpoint SHA mismatch across quality results")
-        if int(checkpoint.get("global_step", -1)) != 125000:
-            raise ValueError("checkpoint global_step mismatch")
+        require_sha256(checkpoint.get("sha256"), "checkpoint hash")
         counters = checkpoint.get("stereo_update_counters", {})
-        if int(counters.get("generator_updates", -1)) != 162500:
-            raise ValueError("checkpoint generator update counter mismatch")
+        if not isinstance(counters, dict) or not isinstance(
+            counters.get("generator_updates"), int
+        ):
+            raise ValueError("checkpoint generator update counter is missing")
+        current_checkpoint_fingerprint = json.dumps(checkpoint, sort_keys=True)
+        if checkpoint_fingerprint is None:
+            checkpoint_fingerprint = current_checkpoint_fingerprint
+            checkpoint_sha256 = checkpoint["sha256"]
+        elif current_checkpoint_fingerprint != checkpoint_fingerprint:
+            raise ValueError("checkpoint provenance mismatch across quality results")
         require_sha256(dataset.get("selection_sha256"), f"{key} selection semantic hash")
         require_sha256(dataset.get("selection_file_sha256"), f"{key} selection file hash")
         selection_path = Path(dataset["selection_path"])
@@ -1220,7 +1231,7 @@ def _report_command(argv: list[str]) -> None:
             or result.get("posterior") != "mean"
             or result.get("timing_scope") != "model_only_excludes_data_decode_and_teacher"
             or set(result.get("modes", {})) != {"single_frame", "four_frame"}
-            or result.get("checkpoint", {}).get("sha256") != CHECKPOINT_SHA256
+            or result.get("checkpoint", {}).get("sha256") != checkpoint_sha256
         ):
             raise ValueError("benchmark precision/scope/checkpoint mismatch")
         provenance = result.get("provenance", {})

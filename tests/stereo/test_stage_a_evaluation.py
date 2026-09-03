@@ -24,6 +24,7 @@ from evaluation.stage_a_metrics import (
     _teacher_targets,
 )
 from evaluation.tokenizer_stage_a import (
+    _checkpoint_provenance,
     _percentile_summary,
     _report_command,
     _run_parser,
@@ -200,6 +201,7 @@ class StageASelectionTest(unittest.TestCase):
                 "--stage-a-dataset-id", "umi",
                 "--stage-a-selection", "selection.json",
                 "--canonical-loader-root", "loader",
+                "--checkpoint-sha256", "a" * 64,
                 "--single_frame_source_indices", "0", "1", "2", "3",
             ]
         )
@@ -213,6 +215,29 @@ class _DummyLPIPS(torch.nn.Module):
 
 
 class StageA1MetricTest(unittest.TestCase):
+    def test_checkpoint_provenance_accepts_declared_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidate.ckpt"
+            checkpoint = {
+                "epoch": 0,
+                "global_step": 80000,
+                "stereo_update_counters": {
+                    "generator_updates": 124000,
+                    "discriminator_updates": 0,
+                    "batch_updates": 136000,
+                    "four_frame_updates": 62000,
+                    "single_frame_updates": 62000,
+                },
+            }
+            torch.save(checkpoint, path)
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            result = _checkpoint_provenance(path, digest)
+            self.assertEqual(result["sha256"], digest)
+            self.assertEqual(result["global_step"], 80000)
+            self.assertEqual(
+                result["stereo_update_counters"]["generator_updates"], 124000
+            )
+
     def test_stereo_visualization_uses_unit_calibration_when_canonical_has_none(self):
         batch = {"disparity": torch.ones(1, 3, 1, 4, 8, 8)}
         adapted = _stage_a_visualization_batch(batch)
@@ -721,7 +746,7 @@ class StageA1MetricTest(unittest.TestCase):
                     "single_frame_source_indices": [0, 1, 2, 3],
                     "checkpoint": {
                         "path": "/checkpoint.ckpt",
-                        "sha256": "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e",
+                        "sha256": "9" * 64,
                         "global_step": 125000,
                         "epoch": 1,
                         "stereo_update_counters": {"generator_updates": 162500},
@@ -804,7 +829,7 @@ class StageA1MetricTest(unittest.TestCase):
                     "posterior": "mean",
                     "timing_scope": "model_only_excludes_data_decode_and_teacher",
                     "checkpoint": {
-                        "sha256": "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e"
+                        "sha256": "9" * 64
                     },
                     "dataset": {"dataset_id": "umi", "eye_mode": eye_mode},
                     "modes": mode_payload,
