@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset, default_collate
 from tqdm import tqdm
 
@@ -19,17 +23,39 @@ import eval_stereo_vae as legacy
 from .stage_a_contract import sha256_file
 from .stage_a_data import CanonicalStageADataset, build_canonical_selection
 from .stage_a_metrics import StageA1MetricSuite
+from stereo_tokenizer.geometry import GeometryMapping
 
 
 CHECKPOINT_SHA256 = (
     "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e"
 )
+DA3_SOURCE_SHA = "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
+DA3_CHECKPOINT_SHA256 = (
+    "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5"
+)
+LAS2_H_SOURCE_SHA = "8c97bd4c4da3712c2ac60003a23201dfdb5935f4"
+LAS2_H_CHECKPOINT_SHA256 = (
+    "758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4"
+)
+VGG16_CHECKPOINT_SHA256 = "397923af8e79cdbb6a7127f12361acd7a2f83e06b05044ddf496e83de57a5bf0"
+VGG16_CHECKPOINT_NAME = "vgg16-397923af.pth"
 
 
 def _git(*args: str) -> str:
     return subprocess.check_output(
         ("git", *args), text=True, stderr=subprocess.STDOUT
     ).strip()
+
+
+def _source_provenance() -> dict:
+    diff = subprocess.check_output(("git", "diff", "--binary", "HEAD"))
+    return {
+        "cwd": str(Path.cwd()),
+        "git_branch": _git("branch", "--show-current"),
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_status_porcelain": _git("status", "--porcelain"),
+        "git_diff_sha256": hashlib.sha256(diff).hexdigest(),
+    }
 
 
 def _jsonable(value):
@@ -42,6 +68,31 @@ def _jsonable(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _metric_backbone_provenance() -> dict:
+    torch_home = os.environ.get("TORCH_HOME")
+    if not torch_home:
+        raise ValueError("TORCH_HOME is required for the frozen LPIPS backbone")
+    checkpoint = (
+        Path(torch_home).expanduser().resolve() / "hub" / "checkpoints"
+        / VGG16_CHECKPOINT_NAME
+    )
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"frozen LPIPS backbone is missing: {checkpoint}")
+    actual = sha256_file(checkpoint)
+    if actual != VGG16_CHECKPOINT_SHA256:
+        raise ValueError(
+            f"LPIPS VGG16 SHA mismatch: expected={VGG16_CHECKPOINT_SHA256}, "
+            f"actual={actual}"
+        )
+    return {
+        "name": "torchvision.vgg16.IMAGENET1K_V1",
+        "role": "torchmetrics LPIPS VGG feature backbone",
+        "path": str(checkpoint),
+        "sha256": actual,
+        "preprocessing": "torchmetrics LPIPS vgg normalize=False on RGB [-1,1]",
+    }
 
 
 def _environment_provenance() -> dict:
@@ -59,11 +110,18 @@ def _environment_provenance() -> dict:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None
+    cuda_available = torch.cuda.is_available()
     return {
         "python": sys.version,
         "packages": packages,
         "torch_cuda": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version(),
+        "gpu_name": torch.cuda.get_device_name(0) if cuda_available else None,
+        "gpu_capability": (
+            list(torch.cuda.get_device_capability(0)) if cuda_available else None
+        ),
+        "uv_lock_sha256": sha256_file(Path("uv.lock").resolve()),
+        "metric_backbone": _metric_backbone_provenance(),
     }
 
 
@@ -102,6 +160,20 @@ def _checkpoint_provenance(path: Path, expected_sha256: str) -> dict:
         "epoch": int(checkpoint["epoch"]),
         "stereo_update_counters": _jsonable(counters),
     }
+
+
+def _dataset_provenance(dataset) -> dict:
+    result = dataset.provenance()
+    result["selection_file_sha256"] = sha256_file(dataset.selection_path)
+    config_hashes = {}
+    for record in dataset.selection["records"]:
+        path = str(record["canonical_config"])
+        digest = str(record["canonical_config_sha256"])
+        previous = config_hashes.setdefault(path, digest)
+        if previous != digest:
+            raise ValueError(f"conflicting canonical config hashes for {path}")
+    result["canonical_config_sha256"] = dict(sorted(config_hashes.items()))
+    return result
 
 
 def _selection_command(argv: list[str]) -> None:
@@ -168,7 +240,7 @@ def _preflight_command(argv: list[str]) -> None:
         )
     print(
         json.dumps(
-            {"dataset": dataset.provenance(), "samples": rows},
+            {"dataset": _dataset_provenance(dataset), "samples": rows},
             indent=2,
             sort_keys=True,
         )
@@ -235,9 +307,13 @@ def _validate_run(args) -> None:
         raise ValueError("mono Stage A requires --stage-a-camera-key")
     if args.eval_eye_mode == "stereo" and args.stage_a_camera_key:
         raise ValueError("stereo Stage A does not accept --stage-a-camera-key")
-    if args.num_visualizations:
-        raise NotImplementedError(
-            "Stage A1 fixed visualization export is not implemented yet"
+    if args.num_visualizations < 0:
+        raise ValueError("--num_visualizations must be non-negative")
+    if args.num_visualizations and args.visualization_dir is None:
+        raise ValueError("visualizations require --visualization_dir")
+    if args.visualization_dir is not None and args.visualization_dir.exists():
+        raise FileExistsError(
+            f"refusing to overwrite visualization directory {args.visualization_dir}"
         )
 
 
@@ -251,10 +327,174 @@ def _mode_batch(batch: dict, temporal_mode: str, source_index: int | None):
     return result
 
 
+def _attach_mono_reconstruction_teacher(args, teacher, batch, output) -> None:
+    """Run DA3 on reconstructed RGB with the exact frozen geometry mapping."""
+
+    prediction = output.rgb
+    if prediction.ndim != 6 or tuple(prediction.shape[1:3]) != (1, 3):
+        raise ValueError("mono reconstruction must be [B,1,3,T,H,W]")
+    batch_size, _, _, frames, height, width = prediction.shape
+    geometry = GeometryMapping.from_collated(
+        batch["geometry_mapping"], int(batch_size)
+    )
+    left, top, right, bottom = geometry.student_padding_ltrb
+    flattened = prediction[:, 0].permute(0, 2, 1, 3, 4).reshape(
+        batch_size * frames, 3, height, width
+    )
+    content = flattened[
+        :,
+        :,
+        top : height - bottom,
+        left : width - right,
+    ]
+    rectified = F.interpolate(
+        content.float(),
+        size=geometry.rectified_hw,
+        mode="bilinear",
+        align_corners=False,
+        antialias=True,
+    )
+    rectified_u8 = (
+        rectified.clamp(-0.5, 0.5)
+        .add(0.5)
+        .mul(255.0)
+        .round()
+        .to(torch.uint8)
+        .cpu()
+    )
+    processed = geometry.da3_preprocess(rectified_u8).reshape(
+        batch_size, frames, 3, *geometry.da3_processed_hw
+    )
+    native_depth, native_confidence = teacher.infer_processed(processed)
+    depth = geometry.map_da3_output_to_student(native_depth).unsqueeze(1)
+    confidence = geometry.map_da3_output_to_student(native_confidence).unsqueeze(1)
+    non_padding = batch["non_padding_mask"]
+    valid = torch.isfinite(depth) & (depth > 0) & non_padding
+    if not torch.isfinite(confidence.masked_select(non_padding)).all():
+        raise ValueError("reconstruction DA3 confidence contains NaN/Inf")
+    if torch.any(valid.sum(dim=(2, 3, 4, 5)) == 0):
+        raise ValueError("reconstruction DA3 produced an empty valid mask")
+    batch["reconstruction_da3_relative_depth"] = depth
+    batch["reconstruction_da3_confidence"] = confidence
+    batch["reconstruction_valid_mask"] = valid
+
+
+def _fixed_visualization_indices(dataset, count: int) -> list[int]:
+    ranked = sorted(
+        range(len(dataset)),
+        key=lambda index: hashlib.sha256(
+            (
+                "1234:stage-a1-visualization:"
+                f"{dataset.dataset_id}:"
+                f"{dataset.selection['records'][index]['legacy_episode_id']}"
+            ).encode("utf-8")
+        ).digest(),
+    )
+    return ranked[:count]
+
+
+def _stage_a_visualization_batch(batch):
+    """Supply unit stereo calibration for teacher-relative visualizations."""
+
+    if "disparity" not in batch:
+        return batch
+    has_fx = "fx" in batch
+    has_baseline = "baseline_m" in batch
+    if has_fx != has_baseline:
+        raise ValueError("stereo visualization calibration must provide both fx and baseline_m")
+    if has_fx:
+        return batch
+    disparity = batch["disparity"]
+    if not isinstance(disparity, torch.Tensor) or disparity.ndim != 6:
+        raise ValueError("stereo visualization disparity must use [B,V,1,T,H,W]")
+    result = dict(batch)
+    unit_calibration = torch.ones(
+        disparity.shape[:2], device=disparity.device, dtype=torch.float32
+    )
+    result["fx"] = unit_calibration
+    result["baseline_m"] = unit_calibration
+    return result
+
+
+def _save_visualizations(args, dataset, teacher, model, specs, device):
+    if not args.num_visualizations:
+        return []
+    if teacher is None:
+        raise ValueError("Stage A visualizations require the frozen teacher")
+    if args.num_visualizations > len(dataset):
+        raise ValueError("visualization count exceeds dataset size")
+    args.visualization_dir.mkdir(parents=True, exist_ok=False)
+    records = []
+    with torch.inference_mode():
+        for slot, index in enumerate(
+            _fixed_visualization_indices(dataset, args.num_visualizations)
+        ):
+            batch = default_collate([dataset[index]])
+            batch = {
+                key: value.to(device) if isinstance(value, torch.Tensor) else value
+                for key, value in batch.items()
+            }
+            legacy.attach_online_targets(args, args.eval_eye_mode, teacher, batch)
+            batch["valid_mask"] &= batch["rgb_valid_mask"]
+            visualization_batch = _stage_a_visualization_batch(batch)
+            outputs = {}
+            for mode_id, temporal_mode, source_index in specs:
+                mode_batch = _mode_batch(batch, temporal_mode, source_index)
+                outputs[mode_id] = model(
+                    mode_batch["video"],
+                    eye_mode=args.eval_eye_mode,
+                    temporal_mode=temporal_mode,
+                    sample_posterior=False,
+                )
+            for source_index in (0, 1, 2, 3):
+                single_key = (
+                    f"{args.eval_eye_mode}/single_frame/source_{source_index}"
+                )
+                display = {
+                    "single_frame": outputs[single_key],
+                    "four_frame": outputs[f"{args.eval_eye_mode}/four_frame"],
+                }
+                rgb_name = f"case-{slot:02d}-source-{source_index}.png"
+                depth_name = f"depth-case-{slot:02d}-source-{source_index}.png"
+                legacy.save_case_visualization(
+                    args.visualization_dir / rgb_name,
+                    batch["sample_id"][0],
+                    batch["episode_id"][0],
+                    batch["video"],
+                    display,
+                    dataset.view_names,
+                    source_index,
+                )
+                legacy.save_depth_case_visualization(
+                    args.visualization_dir / depth_name,
+                    visualization_batch,
+                    display,
+                    source_index,
+                    args.relative_depth_epsilon,
+                    dataset.view_names,
+                )
+                records.append(
+                    {
+                        "slot": slot,
+                        "selection_index": index,
+                        "sample_id": batch["sample_id"][0],
+                        "source_frame_index": source_index,
+                        "rgb_file": rgb_name,
+                        "geometry_file": depth_name,
+                    }
+                )
+    (args.visualization_dir / "cases.json").write_text(
+        json.dumps(records, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return records
+
+
 def _run_command(argv: list[str]) -> None:
     args = _run_parser().parse_args(argv)
     _hydrate_checkpoint_semantics(args)
     _validate_run(args)
+    environment = _environment_provenance()
     checkpoint = _checkpoint_provenance(
         args.stereo_vae_ckpt, args.checkpoint_sha256
     )
@@ -278,6 +518,12 @@ def _run_command(argv: list[str]) -> None:
     )
     device = torch.device("cuda")
     model = legacy.load_model(args, device)
+    architecturally_trainable = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+    model.requires_grad_(False)
     if model.perceptual_model is None:
         raise RuntimeError("checkpoint LPIPS model is unavailable")
     teacher = None
@@ -288,38 +534,70 @@ def _run_command(argv: list[str]) -> None:
         relative_depth_epsilon=args.relative_depth_epsilon
     )
     specs = legacy.evaluation_specs(args, args.eval_eye_mode)
-    with torch.inference_mode():
-        for batch_index, batch in enumerate(tqdm(loader, desc=args.eval_eye_mode)):
-            if args.max_batches is not None and batch_index >= args.max_batches:
-                break
-            tensor_batch = {
-                key: value.to(device, non_blocking=True)
-                if isinstance(value, torch.Tensor)
-                else value
-                for key, value in batch.items()
-            }
-            if teacher is not None:
-                legacy.attach_online_targets(
-                    args, args.eval_eye_mode, teacher, tensor_batch
+    current_sample_ids = []
+    try:
+        with torch.inference_mode():
+            for batch_index, batch in enumerate(tqdm(loader, desc=args.eval_eye_mode)):
+                if args.max_batches is not None and batch_index >= args.max_batches:
+                    break
+                current_sample_ids = [str(value) for value in batch["sample_id"]]
+                tensor_batch = {
+                    key: value.to(device, non_blocking=True)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                    for key, value in batch.items()
+                }
+                if teacher is not None:
+                    legacy.attach_online_targets(
+                        args, args.eval_eye_mode, teacher, tensor_batch
+                    )
+                    tensor_batch["valid_mask"] &= tensor_batch["rgb_valid_mask"]
+                for mode_id, temporal_mode, source_index in specs:
+                    mode_batch = _mode_batch(
+                        tensor_batch, temporal_mode, source_index
+                    )
+                    output = model(
+                        mode_batch["video"],
+                        eye_mode=args.eval_eye_mode,
+                        temporal_mode=temporal_mode,
+                        sample_posterior=False,
+                    )
+                    if teacher is not None and args.eval_eye_mode == "mono":
+                        _attach_mono_reconstruction_teacher(
+                            args, teacher, mode_batch, output
+                        )
+                    suite.update(
+                        mode_id,
+                        mode_batch,
+                        output,
+                        dataset.view_names,
+                        model.perceptual_model,
+                    )
+    except Exception as error:
+        failure_path = args.output_json.with_name(
+            f"{args.output_json.stem}.failure.json"
+        )
+        if not failure_path.exists():
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            failure_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "stereo-tokenizer-stage-a1-failure-v1",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                        "traceback": traceback.format_exc(),
+                        "sample_ids": current_sample_ids,
+                        "checkpoint": checkpoint,
+                        "dataset": _dataset_provenance(dataset),
+                        "provenance": _source_provenance(),
+                    },
+                    indent=2,
+                    sort_keys=True,
                 )
-                tensor_batch["valid_mask"] &= tensor_batch["rgb_valid_mask"]
-            for mode_id, temporal_mode, source_index in specs:
-                mode_batch = _mode_batch(
-                    tensor_batch, temporal_mode, source_index
-                )
-                output = model(
-                    mode_batch["video"],
-                    eye_mode=args.eval_eye_mode,
-                    temporal_mode=temporal_mode,
-                    sample_posterior=False,
-                )
-                suite.update(
-                    mode_id,
-                    mode_batch,
-                    output,
-                    dataset.view_names,
-                    model.perceptual_model,
-                )
+                + "\n",
+                encoding="utf-8",
+            )
+        raise
     metrics = {
         mode_id: suite.finalize(mode_id, dataset.view_names)
         for mode_id, _, _ in specs
@@ -330,13 +608,16 @@ def _run_command(argv: list[str]) -> None:
                 raise RuntimeError(
                     f"{mode_id}: evaluated {values['sample_count']}, expected {len(dataset)}"
                 )
+    visualizations = _save_visualizations(
+        args, dataset, teacher, model, specs, device
+    )
     result = {
         "schema": "stereo-tokenizer-stage-a1-result-v1",
         "status": "smoke" if args.max_batches is not None else "formal",
         "posterior": "mean",
         "quality_precision": "fp32",
         "checkpoint": checkpoint,
-        "dataset": dataset.provenance(),
+        "dataset": _dataset_provenance(dataset),
         "teacher": (
             None
             if teacher is None
@@ -347,19 +628,23 @@ def _run_command(argv: list[str]) -> None:
         "metrics": metrics,
         "tokenizer_parameters": {
             "total": sum(parameter.numel() for parameter in model.parameters()),
-            "evaluation_state": "frozen_inference_mode",
+            "architecturally_trainable": architecturally_trainable,
+            "runtime_requires_grad": sum(
+                parameter.numel()
+                for parameter in model.parameters()
+                if parameter.requires_grad
+            ),
+            "evaluation_state": "eval_inference_mode_posterior_mean",
         },
+        "visualizations": visualizations,
         "not_applicable": {
             "rfvd": "native four-frame clips are unsupported by the frozen I3D implementation",
             "fvmd": "not validated for native four-frame clips",
         },
         "pending_stage_a2": ["rfid", "raft_warp", "static_flicker", "motion_consistency"],
         "provenance": {
-            "cwd": str(Path.cwd()),
-            "git_branch": _git("branch", "--show-current"),
-            "git_commit": _git("rev-parse", "HEAD"),
-            "git_status_porcelain": _git("status", "--porcelain"),
-            "environment": _environment_provenance(),
+            **_source_provenance(),
+            "environment": environment,
             "resolved_args": _jsonable(vars(args)),
         },
     }
@@ -370,14 +655,782 @@ def _run_command(argv: list[str]) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def _percentile_summary(milliseconds: list[float]) -> dict[str, float]:
+    values = np.asarray(milliseconds, dtype=np.float64)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("benchmark timings must be finite and non-empty")
+    return {
+        "count": int(values.size),
+        "mean_ms": float(values.mean()),
+        "p50_ms": float(np.quantile(values, 0.50)),
+        "p90_ms": float(np.quantile(values, 0.90)),
+    }
+
+
+def _cuda_benchmark(function, *, warmup: int, iterations: int, repeats: int):
+    all_times = []
+    allocated = []
+    reserved = []
+    for _ in range(repeats):
+        for _ in range(warmup):
+            function()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        for start, end in zip(starts, ends):
+            start.record()
+            function()
+            end.record()
+        torch.cuda.synchronize()
+        all_times.extend(start.elapsed_time(end) for start, end in zip(starts, ends))
+        allocated.append(torch.cuda.max_memory_allocated())
+        reserved.append(torch.cuda.max_memory_reserved())
+    summary = _percentile_summary(all_times)
+    summary["peak_allocated_bytes"] = max(allocated)
+    summary["peak_reserved_bytes"] = max(reserved)
+    return summary
+
+
+def _benchmark_command(argv: list[str]) -> None:
+    parser = _run_parser()
+    parser.prog = "tokenizer_stage_a benchmark"
+    parser.add_argument("--benchmark-warmup", type=int, default=20)
+    parser.add_argument("--benchmark-iterations", type=int, default=100)
+    parser.add_argument("--benchmark-repeats", type=int, default=3)
+    parser.add_argument("--allow-nonformal-benchmark", action="store_true")
+    args = parser.parse_args(argv)
+    _hydrate_checkpoint_semantics(args)
+    if args.output_json.exists():
+        raise FileExistsError(f"refusing to overwrite {args.output_json}")
+    if args.device != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("Stage A benchmark requires one allocated CUDA GPU")
+    if args.batch_size != 1 or not args.bf16:
+        raise ValueError("formal benchmark requires --batch_size 1 --bf16")
+    configured = (
+        args.benchmark_warmup,
+        args.benchmark_iterations,
+        args.benchmark_repeats,
+    )
+    if not args.allow_nonformal_benchmark and configured != (20, 100, 3):
+        raise ValueError("formal benchmark is frozen to warmup=20, iterations=100, repeats=3")
+    if min(configured) < 1:
+        raise ValueError("benchmark counts must be positive")
+    environment = _environment_provenance()
+    if args.eval_temporal_mode != "both":
+        raise ValueError("benchmark requires both temporal modes")
+    dataset = CanonicalStageADataset(
+        args.stage_a_selection,
+        loader_root=args.canonical_loader_root,
+        eye_mode=args.eval_eye_mode,
+        camera_key=args.stage_a_camera_key,
+    )
+    batch = default_collate([dataset[0]])
+    device = torch.device("cuda")
+    video = batch["video"].to(device)
+    model = legacy.load_model(args, device)
+    model.requires_grad_(False)
+    modes = {}
+    with torch.inference_mode(), torch.autocast(
+        device_type="cuda", dtype=torch.bfloat16
+    ):
+        for temporal_mode, source_index in (("single_frame", 0), ("four_frame", None)):
+            mode_batch = _mode_batch(
+                {**batch, "video": video}, temporal_mode, source_index
+            )
+            mode_video = mode_batch["video"]
+            encoded = model.encode(
+                mode_video,
+                eye_mode=args.eval_eye_mode,
+                temporal_mode=temporal_mode,
+                sample_posterior=False,
+            )
+            mode = {}
+            mode["encode_including_posterior_mean"] = _cuda_benchmark(
+                lambda: model.encode(
+                    mode_video,
+                    eye_mode=args.eval_eye_mode,
+                    temporal_mode=temporal_mode,
+                    sample_posterior=False,
+                ),
+                warmup=args.benchmark_warmup,
+                iterations=args.benchmark_iterations,
+                repeats=args.benchmark_repeats,
+            )
+            mode["cached_posterior_mean"] = _cuda_benchmark(
+                encoded.posterior.mode,
+                warmup=args.benchmark_warmup,
+                iterations=args.benchmark_iterations,
+                repeats=args.benchmark_repeats,
+            )
+            mode["decode"] = _cuda_benchmark(
+                lambda: model.decode(
+                    encoded.latent, temporal_mode=temporal_mode
+                ),
+                warmup=args.benchmark_warmup,
+                iterations=args.benchmark_iterations,
+                repeats=args.benchmark_repeats,
+            )
+            mode["end_to_end"] = _cuda_benchmark(
+                lambda: model(
+                    mode_video,
+                    eye_mode=args.eval_eye_mode,
+                    temporal_mode=temporal_mode,
+                    sample_posterior=False,
+                ),
+                warmup=args.benchmark_warmup,
+                iterations=args.benchmark_iterations,
+                repeats=args.benchmark_repeats,
+            )
+            end_to_end_p50 = mode["end_to_end"]["p50_ms"]
+            mode["throughput"] = {
+                "samples_per_second": 1000.0 / end_to_end_p50,
+                "frames_per_second": (
+                    1000.0 * mode_video.shape[-3] / end_to_end_p50
+                ),
+            }
+            mode["input_shape"] = list(mode_video.shape)
+            mode["input_dtype"] = str(mode_video.dtype)
+            mode["autocast_dtype"] = "torch.bfloat16"
+            modes[temporal_mode] = mode
+    result = {
+        "schema": "stereo-tokenizer-stage-a1-benchmark-v1",
+        "status": "smoke" if args.allow_nonformal_benchmark else "formal",
+        "checkpoint": _checkpoint_provenance(
+            args.stereo_vae_ckpt, args.checkpoint_sha256
+        ),
+        "dataset": _dataset_provenance(dataset),
+        "precision": "bf16",
+        "batch_size": 1,
+        "warmup": args.benchmark_warmup,
+        "iterations": args.benchmark_iterations,
+        "repeats": args.benchmark_repeats,
+        "posterior": "mean",
+        "timing_scope": "model_only_excludes_data_decode_and_teacher",
+        "modes": modes,
+        "provenance": {
+            **_source_provenance(),
+            "environment": environment,
+            "resolved_args": _jsonable(vars(args)),
+        },
+    }
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    args.output_json.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _report_command(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="tokenizer_stage_a report")
+    parser.add_argument("--artifact-root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    root = args.artifact_root.expanduser().resolve()
+    output = args.output.expanduser().resolve()
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite {output}")
+    quality_paths = sorted((root / "quality").glob("*.json"))
+    benchmark_paths = sorted((root / "benchmark").glob("*.json"))
+    if len(quality_paths) != 9 or len(benchmark_paths) != 2:
+        raise ValueError("A1 report requires exactly 9 quality and 2 benchmark JSON files")
+    quality = [json.loads(path.read_text()) for path in quality_paths]
+    benchmarks = [json.loads(path.read_text()) for path in benchmark_paths]
+
+    def require_sha256(value, label):
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError(f"{label} must be one SHA256 digest")
+        try:
+            int(value, 16)
+        except ValueError as error:
+            raise ValueError(f"{label} must be hexadecimal") from error
+
+    def require_metric_backbone(environment, label):
+        backbone = environment.get("metric_backbone")
+        if not isinstance(backbone, dict):
+            raise ValueError(f"{label} metric backbone provenance is missing")
+        if (
+            backbone.get("name") != "torchvision.vgg16.IMAGENET1K_V1"
+            or backbone.get("role") != "torchmetrics LPIPS VGG feature backbone"
+            or backbone.get("preprocessing")
+            != "torchmetrics LPIPS vgg normalize=False on RGB [-1,1]"
+        ):
+            raise ValueError(f"{label} metric backbone contract mismatch")
+        require_sha256(backbone.get("sha256"), f"{label} VGG16 hash")
+        if backbone["sha256"] != VGG16_CHECKPOINT_SHA256:
+            raise ValueError(f"{label} VGG16 hash does not match the frozen contract")
+        if not str(backbone.get("path", "")):
+            raise ValueError(f"{label} VGG16 path is missing")
+        return backbone
+
+    status_path = root / "job-status.json"
+    if not status_path.is_file():
+        raise FileNotFoundError("A1 report requires job-status.json")
+    job_status = json.loads(status_path.read_text())
+    if job_status.get("schema") != "stereo-tokenizer-stage-a1-job-status-v1":
+        raise ValueError("job status schema mismatch")
+    expected_artifacts = {
+        str(path.relative_to(root)) for path in (*quality_paths, *benchmark_paths)
+    }
+    jobs = job_status.get("jobs", [])
+    actual_artifacts = {job.get("artifact") for job in jobs}
+    if len(jobs) != len(expected_artifacts) or actual_artifacts != expected_artifacts:
+        raise ValueError("job status does not cover every result artifact exactly once")
+    for job in jobs:
+        if job.get("state") != "COMPLETED" or int(job.get("exit_code", -1)) != 0:
+            raise ValueError("one or more formal Stage A jobs did not complete successfully")
+        if not str(job.get("job_id", "")):
+            raise ValueError("job status is missing one Slurm job ID")
+        artifact = root / job["artifact"]
+        require_sha256(job.get("sha256"), f"{artifact} status hash")
+        if sha256_file(artifact) != job["sha256"]:
+            raise ValueError(f"result artifact hash mismatch: {artifact}")
+        log_path = root / str(job.get("log", ""))
+        if not log_path.is_file():
+            raise FileNotFoundError(f"formal job log is missing: {log_path}")
+        require_sha256(job.get("log_sha256"), f"{log_path} status hash")
+        if sha256_file(log_path) != job["log_sha256"]:
+            raise ValueError(f"formal job log hash mismatch: {log_path}")
+
+    expected = {
+        ("umi", "stereo", None),
+        *(("umi", "mono", camera) for camera in (
+            "observation.images.cam_head_left",
+            "observation.images.cam_head_right",
+            "observation.images.cam_left_wrist_left",
+            "observation.images.cam_left_wrist_right",
+            "observation.images.cam_right_wrist_left",
+            "observation.images.cam_right_wrist_right",
+        )),
+        ("libero", "mono", "observation.images.cam_head_left"),
+        ("libero", "mono", "observation.images.cam_left_wrist_left"),
+    }
+    actual = set()
+    visualization_slots = set()
+    source_fingerprints = set()
+    environment_fingerprints = set()
+    selection_rows = {}
+    for result in quality:
+        if result.get("schema") != "stereo-tokenizer-stage-a1-result-v1":
+            raise ValueError("quality result schema mismatch")
+        dataset = result["dataset"]
+        key = (dataset["dataset_id"], dataset["eye_mode"], dataset["camera_key"])
+        actual.add(key)
+        expected_count = 1024 if dataset["dataset_id"] == "umi" else 256
+        expected_modes = {
+            *(f"{dataset['eye_mode']}/single_frame/source_{index}" for index in range(4)),
+            f"{dataset['eye_mode']}/four_frame",
+        }
+        if result.get("status") != "formal" or dataset["sample_count"] != expected_count:
+            raise ValueError(f"non-formal or wrong sample count for {key}")
+        if result.get("posterior") != "mean" or result.get("quality_precision") != "fp32":
+            raise ValueError(f"quality precision/posterior contract mismatch for {key}")
+        if set(result.get("requested_modes", [])) != expected_modes:
+            raise ValueError(f"mode coverage mismatch for {key}")
+        if result.get("single_frame_source_indices") != [0, 1, 2, 3]:
+            raise ValueError(f"single-frame source coverage mismatch for {key}")
+        checkpoint = result["checkpoint"]
+        if checkpoint["sha256"] != CHECKPOINT_SHA256:
+            raise ValueError("checkpoint SHA mismatch across quality results")
+        if int(checkpoint.get("global_step", -1)) != 125000:
+            raise ValueError("checkpoint global_step mismatch")
+        counters = checkpoint.get("stereo_update_counters", {})
+        if int(counters.get("generator_updates", -1)) != 162500:
+            raise ValueError("checkpoint generator update counter mismatch")
+        require_sha256(dataset.get("selection_sha256"), f"{key} selection semantic hash")
+        require_sha256(dataset.get("selection_file_sha256"), f"{key} selection file hash")
+        selection_path = Path(dataset["selection_path"])
+        if not selection_path.is_file() or sha256_file(selection_path) != dataset["selection_file_sha256"]:
+            raise ValueError(f"selection file drift for {key}")
+        selection_payload = json.loads(selection_path.read_text())
+        if (
+            int(selection_payload.get("sample_count", -1)) != expected_count
+            or len(selection_payload.get("records", [])) != expected_count
+        ):
+            raise ValueError(f"selection sample count mismatch for {key}")
+        decode_validation = selection_payload.get("decode_validation", {})
+        if int(decode_validation.get("accepted_count", -1)) != expected_count:
+            raise ValueError(f"selection decode audit mismatch for {key}")
+        require_sha256(
+            decode_validation.get("rejected_episode_ids_sha256"),
+            f"{key} rejected episode IDs hash",
+        )
+        identity = dataset.get("identity_contract", {})
+        require_sha256(identity.get("sha256"), f"{key} identity contract hash")
+        require_sha256(identity.get("source_manifest_sha256"), f"{key} manifest hash")
+        config_hashes = dataset.get("canonical_config_sha256", {})
+        if not config_hashes:
+            raise ValueError(f"canonical config hashes are missing for {key}")
+        for config_path, digest in config_hashes.items():
+            require_sha256(digest, f"{config_path} config hash")
+            if sha256_file(Path(config_path)) != digest:
+                raise ValueError(f"canonical config drift for {config_path}")
+        loader_sha = dataset.get("canonical_loader", {}).get("git_sha")
+        if loader_sha != "d51377ac450b0066bc0c8eb13939bcfae47275ff":
+            raise ValueError("canonical loader SHA mismatch")
+        selection_rows.setdefault(
+            dataset["dataset_id"],
+            {
+                "semantic_sha256": dataset["selection_sha256"],
+                "file_sha256": dataset["selection_file_sha256"],
+                "manifest_sha256": identity["source_manifest_sha256"],
+                "sample_count": expected_count,
+                "decode_checked": int(
+                    decode_validation.get("checked_candidate_count", -1)
+                ),
+                "decode_rejected": int(
+                    decode_validation.get("rejected_count", -1)
+                ),
+                "rejected_ids_sha256": decode_validation[
+                    "rejected_episode_ids_sha256"
+                ],
+            },
+        )
+        if selection_rows[dataset["dataset_id"]]["semantic_sha256"] != dataset["selection_sha256"]:
+            raise ValueError("one dataset used multiple selections")
+
+        teacher = result.get("teacher", {})
+        if dataset["eye_mode"] == "mono":
+            if teacher.get("source_sha") != DA3_SOURCE_SHA or teacher.get("checkpoint_sha256") != DA3_CHECKPOINT_SHA256:
+                raise ValueError(f"DA3 provenance mismatch for {key}")
+        elif (
+            teacher.get("backend") != "las2_h"
+            or teacher.get("source_sha") != LAS2_H_SOURCE_SHA
+            or teacher.get("checkpoint_sha256") != LAS2_H_CHECKPOINT_SHA256
+        ):
+            raise ValueError("LAS2-H provenance mismatch")
+
+        parameters = result.get("tokenizer_parameters", {})
+        if (
+            int(parameters.get("total", 0)) <= 0
+            or int(parameters.get("architecturally_trainable", 0)) <= 0
+            or int(parameters.get("runtime_requires_grad", -1)) != 0
+            or parameters.get("evaluation_state") != "eval_inference_mode_posterior_mean"
+        ):
+            raise ValueError(f"Tokenizer freeze/parameter provenance mismatch for {key}")
+        if set(result.get("metrics", {})) != expected_modes:
+            raise ValueError(f"metric mode coverage mismatch for {key}")
+        for mode in result["metrics"].values():
+            if mode["sample_count"] != expected_count:
+                raise ValueError(f"metric sample count mismatch for {key}")
+            if int(mode.get("valid_rgb_values", 0)) <= 0 or int(mode.get("valid_teacher_pixels", 0)) <= 0:
+                raise ValueError(f"empty metric mask for {key}")
+            health = mode["output_health"]
+            if (
+                health["nan_count"]
+                or health["inf_count"]
+                or health.get("invalid_sample_count")
+                or health.get("invalid_sample_ids")
+            ):
+                raise ValueError(f"invalid output in {key}")
+            teacher_invalid = mode.get("teacher_invalid_samples", [])
+            if int(mode.get("teacher_invalid_count", -1)) != len(teacher_invalid):
+                raise ValueError(f"teacher-invalid count mismatch for {key}")
+            identities = set()
+            for entry in teacher_invalid:
+                if (
+                    not isinstance(entry, dict)
+                    or not str(entry.get("sample_id", ""))
+                    or not str(entry.get("view", ""))
+                    or entry.get("reason") != "empty_teacher_mask"
+                ):
+                    raise ValueError(f"invalid teacher exclusion record for {key}")
+                identity = (entry["sample_id"], entry["view"])
+                if identity in identities:
+                    raise ValueError(f"duplicate teacher exclusion record for {key}")
+                identities.add(identity)
+
+        provenance = result.get("provenance", {})
+        for name in ("cwd", "git_branch", "git_commit", "git_diff_sha256", "git_status_porcelain"):
+            if name not in provenance:
+                raise ValueError(f"quality provenance is missing {name}")
+        require_sha256(provenance["git_diff_sha256"], "source diff hash")
+        if len(provenance["git_commit"]) != 40:
+            raise ValueError("source commit must be one full Git SHA")
+        source_fingerprints.add(tuple(provenance[name] for name in (
+            "cwd", "git_branch", "git_commit", "git_diff_sha256", "git_status_porcelain"
+        )))
+        environment = provenance.get("environment", {})
+        if not environment.get("python", "").startswith("3.12.") or "H100" not in str(environment.get("gpu_name", "")):
+            raise ValueError("formal Stage A quality must use Python 3.12 on H100")
+        require_sha256(environment.get("uv_lock_sha256"), "quality uv.lock hash")
+        require_metric_backbone(environment, "quality")
+        environment_fingerprints.add(json.dumps(environment, sort_keys=True))
+
+        cases = result.get("visualizations", [])
+        wants_cases = key in {
+            ("umi", "stereo", None),
+            ("libero", "mono", "observation.images.cam_head_left"),
+        }
+        if wants_cases:
+            expected_cases = {(slot, source) for slot in range(8) for source in range(4)}
+            actual_cases = {(case["slot"], case["source_frame_index"]) for case in cases}
+            if len(cases) != 32 or actual_cases != expected_cases:
+                raise ValueError(f"fixed visualization coverage mismatch for {key}")
+            visual_dir = Path(provenance["resolved_args"]["visualization_dir"])
+            case_index = visual_dir / "cases.json"
+            if not case_index.is_file() or json.loads(case_index.read_text()) != cases:
+                raise ValueError(f"visualization index mismatch for {key}")
+            for case in cases:
+                for field in ("rgb_file", "geometry_file"):
+                    image = visual_dir / case[field]
+                    if not image.is_file() or image.stat().st_size == 0:
+                        raise FileNotFoundError(f"visualization file missing: {image}")
+                visualization_slots.add((dataset["dataset_id"], case["slot"]))
+        elif cases:
+            raise ValueError(f"unexpected visualizations for {key}")
+    if actual != expected:
+        raise ValueError(f"quality coverage mismatch: missing={expected-actual}, extra={actual-expected}")
+    if visualization_slots != {
+        *(("umi", index) for index in range(8)),
+        *(("libero", index) for index in range(8)),
+    }:
+        raise ValueError("A1 report requires 8 fixed UMI and 8 fixed LIBERO visualizations")
+
+    benchmark_eyes = set()
+    for result in benchmarks:
+        if result.get("schema") != "stereo-tokenizer-stage-a1-benchmark-v1":
+            raise ValueError("benchmark result schema mismatch")
+        dataset = result.get("dataset", {})
+        benchmark_eyes.add(dataset.get("eye_mode"))
+        if dataset.get("dataset_id") != "umi":
+            raise ValueError("efficiency benchmark must use representative UMI input")
+        if result.get("status") != "formal" or (
+            result.get("warmup"), result.get("iterations"), result.get("repeats")
+        ) != (20, 100, 3):
+            raise ValueError("benchmark contract mismatch")
+        if (
+            result.get("precision") != "bf16"
+            or int(result.get("batch_size", -1)) != 1
+            or result.get("posterior") != "mean"
+            or result.get("timing_scope") != "model_only_excludes_data_decode_and_teacher"
+            or set(result.get("modes", {})) != {"single_frame", "four_frame"}
+            or result.get("checkpoint", {}).get("sha256") != CHECKPOINT_SHA256
+        ):
+            raise ValueError("benchmark precision/scope/checkpoint mismatch")
+        provenance = result.get("provenance", {})
+        require_sha256(provenance.get("git_diff_sha256"), "benchmark source diff hash")
+        source_fingerprints.add(tuple(provenance.get(name) for name in (
+            "cwd", "git_branch", "git_commit", "git_diff_sha256", "git_status_porcelain"
+        )))
+        environment = provenance.get("environment", {})
+        if not environment.get("python", "").startswith("3.12.") or "H100" not in str(environment.get("gpu_name", "")):
+            raise ValueError("formal benchmark must use Python 3.12 on H100")
+        require_sha256(environment.get("uv_lock_sha256"), "benchmark uv.lock hash")
+        require_metric_backbone(environment, "benchmark")
+        environment_fingerprints.add(json.dumps(environment, sort_keys=True))
+    if benchmark_eyes != {"mono", "stereo"}:
+        raise ValueError("benchmark must cover UMI mono and stereo")
+    if len(source_fingerprints) != 1 or len(environment_fingerprints) != 1:
+        raise ValueError("formal jobs used inconsistent source or environments")
+
+    source = quality[0]["provenance"]
+    source_patch = root / "source.patch"
+    if (
+        not source_patch.is_file()
+        or sha256_file(source_patch) != source["git_diff_sha256"]
+    ):
+        raise ValueError("source.patch does not match the recorded Git diff SHA256")
+    environment = source["environment"]
+    metric_backbone = require_metric_backbone(environment, "formal")
+    metric_backbone_path = Path(metric_backbone["path"])
+    if (
+        not metric_backbone_path.is_file()
+        or sha256_file(metric_backbone_path) != metric_backbone["sha256"]
+    ):
+        raise ValueError("frozen LPIPS VGG16 file is missing or has changed")
+    checkpoint = quality[0]["checkpoint"]
+    parameters = quality[0]["tokenizer_parameters"]
+    package_text = ", ".join(
+        f"{name}={version}" for name, version in sorted(environment["packages"].items())
+    )
+    status_text = source["git_status_porcelain"].replace("\n", "; ")
+    lines = [
+        "# Stereo Tokenizer Stage A1 Baseline（Preliminary）",
+        "",
+        "> 状态：PRELIMINARY。HY 因 canonical Lance index/loader 合同冲突被阻断；rFID 与 RAFT 指标留待 A2。",
+        "",
+        "## 实验合同与 provenance",
+        "",
+        f"- Artifact 根目录：`{root}`",
+        f"- 实际 cwd：`{source['cwd']}`",
+        f"- Git branch / commit：`{source['git_branch']}` / `{source['git_commit']}`",
+        f"- 未提交代码 diff：`{source_patch}`；SHA256：`{source['git_diff_sha256']}`",
+        f"- `git status --porcelain`：`{status_text}`",
+        f"- Checkpoint：`{checkpoint['path']}`",
+        f"- Checkpoint SHA256：`{checkpoint['sha256']}`；global_step={checkpoint['global_step']}；epoch={checkpoint['epoch']}",
+        f"- 直接训练计数：`{json.dumps(checkpoint['stereo_update_counters'], sort_keys=True)}`",
+        "- 质量：FP32；效率：BF16；posterior mean；Tokenizer `eval + inference_mode` 且运行时冻结。",
+        f"- Python：`{environment['python'].split()[0]}`；GPU：`{environment['gpu_name']}`；CUDA：`{environment['torch_cuda']}`；cuDNN：`{environment['cudnn']}`",
+        f"- `uv.lock` SHA256：`{environment['uv_lock_sha256']}`",
+        f"- LPIPS VGG16：`{metric_backbone['path']}`；SHA256：`{metric_backbone['sha256']}`；预处理：`{metric_backbone['preprocessing']}`",
+        f"- 关键包：{package_text}",
+        f"- Tokenizer 参数：total={parameters['total']:,}；架构可训练={parameters['architecturally_trainable']:,}；运行时 requires_grad={parameters['runtime_requires_grad']:,}",
+        f"- DA3：source `{DA3_SOURCE_SHA}`；weights `{DA3_CHECKPOINT_SHA256}`",
+        f"- LAS2-H：source `{LAS2_H_SOURCE_SHA}`；weights `{LAS2_H_CHECKPOINT_SHA256}`",
+        "",
+        "### 数据与哈希",
+        "",
+        "| Dataset | Windows/cell | Decode checked/rejected | Selection semantic SHA256 | Selection file SHA256 | Manifest SHA256 |",
+        "| --- | ---: | ---: | --- | --- | --- |",
+    ]
+    for dataset_id, row in sorted(selection_rows.items()):
+        lines.append(
+            f"| {dataset_id} | {row['sample_count']} | "
+            f"{row['decode_checked']}/{row['decode_rejected']} | "
+            f"`{row['semantic_sha256']}` | `{row['file_sha256']}` | "
+            f"`{row['manifest_sha256']}` |"
+        )
+    lines.extend([
+        "| HY | 0（BLOCKED） | N/A | N/A | N/A | 已冻结但不参与本次 macro |",
+        "",
+        "### 覆盖矩阵",
+        "",
+        "| Dataset | Eye | Camera/view cell | Windows | Modes | Macro inclusion |",
+        "| --- | --- | --- | ---: | --- | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        camera = dataset["camera_key"] or "3 canonical stereo pairs"
+        lines.append(
+            f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {camera} | "
+            f"{dataset['sample_count']} | single source 0/1/2/3 + four-frame | yes |"
+        )
+    lines.append("| HY | mono | N/A | 0 | BLOCKED | no |")
+    lines.extend([
+        "",
+        "## RGB 重建（per camera/view）",
+        "",
+        "| Dataset | Eye | Camera/view | Mode | L1 mean | P50 | P90 | P99 | MSE | PSNR | SSIM | LPIPS | RGB mask |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            for view_name, metric in mode["per_view"].items():
+                lines.append(
+                    f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | {mode_id} | "
+                    f"{metric['rgb_l1']['mean']:.6f} | {metric['rgb_l1']['p50']:.6f} | "
+                    f"{metric['rgb_l1']['p90']:.6f} | {metric['rgb_l1']['p99']:.6f} | "
+                    f"{metric['rgb_mse']['mean']:.6f} | {metric['psnr_db']['mean']:.3f} | "
+                    f"{metric['ssim']['mean']:.6f} | {metric['lpips']['mean']:.6f} | "
+                    f"{metric['rgb_valid_ratio']['mean']:.6f} |"
+                )
+    lines.extend([
+        "",
+        "### Dataset/eye/mode 等权 macro",
+        "",
+        "| Dataset | Eye | Mode | RGB L1 | MSE | PSNR | SSIM | LPIPS |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    macro_cells = {}
+    for result in quality:
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            key = (dataset["dataset_id"], dataset["eye_mode"], mode_id)
+            macro_cells.setdefault(key, []).append(mode["per_sample_macro"])
+    for key, cells in sorted(macro_cells.items()):
+        means = {
+            name: float(np.mean([cell[name]["mean"] for cell in cells]))
+            for name in ("rgb_l1", "rgb_mse", "psnr_db", "ssim", "lpips")
+        }
+        lines.append(
+            f"| {key[0]} | {key[1]} | {key[2]} | {means['rgb_l1']:.6f} | "
+            f"{means['rgb_mse']:.6f} | {means['psnr_db']:.3f} | "
+            f"{means['ssim']:.6f} | {means['lpips']:.6f} |"
+        )
+    lines.extend([
+        "",
+        "## Four-frame 时间一致性",
+        "",
+        "| Dataset | Eye | Camera/view | Δ L1 | Δ LPIPS | Δ01 L1/LPIPS | Δ12 L1/LPIPS | Δ23 L1/LPIPS |",
+        "| --- | --- | --- | ---: | ---: | --- | --- | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        mode = result["metrics"][f"{dataset['eye_mode']}/four_frame"]
+        for view_name, metric in mode["per_view"].items():
+            pairs = []
+            for pair in ("pair_01", "pair_12", "pair_23"):
+                pairs.append(
+                    f"{metric['temporal_delta_l1_' + pair]['mean']:.6f}/"
+                    f"{metric['temporal_delta_lpips_' + pair]['mean']:.6f}"
+                )
+            lines.append(
+                f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | "
+                f"{metric['temporal_delta_l1']['mean']:.6f} | "
+                f"{metric['temporal_delta_lpips']['mean']:.6f} | "
+                f"{pairs[0]} | {pairs[1]} | {pairs[2]} |"
+            )
+    lines.extend([
+        "",
+        "## Teacher-relative 几何（非真实 GT accuracy）",
+        "",
+        "| Dataset | Eye | Camera/view | Mode | Metric kind | log-L1 | RMSE | SILog | Mask coverage | Valid samples |",
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        prefix = "reconstruction_teacher" if dataset["eye_mode"] == "mono" else "depth_head_teacher"
+        for mode_id, mode in result["metrics"].items():
+            for view_name, metric in mode["per_view"].items():
+                l1 = metric.get(prefix + "_relative_log_l1")
+                rmse = metric.get(prefix + "_relative_log_rmse")
+                silog = metric.get(prefix + "_relative_log_silog")
+                coverage = metric.get(prefix + "_valid_ratio")
+                render = lambda value: "N/A" if value is None else f"{value['mean']:.6f}"
+                lines.append(
+                    f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | {mode_id} | {prefix} | "
+                    f"{render(l1)} | {render(rmse)} | {render(silog)} | "
+                    f"{render(coverage)} | {0 if l1 is None else l1['count']} |"
+                )
+    lines.extend([
+        "",
+        "## Bottleneck 与效率",
+        "",
+        "| Eye | Mode | Encode P50/P90 ms | Posterior mean P50/P90 ms | Decode P50/P90 ms | E2E P50/P90 ms | samples/s | frames/s | Peak alloc/reserved GiB |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- |",
+    ])
+    for result in sorted(benchmarks, key=lambda value: value["dataset"]["eye_mode"]):
+        for mode_name, mode in result["modes"].items():
+            encode = mode["encode_including_posterior_mean"]
+            posterior = mode["cached_posterior_mean"]
+            decode = mode["decode"]
+            timing = mode["end_to_end"]
+            lines.append(
+                f"| {result['dataset']['eye_mode']} | {mode_name} | "
+                f"{encode['p50_ms']:.3f}/{encode['p90_ms']:.3f} | "
+                f"{posterior['p50_ms']:.3f}/{posterior['p90_ms']:.3f} | "
+                f"{decode['p50_ms']:.3f}/{decode['p90_ms']:.3f} | "
+                f"{timing['p50_ms']:.3f}/{timing['p90_ms']:.3f} | "
+                f"{mode['throughput']['samples_per_second']:.3f} | "
+                f"{mode['throughput']['frames_per_second']:.3f} | "
+                f"{timing['peak_allocated_bytes'] / 2**30:.3f}/"
+                f"{timing['peak_reserved_bytes'] / 2**30:.3f} |"
+            )
+    lines.extend([
+        "",
+        "### Latent ABI",
+        "",
+        "| Dataset | Eye | Camera | Mode | Input shape/dtype | Latent shape/dtype | C | Tokens/window | Tokens/input frame | Spatial × | Temporal × | View × |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            abi = mode["latent_abi"]
+            lines.append(
+                f"| {dataset['dataset_id']} | {dataset['eye_mode']} | "
+                f"{dataset['camera_key'] or 'three canonical pairs'} | {mode_id} | "
+                f"`{abi['input_shape_without_batch']}` / `{abi['input_dtype']}` | "
+                f"`{abi['latent_shape_without_batch']}` / `{abi['latent_dtype']}` | "
+                f"{abi['latent_channels']} | {abi['tokens_per_window']} | "
+                f"{abi['tokens_per_input_frame']:.3f} | {abi['spatial_compression_ratio']:.1f} | "
+                f"{abi['temporal_compression_ratio']:.1f} | {abi['view_compression_ratio']:.1f} |"
+            )
+    lines.extend([
+        "",
+        "## 输出健康、失败与排除样本",
+        "",
+        "| Dataset | Eye | Camera | Mode | NaN | Inf | Invalid outputs | Teacher-empty views | Raw min/max | abs(output)>1 | Valid RGB values | Valid teacher pixels |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
+    ])
+    teacher_exclusions = []
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            health = mode["output_health"]
+            lines.append(
+                f"| {dataset['dataset_id']} | {dataset['eye_mode']} | "
+                f"{dataset['camera_key'] or 'three canonical pairs'} | {mode_id} | "
+                f"{health['nan_count']} | {health['inf_count']} | "
+                f"{health['invalid_sample_count']} | "
+                f"{mode['teacher_invalid_count']} | "
+                f"{health['raw_min']:.6f}/{health['raw_max']:.6f} | "
+                f"{health['abs_gt_one_ratio']:.8f} | {mode['valid_rgb_values']} | "
+                f"{mode['valid_teacher_pixels']} |"
+            )
+            teacher_exclusions.extend(
+                {
+                    "dataset": dataset["dataset_id"],
+                    "eye": dataset["eye_mode"],
+                    "camera": dataset["camera_key"],
+                    "mode": mode_id,
+                    **entry,
+                }
+                for entry in mode["teacher_invalid_samples"]
+            )
+    lines.extend([
+        "",
+        "Teacher-empty view/frame 不影响同一固定窗口的 RGB 指标；该 view 的 teacher-relative error 缺失，几何汇总的 valid-sample count 会相应减少。",
+    ])
+    for entry in sorted(teacher_exclusions, key=lambda value: (
+        value["dataset"], value["eye"], value["camera"] or "",
+        value["mode"], value["sample_id"], value["view"]
+    )):
+        lines.append(
+            f"- teacher exclusion: dataset={entry['dataset']}, eye={entry['eye']}, "
+            f"camera={entry['camera'] or 'three canonical pairs'}, mode={entry['mode']}, "
+            f"sample={entry['sample_id']}, view={entry['view']}, reason={entry['reason']}"
+        )
+    lines.extend([
+        "",
+        "每个 selection 的 decode checked/rejected 与 rejected episode IDs SHA256 已记录在数据表；完整排除原因保存在 selection JSON。",
+        "",
+        "### 固定案例",
+        "",
+        "共 16 个固定窗口：UMI 8、LIBERO 8；每个窗口保存四个 source position 的原图/重建与几何图，`cases.json` 和每个 PNG 均已在报告生成时核验。",
+        "",
+        "## 几何口径",
+        "",
+        "- Mono：DA3 分别推理原图与重建图，报告 `reconstruction_teacher_relative_*`。",
+        "- Stereo：decoder 不重建右眼，报告 `depth_head_teacher_relative_*`；不称为 stereo 重建精度。",
+        "- 没有独立真实 depth/disparity GT，因此本报告不声称真实几何 accuracy。",
+        "",
+        "## 阻断与未完成项",
+        "",
+        "- 每个 selection 的 decode checked/rejected 与 rejected episode IDs SHA256 已记录；完整排除原因保存在 selection JSON。",
+        "- HY：BLOCKED，不进入任何 macro average；原因是 canonical Lance `index` 与 pinned loader 的物理 offset 合同冲突。",
+        "- rFID、RAFT warp/static flicker/motion consistency：Pending Stage A2。",
+        "- rFVD：N/A，现有冻结 I3D-FVD 实现不支持本项目原生 4 帧合同；扩帧/插帧会改变评测对象。",
+        "- FVMD：N/A，尚无经验证适用于原生 4 帧的冻结实现。",
+        "",
+        "## 决策",
+        "",
+        "1. **值得继续，但需要补 A2 与 HY 修复。** A1 可作为 preliminary baseline，不能表述成完整 Stage A。",
+        "2. **最大风险：** 当前几何指标只有 teacher-relative 证据；若误写为真实 depth/disparity accuracy，会得到错误结论。",
+        "3. **最缺的关键证据：** 独立真实几何 GT，以及 rFID/显式 warp-motion 指标；HY 的 identity/offset 合同也仍缺上游确认。",
+        "4. **今天可执行的最小下一步：** 固定同一批 16 个案例做人工异常审查，并为 A2 锁定 rFID 与 RAFT 的权重、预处理和版本。",
+        "5. **置信度：80%（中等）。** 对 A1 已报告数字和可复现合同置信度较高；因 HY、A2 与独立几何 GT 缺失，不给高置信度。",
+        "",
+    ])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines), encoding="utf-8")
+    print(json.dumps({"output": str(output), "quality_results": 9, "benchmarks": 2}, indent=2))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit("expected one of: selection, preflight, run")
+        raise SystemExit("expected one of: selection, preflight, run, benchmark, report")
     command, argv = sys.argv[1], sys.argv[2:]
     commands = {
         "selection": _selection_command,
         "preflight": _preflight_command,
         "run": _run_command,
+        "benchmark": _benchmark_command,
+        "report": _report_command,
     }
     if command not in commands:
         raise SystemExit(f"unknown command {command!r}")

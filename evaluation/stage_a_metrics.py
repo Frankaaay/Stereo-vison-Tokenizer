@@ -74,23 +74,34 @@ def _ssim_mean(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float(value.item())
 
 
-def _teacher_target(batch: dict[str, Any], epsilon: float):
+def _teacher_targets(batch: dict[str, Any], epsilon: float):
     valid = batch.get("valid_mask")
     if valid is None:
-        return None
+        return None, None, None
     if "da3_relative_depth" in batch:
-        return relative_target_from_da3(
+        target = relative_target_from_da3(
             batch["da3_relative_depth"], valid, epsilon=epsilon
         )
+        reconstruction_depth = batch.get("reconstruction_da3_relative_depth")
+        reconstruction_valid = batch.get("reconstruction_valid_mask")
+        if reconstruction_depth is None or reconstruction_valid is None:
+            raise ValueError("mono teacher evaluation requires reconstruction DA3 output")
+        reconstruction = relative_target_from_da3(
+            reconstruction_depth,
+            reconstruction_valid,
+            epsilon=epsilon,
+        )
+        return target, reconstruction, "reconstruction_teacher"
     if "disparity" in batch:
         # Canonical-v3 currently publishes no stereo calibration.  Centering
         # inverse disparity with unit scale yields a clearly labelled
-        # LAS2-H-relative agreement metric, never physical depth accuracy.
+        # depth-head agreement metric, never physical depth accuracy.
         shape = batch["disparity"].shape[:2]
         unit = torch.ones(shape, device=valid.device, dtype=torch.float32)
-        return relative_target_from_foundation_stereo(
+        target = relative_target_from_foundation_stereo(
             batch["disparity"], valid, unit, unit, epsilon=epsilon
         )
+        return target, None, "depth_head_teacher"
     raise ValueError("valid_mask is present without a recognized teacher target")
 
 
@@ -109,9 +120,11 @@ class StageA1MetricSuite:
                 "raw_min": float("inf"),
                 "raw_max": float("-inf"),
                 "invalid_sample_count": 0,
+                "invalid_sample_ids": [],
             }
         )
         self.abis: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
+        self.teacher_invalid: dict[str, list[dict[str, str]]] = defaultdict(list)
 
     @torch.inference_mode()
     def update(
@@ -138,14 +151,18 @@ class StageA1MetricSuite:
         if target.shape[1] != len(view_names):
             raise ValueError(f"{mode_id}: view-name contract mismatch")
 
+        sample_ids = [str(value) for value in batch["sample_id"]]
         health = self.health[mode_id]
         health["nan_count"] += int(torch.isnan(prediction).sum().item())
         health["inf_count"] += int(torch.isinf(prediction).sum().item())
         health["value_count"] += prediction.numel()
         health["abs_gt_one_count"] += int((prediction.abs() > 1).sum().item())
         finite = torch.isfinite(prediction)
-        health["invalid_sample_count"] += int(
-            (~finite.flatten(1).all(dim=1)).sum().item()
+        finite_by_sample = finite.flatten(1).all(dim=1)
+        invalid_indices = torch.nonzero(~finite_by_sample, as_tuple=False).flatten()
+        health["invalid_sample_count"] += int(invalid_indices.numel())
+        health["invalid_sample_ids"].extend(
+            sample_ids[int(index)] for index in invalid_indices.tolist()
         )
         if finite.any():
             health["raw_min"] = min(
@@ -157,14 +174,15 @@ class StageA1MetricSuite:
         if not finite.all():
             raise ValueError(f"{mode_id}: reconstruction contains NaN or Inf")
 
-        teacher_target = _teacher_target(batch, self.relative_depth_epsilon)
+        teacher_target, reconstruction_teacher, teacher_kind = _teacher_targets(
+            batch, self.relative_depth_epsilon
+        )
         teacher_prediction = None
-        if teacher_target is not None:
+        if teacher_target is not None and reconstruction_teacher is None:
             teacher_prediction, _ = relative_prediction_from_raw(
                 output.raw_relative_log_depth, teacher_target.valid_mask
             )
 
-        sample_ids = list(batch["sample_id"])
         for batch_index, sample_id in enumerate(sample_ids):
             record = {"sample_id": str(sample_id), "views": {}}
             for view_index, view_name in enumerate(view_names):
@@ -193,6 +211,7 @@ class StageA1MetricSuite:
                         perceptual_model, prediction_crop, target_crop
                     ),
                     "rgb_valid_values": valid_count,
+                    "rgb_valid_ratio": valid_count / expanded.numel(),
                 }
                 if target_view.shape[1] > 1:
                     target_delta = target_view[:, 1:] - target_view[:, :-1]
@@ -220,35 +239,81 @@ class StageA1MetricSuite:
                         .mean()
                         .item()
                     )
+                    for pair_index in range(target_delta.shape[1]):
+                        pair_mask = delta_mask[pair_index].unsqueeze(0).expand_as(
+                            target_delta[:, pair_index]
+                        )
+                        pair_error = (
+                            prediction_delta[:, pair_index]
+                            - target_delta[:, pair_index]
+                        )
+                        pair_name = f"pair_{pair_index}{pair_index + 1}"
+                        values[f"temporal_delta_l1_{pair_name}"] = float(
+                            pair_error.abs().masked_select(pair_mask).mean().item()
+                        )
+                        values[f"temporal_delta_lpips_{pair_name}"] = float(
+                            perceptual_model(
+                                prediction_delta_crop[pair_index : pair_index + 1].float(),
+                                target_delta_crop[pair_index : pair_index + 1].float(),
+                            )
+                            .float()
+                            .mean()
+                            .item()
+                        )
                 if teacher_target is not None:
-                    valid = teacher_target.valid_mask[batch_index, view_index]
-                    difference = (
-                        teacher_prediction[batch_index, view_index]
-                        - teacher_target.relative_log_depth[batch_index, view_index]
-                    )
+                    if reconstruction_teacher is None:
+                        valid = teacher_target.valid_mask[batch_index, view_index]
+                        prediction_depth = teacher_prediction[batch_index, view_index]
+                    else:
+                        valid = (
+                            teacher_target.valid_mask[batch_index, view_index]
+                            & reconstruction_teacher.valid_mask[batch_index, view_index]
+                        )
+                        prediction_depth = reconstruction_teacher.relative_log_depth[
+                            batch_index, view_index
+                        ]
+                    difference = prediction_depth - teacher_target.relative_log_depth[
+                        batch_index, view_index
+                    ]
                     selected = difference.masked_select(valid)
                     if selected.numel() == 0:
-                        raise ValueError(f"{mode_id}/{view_name}: no teacher pixels")
-                    values.update(
-                        {
-                            "teacher_relative_log_l1": float(
-                                selected.abs().mean().item()
-                            ),
-                            "teacher_relative_log_rmse": float(
-                                selected.square().mean().sqrt().item()
-                            ),
-                            "teacher_relative_log_silog": float(
-                                (
-                                    selected.square().mean()
-                                    - selected.mean().square()
-                                )
-                                .clamp_min(0)
-                                .sqrt()
-                                .item()
-                            ),
-                            "teacher_valid_pixels": int(selected.numel()),
-                        }
-                    )
+                        values.update(
+                            {
+                                f"{teacher_kind}_valid_pixels": 0,
+                                f"{teacher_kind}_valid_ratio": 0.0,
+                            }
+                        )
+                        self.teacher_invalid[mode_id].append(
+                            {
+                                "sample_id": str(sample_id),
+                                "view": str(view_name),
+                                "reason": "empty_teacher_mask",
+                            }
+                        )
+                    else:
+                        values.update(
+                            {
+                                f"{teacher_kind}_relative_log_l1": float(
+                                    selected.abs().mean().item()
+                                ),
+                                f"{teacher_kind}_relative_log_rmse": float(
+                                    selected.square().mean().sqrt().item()
+                                ),
+                                f"{teacher_kind}_relative_log_silog": float(
+                                    (
+                                        selected.square().mean()
+                                        - selected.mean().square()
+                                    )
+                                    .clamp_min(0)
+                                    .sqrt()
+                                    .item()
+                                ),
+                                f"{teacher_kind}_valid_pixels": int(selected.numel()),
+                                f"{teacher_kind}_valid_ratio": (
+                                    int(selected.numel()) / int(valid.numel())
+                                ),
+                            }
+                        )
                 record["views"][view_name] = values
             self.samples[mode_id].append(record)
 
@@ -265,16 +330,28 @@ class StageA1MetricSuite:
         if not records:
             raise ValueError(f"{mode_id}: no Stage A1 samples")
         metric_names = tuple(
-            name
-            for name in records[0]["views"][view_names[0]]
-            if not name.endswith("_pixels") and not name.endswith("_values")
+            sorted(
+                {
+                    name
+                    for record in records
+                    for view in view_names
+                    for name in record["views"][view]
+                    if not name.endswith("_pixels")
+                    and not name.endswith("_values")
+                }
+            )
         )
         per_view = {
             view: {
                 name: _summary(
-                    [record["views"][view][name] for record in records]
+                    [
+                        record["views"][view][name]
+                        for record in records
+                        if name in record["views"][view]
+                    ]
                 )
                 for name in metric_names
+                if any(name in record["views"][view] for record in records)
             }
             for view in view_names
         }
@@ -287,9 +364,14 @@ class StageA1MetricSuite:
                         )
                     )
                     for record in records
+                    if all(name in record["views"][view] for view in view_names)
                 ]
             )
             for name in metric_names
+            if any(
+                all(name in record["views"][view] for view in view_names)
+                for record in records
+            )
         }
         health = dict(self.health[mode_id])
         health["abs_gt_one_ratio"] = (
@@ -315,11 +397,17 @@ class StageA1MetricSuite:
             ),
             "valid_teacher_pixels": int(
                 sum(
-                    record["views"][view].get("teacher_valid_pixels", 0)
+                    sum(
+                        value
+                        for name, value in record["views"][view].items()
+                        if name.endswith("_valid_pixels")
+                    )
                     for record in records
                     for view in view_names
                 )
             ),
+            "teacher_invalid_count": len(self.teacher_invalid[mode_id]),
+            "teacher_invalid_samples": list(self.teacher_invalid[mode_id]),
             "output_health": health,
             "latent_abi": {
                 "input_shape_without_batch": list(input_shape),

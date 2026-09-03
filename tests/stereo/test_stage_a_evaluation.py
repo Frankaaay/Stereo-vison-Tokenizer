@@ -1,6 +1,8 @@
+import hashlib
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +17,17 @@ from evaluation.stage_a_contract import (
     write_selection,
 )
 from evaluation.stage_a_manifest import _apportion_counts, assign_splits
-from evaluation.stage_a_metrics import StageA1MetricSuite, _content_crop
-from evaluation.tokenizer_stage_a import _run_parser
+from evaluation.stage_a_metrics import (
+    StageA1MetricSuite,
+    _content_crop,
+    _teacher_targets,
+)
+from evaluation.tokenizer_stage_a import (
+    _percentile_summary,
+    _report_command,
+    _run_parser,
+    _stage_a_visualization_batch,
+)
 
 
 class StageASelectionTest(unittest.TestCase):
@@ -201,6 +212,15 @@ class _DummyLPIPS(torch.nn.Module):
 
 
 class StageA1MetricTest(unittest.TestCase):
+    def test_stereo_visualization_uses_unit_calibration_when_canonical_has_none(self):
+        batch = {"disparity": torch.ones(1, 3, 1, 4, 8, 8)}
+        adapted = _stage_a_visualization_batch(batch)
+        self.assertNotIn("fx", batch)
+        self.assertNotIn("baseline_m", batch)
+        self.assertEqual(tuple(adapted["fx"].shape), (1, 3))
+        self.assertTrue(torch.equal(adapted["fx"], adapted["baseline_m"]))
+        self.assertTrue(torch.all(adapted["fx"] == 1))
+
     def test_masked_rgb_temporal_health_and_abi(self):
         target = torch.zeros(2, 1, 1, 3, 4, 16, 16)
         prediction = torch.full((2, 1, 3, 4, 16, 16), 0.1)
@@ -229,12 +249,445 @@ class StageA1MetricTest(unittest.TestCase):
         self.assertAlmostEqual(macro["rgb_l1"]["mean"], 0.1, places=6)
         self.assertAlmostEqual(macro["rgb_mse"]["mean"], 0.01, places=6)
         self.assertAlmostEqual(macro["temporal_delta_l1"]["mean"], 0.0, places=6)
+        for pair in ("pair_01", "pair_12", "pair_23"):
+            self.assertAlmostEqual(
+                macro[f"temporal_delta_l1_{pair}"]["mean"], 0.0, places=6
+            )
+            self.assertAlmostEqual(
+                macro[f"temporal_delta_lpips_{pair}"]["mean"], 0.0, places=6
+            )
         self.assertEqual(result["output_health"]["nan_count"], 0)
         self.assertEqual(result["output_health"]["inf_count"], 0)
         self.assertEqual(result["latent_abi"]["tokens_per_window"], 16)
         self.assertEqual(
             result["valid_rgb_values"], 2 * 1 * 3 * 4 * 12 * 16
         )
+
+
+    def test_empty_teacher_view_is_recorded_without_dropping_rgb_sample(self):
+        batch_size, views, frames, height, width = 2, 2, 1, 16, 16
+        video = torch.zeros(batch_size, views, 2, 3, frames, height, width)
+        rgb_valid = torch.ones(
+            batch_size, views, 1, frames, height, width, dtype=torch.bool
+        )
+        teacher_valid = torch.ones_like(rgb_valid)
+        teacher_valid[1, 0] = False
+        batch = {
+            "video": video,
+            "rgb_valid_mask": rgb_valid,
+            "valid_mask": teacher_valid,
+            "disparity": torch.ones_like(teacher_valid, dtype=torch.float32),
+            "sample_id": ["sample-valid", "sample-head-empty"],
+        }
+        output = SimpleNamespace(
+            rgb=torch.zeros(batch_size, views, 3, frames, height, width),
+            latent=torch.zeros(batch_size, views, 48, 1, 4, 4),
+            raw_relative_log_depth=torch.zeros_like(teacher_valid, dtype=torch.float32),
+        )
+        suite = StageA1MetricSuite(relative_depth_epsilon=1e-6)
+        suite.update(
+            "stereo/single_frame/source_0",
+            batch,
+            output,
+            ("head", "wrist"),
+            _DummyLPIPS(),
+        )
+        result = suite.finalize(
+            "stereo/single_frame/source_0", ("head", "wrist")
+        )
+        metric = "depth_head_teacher_relative_log_l1"
+        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(result["per_view"]["head"][metric]["count"], 1)
+        self.assertEqual(result["per_view"]["wrist"][metric]["count"], 2)
+        self.assertEqual(result["per_sample_macro"][metric]["count"], 1)
+        self.assertEqual(result["teacher_invalid_count"], 1)
+        self.assertEqual(
+            result["teacher_invalid_samples"],
+            [
+                {
+                    "sample_id": "sample-head-empty",
+                    "view": "head",
+                    "reason": "empty_teacher_mask",
+                }
+            ],
+        )
+        self.assertGreater(result["valid_rgb_values"], 0)
+
+    def test_teacher_metric_semantics_are_explicit(self):
+        depth = torch.tensor([1.0, 2.0, 3.0, 4.0]).reshape(1, 1, 1, 1, 2, 2)
+        valid = torch.ones_like(depth, dtype=torch.bool)
+        target, reconstruction, kind = _teacher_targets(
+            {
+                "valid_mask": valid,
+                "da3_relative_depth": depth,
+                "reconstruction_da3_relative_depth": depth * 1.1,
+                "reconstruction_valid_mask": valid,
+            },
+            1e-6,
+        )
+        self.assertEqual(kind, "reconstruction_teacher")
+        self.assertIsNotNone(target)
+        self.assertIsNotNone(reconstruction)
+
+        target, reconstruction, kind = _teacher_targets(
+            {"valid_mask": valid, "disparity": depth}, 1e-6
+        )
+        self.assertEqual(kind, "depth_head_teacher")
+        self.assertIsNotNone(target)
+        self.assertIsNone(reconstruction)
+
+    def test_benchmark_percentiles(self):
+        result = _percentile_summary([1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(result["count"], 4)
+        self.assertAlmostEqual(result["mean_ms"], 2.5)
+        self.assertAlmostEqual(result["p50_ms"], 2.5)
+        self.assertAlmostEqual(result["p90_ms"], 3.7)
+
+    def test_report_fails_closed_on_incomplete_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "quality").mkdir()
+            (root / "benchmark").mkdir()
+            with self.assertRaisesRegex(ValueError, "exactly 9 quality"):
+                _report_command(
+                    [
+                        "--artifact-root",
+                        str(root),
+                        "--output",
+                        str(root / "report.md"),
+                    ]
+                )
+            self.assertFalse((root / "report.md").exists())
+
+    def test_report_renders_only_complete_verified_artifacts(self):
+        cameras = [
+            None,
+            "observation.images.cam_head_left",
+            "observation.images.cam_head_right",
+            "observation.images.cam_left_wrist_left",
+            "observation.images.cam_left_wrist_right",
+            "observation.images.cam_right_wrist_left",
+            "observation.images.cam_right_wrist_right",
+        ]
+        cells = [("umi", "stereo", cameras[0])]
+        cells.extend(("umi", "mono", camera) for camera in cameras[1:])
+        cells.extend(
+            ("libero", "mono", camera)
+            for camera in (
+                "observation.images.cam_head_left",
+                "observation.images.cam_left_wrist_left",
+            )
+        )
+
+        def digest(path):
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        def summary(value=0.1):
+            return {
+                "count": 1,
+                "mean": value,
+                "p50": value,
+                "p90": value,
+                "p99": value,
+            }
+
+        def mode(eye_mode, four_frame, view_name):
+            geometry = (
+                "reconstruction_teacher" if eye_mode == "mono"
+                else "depth_head_teacher"
+            )
+            metrics = {
+                "rgb_l1": summary(),
+                "rgb_mse": summary(0.01),
+                "psnr_db": summary(20.0),
+                "ssim": summary(0.8),
+                "lpips": summary(0.2),
+                "rgb_valid_ratio": summary(1.0),
+                f"{geometry}_relative_log_l1": summary(0.3),
+                f"{geometry}_relative_log_rmse": summary(0.4),
+                f"{geometry}_relative_log_silog": summary(0.2),
+                f"{geometry}_valid_ratio": summary(0.9),
+            }
+            if four_frame:
+                metrics["temporal_delta_l1"] = summary(0.05)
+                metrics["temporal_delta_lpips"] = summary(0.06)
+                for pair in ("pair_01", "pair_12", "pair_23"):
+                    metrics[f"temporal_delta_l1_{pair}"] = summary(0.05)
+                    metrics[f"temporal_delta_lpips_{pair}"] = summary(0.06)
+            return {
+                "sample_count": 1,
+                "per_view": {view_name: metrics},
+                "per_sample_macro": metrics,
+                "valid_rgb_values": 100,
+                "valid_teacher_pixels": 90,
+                "teacher_invalid_count": 0,
+                "teacher_invalid_samples": [],
+                "output_health": {
+                    "nan_count": 0,
+                    "inf_count": 0,
+                    "invalid_sample_count": 0,
+                    "invalid_sample_ids": [],
+                    "raw_min": -0.5,
+                    "raw_max": 0.5,
+                    "abs_gt_one_ratio": 0.0,
+                },
+                "latent_abi": {
+                    "input_shape_without_batch": [1, 1, 3, 4, 256, 256],
+                    "latent_shape_without_batch": [1, 48, 1, 16, 16],
+                    "input_dtype": "torch.float32",
+                    "latent_dtype": "torch.float32",
+                    "latent_channels": 48,
+                    "tokens_per_window": 256,
+                    "tokens_per_input_frame": 64.0,
+                    "spatial_compression_ratio": 256.0,
+                    "temporal_compression_ratio": 4.0,
+                    "view_compression_ratio": 1.0,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            quality_dir = root / "quality"
+            benchmark_dir = root / "benchmark"
+            log_dir = root / "logs"
+            quality_dir.mkdir()
+            benchmark_dir.mkdir()
+            log_dir.mkdir()
+            source_patch = root / "source.patch"
+            source_patch.write_text("synthetic patch\n")
+            metric_backbone = root / "vgg16-397923af.pth"
+            metric_backbone.write_bytes(b"synthetic VGG16 fixture")
+            environment = {
+                "python": "3.12.11 test",
+                "gpu_name": "NVIDIA H100 80GB HBM3",
+                "gpu_capability": [9, 0],
+                "torch_cuda": "12.6",
+                "cudnn": 90100,
+                "uv_lock_sha256": "4" * 64,
+                "metric_backbone": {
+                    "name": "torchvision.vgg16.IMAGENET1K_V1",
+                    "role": "torchmetrics LPIPS VGG feature backbone",
+                    "path": str(metric_backbone),
+                    "sha256": digest(metric_backbone),
+                    "preprocessing": "torchmetrics LPIPS vgg normalize=False on RGB [-1,1]",
+                },
+                "packages": {"torch": "2.7.1"},
+            }
+            provenance = {
+                "cwd": "/repo",
+                "git_branch": "hezhou-las2-h",
+                "git_commit": "b" * 40,
+                "git_diff_sha256": digest(source_patch),
+                "git_status_porcelain": " M evaluation/tokenizer_stage_a.py",
+                "environment": environment,
+                "resolved_args": {},
+            }
+            selections = {}
+            configs = {}
+            for dataset_id in ("umi", "libero"):
+                selection = root / f"{dataset_id}-selection.json"
+                count = 1024 if dataset_id == "umi" else 256
+                selection.write_text(
+                    json.dumps(
+                        {
+                            "sample_count": count,
+                            "records": [{} for _ in range(count)],
+                            "decode_validation": {
+                                "accepted_count": count,
+                                "checked_candidate_count": count + 2,
+                                "rejected_count": 2,
+                                "rejected_episode_ids_sha256": "3" * 64,
+                            },
+                        }
+                    )
+                )
+                selections[dataset_id] = selection
+                config = root / f"{dataset_id}.yaml"
+                config.write_text(f"dataset: {dataset_id}\n")
+                configs[dataset_id] = config
+
+            artifacts = []
+            for index, (dataset_id, eye_mode, camera) in enumerate(cells):
+                count = 1024 if dataset_id == "umi" else 256
+                view_name = camera or "head_pair"
+                modes = {
+                    f"{eye_mode}/single_frame/source_{source}": mode(
+                        eye_mode, False, view_name
+                    )
+                    for source in range(4)
+                }
+                modes[f"{eye_mode}/four_frame"] = mode(
+                    eye_mode, True, view_name
+                )
+                for value in modes.values():
+                    value["sample_count"] = count
+                visualizations = []
+                resolved_args = {}
+                if (dataset_id, eye_mode, camera) in {
+                    ("umi", "stereo", None),
+                    ("libero", "mono", "observation.images.cam_head_left"),
+                }:
+                    visual_dir = root / "visualizations" / f"case-{index}"
+                    visual_dir.mkdir(parents=True)
+                    visualizations = []
+                    for slot in range(8):
+                        for source in range(4):
+                            rgb = f"case-{slot:02d}-source-{source}.png"
+                            geometry = f"depth-case-{slot:02d}-source-{source}.png"
+                            (visual_dir / rgb).write_bytes(b"png")
+                            (visual_dir / geometry).write_bytes(b"png")
+                            visualizations.append(
+                                {
+                                    "slot": slot,
+                                    "selection_index": slot,
+                                    "sample_id": f"sample-{slot}",
+                                    "source_frame_index": source,
+                                    "rgb_file": rgb,
+                                    "geometry_file": geometry,
+                                }
+                            )
+                    (visual_dir / "cases.json").write_text(
+                        json.dumps(visualizations)
+                    )
+                    resolved_args["visualization_dir"] = str(visual_dir)
+                payload = {
+                    "schema": "stereo-tokenizer-stage-a1-result-v1",
+                    "status": "formal",
+                    "posterior": "mean",
+                    "quality_precision": "fp32",
+                    "requested_modes": list(modes),
+                    "single_frame_source_indices": [0, 1, 2, 3],
+                    "checkpoint": {
+                        "path": "/checkpoint.ckpt",
+                        "sha256": "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e",
+                        "global_step": 125000,
+                        "epoch": 1,
+                        "stereo_update_counters": {"generator_updates": 162500},
+                    },
+                    "dataset": {
+                        "dataset_id": dataset_id,
+                        "eye_mode": eye_mode,
+                        "camera_key": camera,
+                        "sample_count": count,
+                        "selection_path": str(selections[dataset_id]),
+                        "selection_sha256": ("e" if dataset_id == "umi" else "f") * 64,
+                        "selection_file_sha256": digest(selections[dataset_id]),
+                        "identity_contract": {
+                            "sha256": "1" * 64,
+                            "source_manifest_sha256": "2" * 64,
+                        },
+                        "canonical_config_sha256": {
+                            str(configs[dataset_id]): digest(configs[dataset_id])
+                        },
+                        "canonical_loader": {
+                            "git_sha": "d51377ac450b0066bc0c8eb13939bcfae47275ff"
+                        },
+                    },
+                    "teacher": (
+                        {
+                            "source_sha": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+                            "checkpoint_sha256": "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5",
+                        }
+                        if eye_mode == "mono" else
+                        {
+                            "backend": "las2_h",
+                            "source_sha": "8c97bd4c4da3712c2ac60003a23201dfdb5935f4",
+                            "checkpoint_sha256": "758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4",
+                        }
+                    ),
+                    "tokenizer_parameters": {
+                        "total": 100,
+                        "architecturally_trainable": 100,
+                        "runtime_requires_grad": 0,
+                        "evaluation_state": "eval_inference_mode_posterior_mean",
+                    },
+                    "metrics": modes,
+                    "visualizations": visualizations,
+                    "provenance": {**provenance, "resolved_args": resolved_args},
+                }
+                result_path = quality_dir / f"quality-{index}.json"
+                result_path.write_text(json.dumps(payload))
+                artifacts.append(result_path)
+
+            for eye_mode in ("mono", "stereo"):
+                timing = {
+                    "count": 300,
+                    "mean_ms": 10.0,
+                    "p50_ms": 10.0,
+                    "p90_ms": 11.0,
+                    "peak_allocated_bytes": 2**30,
+                    "peak_reserved_bytes": 2**30,
+                }
+                mode_payload = {
+                    name: {
+                        "encode_including_posterior_mean": timing,
+                        "cached_posterior_mean": timing,
+                        "decode": timing,
+                        "end_to_end": timing,
+                        "throughput": {
+                            "samples_per_second": 100.0,
+                            "frames_per_second": 100.0,
+                        },
+                    }
+                    for name in ("single_frame", "four_frame")
+                }
+                payload = {
+                    "schema": "stereo-tokenizer-stage-a1-benchmark-v1",
+                    "status": "formal",
+                    "warmup": 20,
+                    "iterations": 100,
+                    "repeats": 3,
+                    "precision": "bf16",
+                    "batch_size": 1,
+                    "posterior": "mean",
+                    "timing_scope": "model_only_excludes_data_decode_and_teacher",
+                    "checkpoint": {
+                        "sha256": "a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e"
+                    },
+                    "dataset": {"dataset_id": "umi", "eye_mode": eye_mode},
+                    "modes": mode_payload,
+                    "provenance": provenance,
+                }
+                result_path = benchmark_dir / f"benchmark-{eye_mode}.json"
+                result_path.write_text(json.dumps(payload))
+                artifacts.append(result_path)
+
+            jobs = []
+            for index, artifact in enumerate(artifacts):
+                log = log_dir / f"job-{index}.log"
+                log.write_text("completed\n")
+                jobs.append(
+                    {
+                        "artifact": str(artifact.relative_to(root)),
+                        "sha256": digest(artifact),
+                        "log": str(log.relative_to(root)),
+                        "log_sha256": digest(log),
+                        "job_id": str(1000 + index),
+                        "state": "COMPLETED",
+                        "exit_code": 0,
+                    }
+                )
+            (root / "job-status.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "stereo-tokenizer-stage-a1-job-status-v1",
+                        "jobs": jobs,
+                    }
+                )
+            )
+            output = root / "report.md"
+            with mock.patch(
+                "evaluation.tokenizer_stage_a.VGG16_CHECKPOINT_SHA256",
+                digest(metric_backbone),
+            ):
+                _report_command(
+                    ["--artifact-root", str(root), "--output", str(output)]
+                )
+            rendered = output.read_text()
+            self.assertIn("Stage A1 Baseline", rendered)
+            self.assertIn("depth_head_teacher", rendered)
+            self.assertIn("HY：BLOCKED", rendered)
+            self.assertIn("置信度：80%", rendered)
 
     def test_content_crop_rejects_non_rectangular_mask(self):
         target = torch.zeros(3, 1, 16, 16)
