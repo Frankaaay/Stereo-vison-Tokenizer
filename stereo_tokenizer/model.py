@@ -896,16 +896,18 @@ class StereoVAE(pl.LightningModule):
     ) -> torch.Tensor:
         if self.perceptual_model is None:
             return prediction.new_zeros(())
-        prediction_frames = self._flatten_view_frames(prediction)
-        target_frames = self._flatten_view_frames(target)
         with profile_region("stereo/loss/lpips_vgg"):
-            return (
-                self.perceptual_model(
-                    prediction_frames * 2.0,
-                    target_frames * 2.0,
-                ).mean()
-                * self.perceptual_weight
-            )
+            loss_sum = prediction.new_zeros(())
+            loss_count = 0
+            for view_index in range(prediction.shape[1]):
+                for frame_index in range(prediction.shape[3]):
+                    frame_loss = self.perceptual_model(
+                        prediction[:, view_index, :, frame_index] * 2.0,
+                        target[:, view_index, :, frame_index] * 2.0,
+                    )
+                    loss_sum = loss_sum + frame_loss.sum()
+                    loss_count += frame_loss.numel()
+            return loss_sum / loss_count * self.perceptual_weight
 
     @staticmethod
     def _feature_matching_loss(fake_features, real_features):

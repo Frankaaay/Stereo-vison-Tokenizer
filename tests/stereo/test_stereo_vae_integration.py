@@ -238,6 +238,40 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertTrue(model.training)
         self.assertFalse(model.perceptual_model.training)
 
+    def test_perceptual_loss_chunks_views_and_frames_without_changing_mean(
+        self,
+    ) -> None:
+        class RecordingPerceptual(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.batch_shapes = []
+
+            def forward(self, prediction, target):
+                self.batch_shapes.append(tuple(prediction.shape))
+                return (prediction - target).square().mean(
+                    dim=(1, 2, 3), keepdim=True
+                )
+
+        model = StereoVAE(self._args())
+        perceptual_model = RecordingPerceptual()
+        model.perceptual_model = perceptual_model
+        model.perceptual_weight = 0.5
+        prediction = torch.randn(2, 3, 3, 4, 8, 8, requires_grad=True)
+        target = torch.randn_like(prediction)
+
+        actual = model._perceptual_loss(prediction, target)
+        expected = ((prediction - target) * 2.0).square().mean() * 0.5
+
+        torch.testing.assert_close(actual, expected)
+        actual.backward()
+        self.assertIsNotNone(prediction.grad)
+        self.assertTrue(torch.isfinite(prediction.grad).all())
+        self.assertEqual(len(perceptual_model.batch_shapes), 12)
+        self.assertEqual(
+            set(perceptual_model.batch_shapes),
+            {(2, 3, 8, 8)},
+        )
+
     def test_gan_builds_only_weighted_discriminators(self) -> None:
         image_args = self._args()
         image_args.gan_enabled = True
