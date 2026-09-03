@@ -239,6 +239,88 @@ OLS 阈值不得默认写死为 `0.03`。优先复用目标 codebase 已实现�
 - simulator/runtime failure。
 
 
+## 6. 训练与推理速度
+
+### 6.1 统一测速合同
+
+每次测速必须冻结并记录：
+
+- 代码仓库、branch、commit SHA、配置和 checkpoint；
+- 数据集与 manifest、输入分辨率、视角数、帧数和有效样本数；
+- GPU 型号与数量、CPU、CUDA、PyTorch、精度、编译后端和分布式设置；
+- physical batch size、gradient accumulation、logical batch size 和 worker 数；
+- warm-up 次数、正式测量次数、同步方式和随机 seed；
+- 是否计入数据读取、CPU→GPU 传输、latent cache、后处理和可视化。
+
+CUDA 测时必须在区间边界同步。除吞吐外，延迟同时报告 P50/P95；冷启动和稳定态分开报告。A/B 必须在相同硬件、运行时、输入合同和计时范围下测试，并保留原始逐步计时与有效样本数。
+
+### 6.2 Tokenizer 训练速度
+
+在本仓库的冻结训练配置下报告：
+
+- physical micro-batch latency、logical optimizer-update latency；
+- samples/s、frames/s、input pixels/s；
+- generator updates/s；若包含 GAN，再单独报告 discriminator updates/s；
+- 单卡与总 GPU peak memory；
+- 固定训练样本量的 wall-clock 和 GPU-hours；
+- time-to-quality：达到冻结 RGB、感知、时序和 stereo/depth 质量阈值所需时间与 GPU-hours。
+
+当 gradient accumulation、手动优化或 generator/discriminator 更新频率不同时，不得只用框架 `global_step` 计算速度；应使用实际样本计数和各优化器的真实更新计数。数据加载、teacher/伪标签和模型前后向耗时可以作为分项诊断，但主表必须保留端到端训练吞吐。
+
+### 6.3 Tokenizer 推理速度
+
+分别测量并报告：
+
+- encoder latency、decoder latency、encode+decode latency；
+- batch=1 的 P50/P95 延迟，以及冻结 batch 下的吞吐；
+- observations/s、frames/s、latent tokens/s；
+- encoder、decoder和端到端 peak memory；
+- 冷启动时间与 warm-up 后稳定态结果。
+
+若部署路径只使用 encoder，则 encoder latency 是主指标，decoder latency 作为重建诊断单列；不得把部署时不会执行的 decoder 计入 observation-to-latent 延迟。随机 VAE 默认使用冻结的推理方式，例如 posterior mean，并在 manifest 中明确记录。
+
+### 6.4 下游 WAM 训练速度
+
+该部分在下游 WAM 仓库、其真实训练入口和冻结配置中测量，报告：
+
+- step/s、samples/s、visual latent tokens/s、action chunks/s；
+- forward、backward、optimizer update 和端到端 step latency；
+- 单卡与总 GPU peak memory；
+- 固定样本数或固定 token budget 的 wall-clock 与 GPU-hours；
+- time-to-quality：达到冻结 future prediction loss、action L1/MSE 或 OLS 阈值所需时间与 GPU-hours；
+- 一次性 latent 生成与缓存的 wall-clock、GPU-hours、产物大小和 tokens/s。
+
+A/B 必须使用由目标 codebase 冻结的同一 WAM 架构、训练数据、训练 token/sample budget、优化器、精度和硬件。除等计算量对比外，再报告达到相同下游质量阈值时的训练成本；若 A/B latent token 数不同，不能只比较 step/s。
+
+### 6.5 下游 WAM 推理速度
+
+在下游真实推理和 rollout 路径中分段测量：
+
+- 数据读取与预处理；
+- 在线 Tokenizer encode，若部署时执行；
+- WAM future/action forward；
+- action decode/post-process；
+- Tokenizer decode，只有部署或评测路径实际需要时才计入；
+- 端到端 observation-to-action latency P50/P95；
+- action chunk latency、control Hz、horizon 1/2/3 的延迟增长；
+- peak memory 和稳定态吞吐。
+
+同步与异步 pipeline 分开报告，并明确 observation-to-action 的起止边界。控制频率必须由端到端延迟和实际调度得到，不能仅由单个网络 forward latency 反推。
+
+### 6.6 跨仓库实现边界与统一结果文件
+
+当前 Tokenizer 仓库中的单个测评执行文件，可以直接完成 Tokenizer 训练/推理测速，以及定义统一结果 schema 和汇总逻辑；它不能在缺少下游 WAM 代码、配置、checkpoint、运行时和真实 rollout 入口的情况下产出可信的 WAM 训练/推理速度。
+
+推荐采用“一个逻辑评测标准、两个仓库各自执行、一个统一结果汇总”的结构：
+
+1. Tokenizer 仓库的 runner 生成 `tokenizer_metrics.json`；
+2. 下游 WAM 仓库的 runner 生成 `wam_metrics.json`；
+3. 两者引用同一份 `evaluation_manifest.json`；
+4. 独立 aggregator 校验合同并生成统一 `scorecard.json`/Markdown 报告。
+
+共享 schema 至少包含 `evaluation_id`、Tokenizer 名称与 checkpoint、各仓库 commit SHA、latent ABI、数据 manifest hash、硬件与运行时、计时范围、样本/token 数、指标单位和原始结果路径。aggregator 只负责合同校验和汇总，不代替任一仓库运行模型。
+
+
 ## 7. 参考方法
 
 - LingBot-VA 2.0：<https://arxiv.org/html/2607.08639>
