@@ -157,9 +157,25 @@ class HyThreeCameraManifestTest(unittest.TestCase):
                 rounded, np.asarray([4008]), 30.0
             )
         )
+        one_based = np.asarray(
+            [4.0333333015441895, 4.133333206176758, 4.233333110809326],
+            dtype=np.float64,
+        )
+        self.assertTrue(
+            HyLanceMonoDataset._timestamps_match_frame_rate(
+                one_based, np.asarray([120, 123, 126]), 30.0
+            )
+        )
         self.assertFalse(
             HyLanceMonoDataset._timestamps_match_frame_rate(
                 np.asarray([133.61]), np.asarray([4008]), 30.0
+            )
+        )
+        self.assertFalse(
+            HyLanceMonoDataset._timestamps_match_frame_rate(
+                np.asarray([4.0166667, 4.1166667, 4.2166667]),
+                np.asarray([120, 123, 126]),
+                30.0,
             )
         )
 

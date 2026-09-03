@@ -310,12 +310,26 @@ class HyLanceMonoDataset(_ManifestWindowDataset):
 
     @staticmethod
     def _timestamps_match_frame_rate(timestamps, frame_indices, fps):
-        expected = np.asarray(frame_indices, np.float64) / float(fps)
-        return np.allclose(
-            np.asarray(timestamps, np.float64),
-            expected,
-            rtol=np.finfo(np.float32).eps,
-            atol=5e-6,
+        timestamps = np.asarray(timestamps, np.float64)
+        frame_indices = np.asarray(frame_indices, np.float64)
+        fps = float(fps)
+        if (
+            timestamps.shape != frame_indices.shape
+            or not np.isfinite(timestamps).all()
+            or not np.isfinite(frame_indices).all()
+            or not np.isfinite(fps)
+            or fps <= 0
+        ):
+            return False
+        expected = frame_indices / fps
+        return any(
+            np.allclose(
+                timestamps,
+                expected + frame_origin / fps,
+                rtol=np.finfo(np.float32).eps,
+                atol=5e-6,
+            )
+            for frame_origin in (0, 1)
         )
 
     def get_mode_item(self, index, temporal_mode):
