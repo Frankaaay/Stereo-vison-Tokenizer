@@ -1,0 +1,4644 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stereo Tokenizer Stage A1 v5 Baseline</title>
+<style>
+:root{color-scheme:light dark;--bg:light-dark(#f4f6f8,#0c1117);--surface:light-dark(#fff,#141b24);--surface2:light-dark(#f7f9fb,#101720);--text:light-dark(#18212b,#e8edf3);--muted:light-dark(#5e6b78,#9eabb9);--border:light-dark(#d9e0e7,#2b3744);--accent:light-dark(#1367d1,#69a8ff);--good:light-dark(#197341,#62d494);--warn:light-dark(#9a5b00,#ffbf5c);--danger:light-dark(#ad2e24,#ff7b72);--code:light-dark(#eef2f6,#0a1017)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.58 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{width:min(1240px,calc(100% - 32px));margin:28px auto 64px}.hero{padding:28px 30px;border:1px solid var(--border);background:var(--surface);border-radius:14px}
+.hero-top{display:flex;gap:16px;align-items:flex-start;justify-content:space-between}h1{margin:0 0 8px;font-size:clamp(23px,3vw,34px);line-height:1.2;letter-spacing:-.02em}.subtitle{margin:0;max-width:900px;color:var(--muted)}
+.badges{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.badge{border:1px solid var(--border);border-radius:999px;padding:4px 9px;white-space:nowrap;background:var(--surface2);font-size:12px}.badge.good{color:var(--good)}.badge.warn{color:var(--warn)}
+.hero-note{margin-top:18px;padding:12px 14px;border-left:4px solid var(--warn);background:color-mix(in srgb,var(--warn) 8%,var(--surface));border-radius:6px}
+.panel{margin-top:18px;padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:12px}.panel h2{margin:0 0 12px;font-size:18px}
+.table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:760px;font-variant-numeric:tabular-nums}
+th,td{padding:9px 11px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}th{position:sticky;top:0;background:var(--surface2);color:var(--muted);font-size:12px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+td.diagnostic{color:var(--muted)}td.warning{color:var(--warn);font-weight:650}.status-table{min-width:600px}.status-table td:first-child{width:22%;color:var(--muted)}.status-table td:nth-child(2){width:24%;font-weight:650}.decision-table{min-width:650px}.decision-table td:first-child{width:18%;color:var(--muted);font-weight:650}.decision-table tr.risk td:nth-child(2){color:var(--danger)}
+.toolbar{margin:22px 0 10px;display:flex;align-items:center;justify-content:space-between;gap:12px}.toolbar h2{margin:0;font-size:19px}.actions{display:flex;gap:8px}
+button{appearance:none;border:1px solid var(--border);background:var(--surface);color:var(--text);padding:7px 11px;border-radius:7px;cursor:pointer}button:hover{border-color:var(--accent);color:var(--accent)}
+.report-section{margin-top:9px;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:clip}.report-section summary{cursor:pointer;list-style:none;padding:13px 16px;font-weight:700;display:flex;justify-content:space-between;gap:12px;align-items:center}.report-section summary::-webkit-details-marker{display:none}.report-section summary::before{content:"›";color:var(--accent);font-size:21px;transition:transform .16s ease}.report-section[open] summary::before{transform:rotate(90deg)}.report-section summary>span:first-of-type{flex:1}.toggle-hint{color:var(--muted);font-size:12px;font-weight:500}.report-section[open] .toggle-hint{font-size:0}.report-section[open] .toggle-hint::after{content:"收起";font-size:12px}
+.section-body{border-top:1px solid var(--border);padding:16px;overflow-x:auto}.section-body>:first-child{margin-top:0}.section-body>:last-child{margin-bottom:0}.section-body h3{margin-top:22px}.section-body table{font-size:12px}.section-body code{padding:2px 5px;background:var(--code);border:1px solid var(--border);border-radius:4px;overflow-wrap:anywhere}.section-body blockquote{margin-left:0;padding-left:12px;border-left:3px solid var(--accent);color:var(--muted)}.exclusion-heavy .section-body{max-height:72vh;overflow:auto}
+footer{margin-top:24px;color:var(--muted);font-size:12px}footer code{overflow-wrap:anywhere}
+@media(max-width:700px){main{width:min(100% - 18px,1240px);margin-top:10px}.hero{padding:20px}.hero-top{display:block}.badges{justify-content:flex-start;margin-top:14px}.panel{padding:14px}th,td{padding:8px}.toolbar{align-items:flex-end}}
+@media print{body{background:#fff;color:#111}main{width:100%;margin:0}.actions{display:none}.report-section{break-inside:avoid}}
+</style>
+</head>
+<body>
+<main id="stage-a1-report">
+<header class="hero"><div class="hero-top"><div><h1>Stereo Tokenizer Stage A1 Baseline</h1><p class="subtitle">v5 RGB-domain corrected · checkpoint stagec-update162500 · posterior mean · quality FP32 · benchmark BF16</p></div><div class="badges"><span class="badge warn">PRELIMINARY</span><span class="badge good">17/17 tests</span><span class="badge good">11/11 jobs</span><span class="badge">schema v2</span></div></div><div class="hero-note">v4 的 RGB 质量结论已失效并由 v5 替代。v5 将 clamp 后图像质量与 raw 数值稳定性分开；raw 输出仍存在显著尖峰，不能因 clamp 后指标较好而忽略。</div></header>
+<section class="panel"><h2>执行与可信度</h2><div class="table-wrap"><table class="status-table"><thead><tr><th>项目</th><th>状态</th><th>说明</th></tr></thead><tbody>
+<tr><td>正式质量评测</td><td>9/9 COMPLETED</td><td>UMI 1,024 windows/cell；LIBERO 256 windows/cell；FP32</td></tr><tr><td>效率评测</td><td>2/2 COMPLETED</td><td>mono + stereo；H100；BS1；BF16；20 warm-up / 100 iterations / 3 repeats</td></tr><tr><td>Tokenizer 状态</td><td>冻结</td><td>eval + inference_mode + posterior mean；参数未更新</td></tr><tr><td>几何证据</td><td>Teacher-relative</td><td>不是独立真实 depth/disparity GT accuracy</td></tr><tr><td>HY</td><td>BLOCKED</td><td>Lance index 与 pinned loader offset 合同冲突；不进入 macro</td></tr><tr><td>A2</td><td>Pending</td><td>rFID、RAFT warp / flicker / motion consistency</td></tr>
+</tbody></table></div></section>
+<section class="panel"><h2>核心 RGB 结果</h2><div class="table-wrap"><table><thead><tr><th>Dataset</th><th>Eye</th><th>Mode</th><th>Clamp L1 ↓</th><th>Clamp MSE ↓</th><th>PSNR ↑</th><th>SSIM ↑</th><th>LPIPS ↓</th><th>Raw MSE（诊断）</th><th>OOR pixels</th></tr></thead><tbody><tr><td>LIBERO</td><td>mono</td><td>single-frame（4 source 平均）</td><td>0.03305</td><td>0.00342</td><td>25.24</td><td>0.9057</td><td>0.1409</td><td class='diagnostic'>0.0747</td><td class='warning'>0.84%</td></tr>
+<tr><td>LIBERO</td><td>mono</td><td>four-frame</td><td>0.03426</td><td>0.00378</td><td>24.67</td><td>0.8870</td><td>0.1647</td><td class='diagnostic'>0.2242</td><td class='warning'>1.04%</td></tr>
+<tr><td>UMI</td><td>mono</td><td>single-frame（4 source 平均）</td><td>0.04920</td><td>0.00548</td><td>22.81</td><td>0.8351</td><td>0.1642</td><td class='diagnostic'>0.1030</td><td class='warning'>2.99%</td></tr>
+<tr><td>UMI</td><td>mono</td><td>four-frame</td><td>0.05225</td><td>0.00641</td><td>22.12</td><td>0.7785</td><td>0.1997</td><td class='diagnostic'>0.3045</td><td class='warning'>2.74%</td></tr>
+<tr><td>UMI</td><td>stereo</td><td>single-frame（4 source 平均）</td><td>0.04440</td><td>0.00480</td><td>23.38</td><td>0.8420</td><td>0.1575</td><td class='diagnostic'>0.1044</td><td class='warning'>2.45%</td></tr>
+<tr><td>UMI</td><td>stereo</td><td>four-frame</td><td>0.04805</td><td>0.00582</td><td>22.54</td><td>0.7834</td><td>0.1939</td><td class='diagnostic'>0.3055</td><td class='warning'>2.42%</td></tr></tbody></table></div><p class="subtitle">正式图像质量统一基于 prediction.clamp(-0.5, 0.5)。single-frame 行为四个 source position 与对应 camera cell 的等权平均。</p></section>
+<section class="panel"><h2>结论摘要</h2><div class="table-wrap"><table class="decision-table"><tbody>
+<tr><td>是否继续</td><td>值得继续，但必须保留 clamp-domain 质量与 raw 稳定性两套口径；当前仍是 preliminary baseline。</td></tr><tr class="risk"><td>RGB 最大风险</td><td>decoder raw 输出范围达到 [-87.20, 65.60]，少量尖峰会严重污染 raw MSE/PSNR，并可能影响未 clamp 的下游。</td></tr><tr><td>整体最大缺口</td><td>独立真实几何 GT、A2 时间/分布指标，以及 HY identity/offset 合同修复。</td></tr><tr><td>最小下一步</td><td>按 overshoot P99/max 定位固定案例与像素，确认 NGAD 消费路径是否统一 clamp，并追查尖峰来源。</td></tr><tr><td>置信度</td><td>80%（A1 数字和可复现合同可信；完整 Stage A 结论受 HY、A2 和几何 GT 缺失限制）。</td></tr>
+</tbody></table></div></section>
+<div class="toolbar"><h2>完整报告明细</h2><div class="actions"><button type="button" data-action="expand">展开全部</button><button type="button" data-action="collapse">收起全部</button></div></div>
+<section id="full-report"><details class='report-section'><summary><span>实验合同与 provenance</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><ul>
+<li>Artifact 根目录：<code>/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a/20260903-stagec-update162500-baseline-a1-v5-rgb-domain</code></li>
+<li>实际 cwd：<code>/gpfs/jiuquyun/projects/hezhou/Workspace/Stereo-vison-Tokenizer</code></li>
+<li>Git branch / commit：<code>hezhou-las2-h</code> / <code>5c7e638d5d4f446dc8140cd632b7b7780351e114</code></li>
+<li>未提交代码 diff：<code>/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a/20260903-stagec-update162500-baseline-a1-v5-rgb-domain/source.patch</code>；SHA256：<code>2b639c4d2b3d8041cd497810408e8294d40a2a85346907d7d91a92d0572ae87a</code></li>
+<li><code>git status --porcelain</code>：<code>M evaluation/stage_a_metrics.py;  M evaluation/tokenizer_stage_a.py;  M tests/stereo/test_stage_a_evaluation.py</code></li>
+<li>Checkpoint：<code>/gpfs/jiuquyun/projects/Frank/stereo-tokenizer-checkpoints/v1/stagec-update162500/last.ckpt</code></li>
+<li>Checkpoint SHA256：<code>a74c3b72b32dfd296157e3b6ad24d0521731517e79e75f22786bca37c47d822e</code>；global_step=125000；epoch=0</li>
+<li>直接训练计数：<code>{&quot;batch_updates&quot;: 162500, &quot;discriminator_updates&quot;: 118500, &quot;four_frame_updates&quot;: 81250, &quot;generator_updates&quot;: 162500, &quot;grad_accumulates&quot;: 1, &quot;logical_update_contract_version&quot;: 1, &quot;mode_batch_sizes&quot;: {&quot;mono/four_frame&quot;: 24, &quot;mono/single_frame&quot;: 24, &quot;stereo/four_frame&quot;: 24, &quot;stereo/single_frame&quot;: 24}, &quot;mode_contract&quot;: [&quot;mono/single_frame&quot;, &quot;mono/four_frame&quot;, &quot;stereo/single_frame&quot;, &quot;stereo/four_frame&quot;], &quot;mode_effective_global_batch_sizes&quot;: {&quot;mono/four_frame&quot;: 192, &quot;mono/single_frame&quot;: 192, &quot;stereo/four_frame&quot;: 192, &quot;stereo/single_frame&quot;: 192}, &quot;mode_grad_accumulates&quot;: {&quot;mono/four_frame&quot;: 1, &quot;mono/single_frame&quot;: 1, &quot;stereo/four_frame&quot;: 1, &quot;stereo/single_frame&quot;: 1}, &quot;mode_samples&quot;: {&quot;mono/four_frame&quot;: 10920000, &quot;mono/single_frame&quot;: 10920000, &quot;stereo/four_frame&quot;: 4680000, &quot;stereo/single_frame&quot;: 4680000}, &quot;mode_schedule_seed&quot;: 1234, &quot;mode_update_weights&quot;: {&quot;mono/four_frame&quot;: 7, &quot;mono/single_frame&quot;: 7, &quot;stereo/four_frame&quot;: 3, &quot;stereo/single_frame&quot;: 3}, &quot;mode_updates&quot;: {&quot;mono/four_frame&quot;: 56875, &quot;mono/single_frame&quot;: 56875, &quot;stereo/four_frame&quot;: 24375, &quot;stereo/single_frame&quot;: 24375}, &quot;mono_dataset_weights&quot;: &quot;9:1&quot;, &quot;node_manifest_contracts&quot;: &quot;{\&quot;0\&quot;:{\&quot;hy\&quot;:\&quot;b25efc945ccd7e7afd2f1a76393ea19adde8fa072e1e9a2ca6348e0e5c1a45f9\&quot;,\&quot;libero\&quot;:\&quot;0299354a7225e979f6b9ff5fb3e26a975c811d2d41af44e042a6eade3f24bbf4\&quot;,\&quot;umi\&quot;:\&quot;5e8f58c769549372af070a6132ad826bd7172aaeabcebebff84426e66bc2120f\&quot;}}&quot;, &quot;per_device_batch_size&quot;: 24, &quot;single_frame_updates&quot;: 81250, &quot;world_size_contract&quot;: 8}</code></li>
+<li>质量：FP32；效率：BF16；posterior mean；Tokenizer <code>eval + inference_mode</code> 且运行时冻结。</li>
+<li>Python：<code>3.12.11</code>；GPU：<code>NVIDIA H100 80GB HBM3</code>；CUDA：<code>12.6</code>；cuDNN：<code>90501</code></li>
+<li><code>uv.lock</code> SHA256：<code>7542a5fcdfb3656c938302c6096d741dcd91dedab8d63c99d867d98e0b9a27ad</code></li>
+<li>LPIPS VGG16：<code>/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a/runtime/metric-backbones/torch/hub/checkpoints/vgg16-397923af.pth</code>；SHA256：<code>397923af8e79cdbb6a7127f12361acd7a2f83e06b05044ddf496e83de57a5bf0</code>；预处理：<code>torchmetrics LPIPS vgg normalize=False on RGB [-1,1]</code></li>
+<li>关键包：av=16.0.1, numpy=1.26.2, pylance=10.0.0, pytorch-lightning=2.5.6, torch=2.7.1+cu126, torchmetrics=1.9.0, torchvision=0.22.1+cu126</li>
+<li>Tokenizer 参数：total=85,819,251；架构可训练=71,103,091；运行时 requires_grad=0</li>
+<li>DA3：source <code>3d835ec1a5802d64a8b8b15f817a1ab54809bfe4</code>；weights <code>e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5</code></li>
+<li>LAS2-H：source <code>8c97bd4c4da3712c2ac60003a23201dfdb5935f4</code>；weights <code>758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4</code></li>
+</ul>
+<h3>数据与哈希</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th style="text-align:right">Windows/cell</th>
+<th style="text-align:right">Decode checked/rejected</th>
+<th>Selection semantic SHA256</th>
+<th>Selection file SHA256</th>
+<th>Manifest SHA256</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256/0</td>
+<td><code>e5cf61eb8b8b27d8c5c00cac83e6b0541cb14e7ca59f088b1a06ece49d452601</code></td>
+<td><code>98ead425208feec40de5b158a4cc86131846a3588dd0fbae595ede478ed4cc17</code></td>
+<td><code>59cea99c07cad93a7e6e922241002a6d3ae8190837941e204a356218c27cf7ae</code></td>
+</tr>
+<tr>
+<td>umi</td>
+<td style="text-align:right">1024</td>
+<td style="text-align:right">3249/2225</td>
+<td><code>4a412e87244d59883ee62ad012282e09c29838b9dfe07d2109ba8efb5960929b</code></td>
+<td><code>615f35e42d8b9904b8a7d1b308a54d8a861f8a1896f841f922b76cf827e26677</code></td>
+<td><code>e4fdcd1264ce1b8c08612305701dd907569822860aaba8825264600f5cc02fe3</code></td>
+</tr>
+<tr>
+<td>HY</td>
+<td style="text-align:right">0（BLOCKED）</td>
+<td style="text-align:right">N/A</td>
+<td>N/A</td>
+<td>N/A</td>
+<td>已冻结但不参与本次 macro</td>
+</tr>
+</tbody>
+</table>
+<h3>覆盖矩阵</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view cell</th>
+<th style="text-align:right">Windows</th>
+<th>Modes</th>
+<th>Macro inclusion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td style="text-align:right">256</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td style="text-align:right">256</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>3 canonical stereo pairs</td>
+<td style="text-align:right">1024</td>
+<td>single source 0/1/2/3 + four-frame</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>HY</td>
+<td>mono</td>
+<td>N/A</td>
+<td style="text-align:right">0</td>
+<td>BLOCKED</td>
+<td>no</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>Clamp-domain RGB 图像质量（per camera/view）</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><p>下表所有 L1/MSE/PSNR/SSIM/LPIPS 都使用 <code>prediction.clamp(-0.5, 0.5)</code>；PSNR data_range=1.0。</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view</th>
+<th>Mode</th>
+<th style="text-align:right">L1 mean</th>
+<th style="text-align:right">P50</th>
+<th style="text-align:right">P90</th>
+<th style="text-align:right">P99</th>
+<th style="text-align:right">MSE</th>
+<th style="text-align:right">PSNR</th>
+<th style="text-align:right">SSIM</th>
+<th style="text-align:right">LPIPS</th>
+<th style="text-align:right">RGB mask</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.035802</td>
+<td style="text-align:right">0.035021</td>
+<td style="text-align:right">0.043374</td>
+<td style="text-align:right">0.075402</td>
+<td style="text-align:right">0.003761</td>
+<td style="text-align:right">24.471</td>
+<td style="text-align:right">0.881153</td>
+<td style="text-align:right">0.167027</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.035736</td>
+<td style="text-align:right">0.035735</td>
+<td style="text-align:right">0.041813</td>
+<td style="text-align:right">0.081111</td>
+<td style="text-align:right">0.003509</td>
+<td style="text-align:right">24.863</td>
+<td style="text-align:right">0.899926</td>
+<td style="text-align:right">0.146475</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.035683</td>
+<td style="text-align:right">0.035536</td>
+<td style="text-align:right">0.041833</td>
+<td style="text-align:right">0.082563</td>
+<td style="text-align:right">0.003523</td>
+<td style="text-align:right">24.854</td>
+<td style="text-align:right">0.900249</td>
+<td style="text-align:right">0.146292</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.035870</td>
+<td style="text-align:right">0.035839</td>
+<td style="text-align:right">0.042465</td>
+<td style="text-align:right">0.093871</td>
+<td style="text-align:right">0.003541</td>
+<td style="text-align:right">24.849</td>
+<td style="text-align:right">0.899750</td>
+<td style="text-align:right">0.146235</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.035824</td>
+<td style="text-align:right">0.035349</td>
+<td style="text-align:right">0.041504</td>
+<td style="text-align:right">0.099450</td>
+<td style="text-align:right">0.003550</td>
+<td style="text-align:right">24.860</td>
+<td style="text-align:right">0.900347</td>
+<td style="text-align:right">0.146155</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.032725</td>
+<td style="text-align:right">0.029306</td>
+<td style="text-align:right">0.049080</td>
+<td style="text-align:right">0.087445</td>
+<td style="text-align:right">0.003792</td>
+<td style="text-align:right">24.861</td>
+<td style="text-align:right">0.892767</td>
+<td style="text-align:right">0.162332</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.029839</td>
+<td style="text-align:right">0.026653</td>
+<td style="text-align:right">0.043415</td>
+<td style="text-align:right">0.085435</td>
+<td style="text-align:right">0.003196</td>
+<td style="text-align:right">25.703</td>
+<td style="text-align:right">0.911749</td>
+<td style="text-align:right">0.134140</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.029485</td>
+<td style="text-align:right">0.026389</td>
+<td style="text-align:right">0.042114</td>
+<td style="text-align:right">0.079498</td>
+<td style="text-align:right">0.003134</td>
+<td style="text-align:right">25.738</td>
+<td style="text-align:right">0.912539</td>
+<td style="text-align:right">0.135818</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.030778</td>
+<td style="text-align:right">0.026565</td>
+<td style="text-align:right">0.049348</td>
+<td style="text-align:right">0.086875</td>
+<td style="text-align:right">0.003440</td>
+<td style="text-align:right">25.589</td>
+<td style="text-align:right">0.910993</td>
+<td style="text-align:right">0.135193</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.031195</td>
+<td style="text-align:right">0.026911</td>
+<td style="text-align:right">0.049597</td>
+<td style="text-align:right">0.091688</td>
+<td style="text-align:right">0.003476</td>
+<td style="text-align:right">25.504</td>
+<td style="text-align:right">0.910438</td>
+<td style="text-align:right">0.136989</td>
+<td style="text-align:right">1.000000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.052974</td>
+<td style="text-align:right">0.051962</td>
+<td style="text-align:right">0.063662</td>
+<td style="text-align:right">0.081544</td>
+<td style="text-align:right">0.006572</td>
+<td style="text-align:right">21.943</td>
+<td style="text-align:right">0.765784</td>
+<td style="text-align:right">0.199331</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.050263</td>
+<td style="text-align:right">0.049279</td>
+<td style="text-align:right">0.060469</td>
+<td style="text-align:right">0.078698</td>
+<td style="text-align:right">0.005661</td>
+<td style="text-align:right">22.585</td>
+<td style="text-align:right">0.822574</td>
+<td style="text-align:right">0.166837</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.050320</td>
+<td style="text-align:right">0.049521</td>
+<td style="text-align:right">0.061320</td>
+<td style="text-align:right">0.077752</td>
+<td style="text-align:right">0.005666</td>
+<td style="text-align:right">22.582</td>
+<td style="text-align:right">0.823063</td>
+<td style="text-align:right">0.166713</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.050339</td>
+<td style="text-align:right">0.049404</td>
+<td style="text-align:right">0.060806</td>
+<td style="text-align:right">0.074842</td>
+<td style="text-align:right">0.005666</td>
+<td style="text-align:right">22.580</td>
+<td style="text-align:right">0.822372</td>
+<td style="text-align:right">0.166807</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.050306</td>
+<td style="text-align:right">0.049028</td>
+<td style="text-align:right">0.060627</td>
+<td style="text-align:right">0.076256</td>
+<td style="text-align:right">0.005653</td>
+<td style="text-align:right">22.596</td>
+<td style="text-align:right">0.823050</td>
+<td style="text-align:right">0.166502</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.053488</td>
+<td style="text-align:right">0.052631</td>
+<td style="text-align:right">0.064651</td>
+<td style="text-align:right">0.080363</td>
+<td style="text-align:right">0.006684</td>
+<td style="text-align:right">21.871</td>
+<td style="text-align:right">0.762892</td>
+<td style="text-align:right">0.200924</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.050881</td>
+<td style="text-align:right">0.050133</td>
+<td style="text-align:right">0.061353</td>
+<td style="text-align:right">0.075932</td>
+<td style="text-align:right">0.005771</td>
+<td style="text-align:right">22.516</td>
+<td style="text-align:right">0.819827</td>
+<td style="text-align:right">0.168365</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.050711</td>
+<td style="text-align:right">0.049969</td>
+<td style="text-align:right">0.061306</td>
+<td style="text-align:right">0.075936</td>
+<td style="text-align:right">0.005740</td>
+<td style="text-align:right">22.534</td>
+<td style="text-align:right">0.820498</td>
+<td style="text-align:right">0.167892</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.050744</td>
+<td style="text-align:right">0.049863</td>
+<td style="text-align:right">0.060990</td>
+<td style="text-align:right">0.076526</td>
+<td style="text-align:right">0.005755</td>
+<td style="text-align:right">22.520</td>
+<td style="text-align:right">0.820165</td>
+<td style="text-align:right">0.168322</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.050657</td>
+<td style="text-align:right">0.049760</td>
+<td style="text-align:right">0.060631</td>
+<td style="text-align:right">0.075920</td>
+<td style="text-align:right">0.005740</td>
+<td style="text-align:right">22.526</td>
+<td style="text-align:right">0.820849</td>
+<td style="text-align:right">0.168027</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.051496</td>
+<td style="text-align:right">0.048927</td>
+<td style="text-align:right">0.066305</td>
+<td style="text-align:right">0.097291</td>
+<td style="text-align:right">0.006304</td>
+<td style="text-align:right">22.235</td>
+<td style="text-align:right">0.786101</td>
+<td style="text-align:right">0.195337</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.048496</td>
+<td style="text-align:right">0.045898</td>
+<td style="text-align:right">0.061649</td>
+<td style="text-align:right">0.093460</td>
+<td style="text-align:right">0.005402</td>
+<td style="text-align:right">22.923</td>
+<td style="text-align:right">0.840367</td>
+<td style="text-align:right">0.161141</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.048319</td>
+<td style="text-align:right">0.045766</td>
+<td style="text-align:right">0.061985</td>
+<td style="text-align:right">0.101458</td>
+<td style="text-align:right">0.005368</td>
+<td style="text-align:right">22.953</td>
+<td style="text-align:right">0.840520</td>
+<td style="text-align:right">0.161164</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.048494</td>
+<td style="text-align:right">0.046005</td>
+<td style="text-align:right">0.062725</td>
+<td style="text-align:right">0.091954</td>
+<td style="text-align:right">0.005386</td>
+<td style="text-align:right">22.936</td>
+<td style="text-align:right">0.840256</td>
+<td style="text-align:right">0.161076</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.048450</td>
+<td style="text-align:right">0.046295</td>
+<td style="text-align:right">0.063431</td>
+<td style="text-align:right">0.090533</td>
+<td style="text-align:right">0.005374</td>
+<td style="text-align:right">22.939</td>
+<td style="text-align:right">0.840523</td>
+<td style="text-align:right">0.161314</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.053011</td>
+<td style="text-align:right">0.051012</td>
+<td style="text-align:right">0.067526</td>
+<td style="text-align:right">0.100948</td>
+<td style="text-align:right">0.006524</td>
+<td style="text-align:right">22.058</td>
+<td style="text-align:right">0.781776</td>
+<td style="text-align:right">0.200035</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.049677</td>
+<td style="text-align:right">0.047035</td>
+<td style="text-align:right">0.063908</td>
+<td style="text-align:right">0.100464</td>
+<td style="text-align:right">0.005589</td>
+<td style="text-align:right">22.764</td>
+<td style="text-align:right">0.837502</td>
+<td style="text-align:right">0.164451</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.049557</td>
+<td style="text-align:right">0.047086</td>
+<td style="text-align:right">0.062595</td>
+<td style="text-align:right">0.098166</td>
+<td style="text-align:right">0.005557</td>
+<td style="text-align:right">22.783</td>
+<td style="text-align:right">0.837793</td>
+<td style="text-align:right">0.164445</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.049583</td>
+<td style="text-align:right">0.047356</td>
+<td style="text-align:right">0.063381</td>
+<td style="text-align:right">0.098108</td>
+<td style="text-align:right">0.005555</td>
+<td style="text-align:right">22.783</td>
+<td style="text-align:right">0.837578</td>
+<td style="text-align:right">0.164450</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.049518</td>
+<td style="text-align:right">0.047187</td>
+<td style="text-align:right">0.063283</td>
+<td style="text-align:right">0.095072</td>
+<td style="text-align:right">0.005534</td>
+<td style="text-align:right">22.782</td>
+<td style="text-align:right">0.838073</td>
+<td style="text-align:right">0.164373</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.051370</td>
+<td style="text-align:right">0.049832</td>
+<td style="text-align:right">0.064875</td>
+<td style="text-align:right">0.085361</td>
+<td style="text-align:right">0.006216</td>
+<td style="text-align:right">22.282</td>
+<td style="text-align:right">0.786018</td>
+<td style="text-align:right">0.200262</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.048454</td>
+<td style="text-align:right">0.046302</td>
+<td style="text-align:right">0.062825</td>
+<td style="text-align:right">0.085204</td>
+<td style="text-align:right">0.005319</td>
+<td style="text-align:right">22.977</td>
+<td style="text-align:right">0.843763</td>
+<td style="text-align:right">0.161177</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.047743</td>
+<td style="text-align:right">0.045978</td>
+<td style="text-align:right">0.061448</td>
+<td style="text-align:right">0.087110</td>
+<td style="text-align:right">0.005219</td>
+<td style="text-align:right">23.049</td>
+<td style="text-align:right">0.844622</td>
+<td style="text-align:right">0.161599</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.048091</td>
+<td style="text-align:right">0.046239</td>
+<td style="text-align:right">0.062530</td>
+<td style="text-align:right">0.083056</td>
+<td style="text-align:right">0.005262</td>
+<td style="text-align:right">23.009</td>
+<td style="text-align:right">0.844214</td>
+<td style="text-align:right">0.161476</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.047929</td>
+<td style="text-align:right">0.046581</td>
+<td style="text-align:right">0.062180</td>
+<td style="text-align:right">0.082315</td>
+<td style="text-align:right">0.005241</td>
+<td style="text-align:right">23.021</td>
+<td style="text-align:right">0.844522</td>
+<td style="text-align:right">0.161188</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.051160</td>
+<td style="text-align:right">0.050297</td>
+<td style="text-align:right">0.065826</td>
+<td style="text-align:right">0.085028</td>
+<td style="text-align:right">0.006183</td>
+<td style="text-align:right">22.312</td>
+<td style="text-align:right">0.788268</td>
+<td style="text-align:right">0.202544</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.047984</td>
+<td style="text-align:right">0.046549</td>
+<td style="text-align:right">0.062352</td>
+<td style="text-align:right">0.083359</td>
+<td style="text-align:right">0.005273</td>
+<td style="text-align:right">23.011</td>
+<td style="text-align:right">0.845273</td>
+<td style="text-align:right">0.162760</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.048199</td>
+<td style="text-align:right">0.046667</td>
+<td style="text-align:right">0.062149</td>
+<td style="text-align:right">0.083301</td>
+<td style="text-align:right">0.005299</td>
+<td style="text-align:right">22.995</td>
+<td style="text-align:right">0.845124</td>
+<td style="text-align:right">0.163247</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.048153</td>
+<td style="text-align:right">0.046557</td>
+<td style="text-align:right">0.062433</td>
+<td style="text-align:right">0.083335</td>
+<td style="text-align:right">0.005305</td>
+<td style="text-align:right">22.996</td>
+<td style="text-align:right">0.844726</td>
+<td style="text-align:right">0.163195</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.047819</td>
+<td style="text-align:right">0.046457</td>
+<td style="text-align:right">0.061183</td>
+<td style="text-align:right">0.080267</td>
+<td style="text-align:right">0.005233</td>
+<td style="text-align:right">23.032</td>
+<td style="text-align:right">0.845243</td>
+<td style="text-align:right">0.163517</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/four_frame</td>
+<td style="text-align:right">0.048699</td>
+<td style="text-align:right">0.048123</td>
+<td style="text-align:right">0.059079</td>
+<td style="text-align:right">0.074565</td>
+<td style="text-align:right">0.005995</td>
+<td style="text-align:right">22.351</td>
+<td style="text-align:right">0.770630</td>
+<td style="text-align:right">0.194011</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/four_frame</td>
+<td style="text-align:right">0.047750</td>
+<td style="text-align:right">0.045918</td>
+<td style="text-align:right">0.060727</td>
+<td style="text-align:right">0.086841</td>
+<td style="text-align:right">0.005779</td>
+<td style="text-align:right">22.603</td>
+<td style="text-align:right">0.789792</td>
+<td style="text-align:right">0.190989</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/four_frame</td>
+<td style="text-align:right">0.047700</td>
+<td style="text-align:right">0.046633</td>
+<td style="text-align:right">0.061446</td>
+<td style="text-align:right">0.083185</td>
+<td style="text-align:right">0.005692</td>
+<td style="text-align:right">22.669</td>
+<td style="text-align:right">0.789818</td>
+<td style="text-align:right">0.196678</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_0</td>
+<td style="text-align:right">0.045011</td>
+<td style="text-align:right">0.044288</td>
+<td style="text-align:right">0.055123</td>
+<td style="text-align:right">0.069316</td>
+<td style="text-align:right">0.004942</td>
+<td style="text-align:right">23.182</td>
+<td style="text-align:right">0.829775</td>
+<td style="text-align:right">0.160060</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td style="text-align:right">0.044192</td>
+<td style="text-align:right">0.042106</td>
+<td style="text-align:right">0.057001</td>
+<td style="text-align:right">0.086800</td>
+<td style="text-align:right">0.004791</td>
+<td style="text-align:right">23.430</td>
+<td style="text-align:right">0.845936</td>
+<td style="text-align:right">0.155884</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td style="text-align:right">0.044284</td>
+<td style="text-align:right">0.042745</td>
+<td style="text-align:right">0.058175</td>
+<td style="text-align:right">0.081786</td>
+<td style="text-align:right">0.004710</td>
+<td style="text-align:right">23.498</td>
+<td style="text-align:right">0.849478</td>
+<td style="text-align:right">0.156440</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_1</td>
+<td style="text-align:right">0.045026</td>
+<td style="text-align:right">0.044195</td>
+<td style="text-align:right">0.054733</td>
+<td style="text-align:right">0.069276</td>
+<td style="text-align:right">0.004938</td>
+<td style="text-align:right">23.187</td>
+<td style="text-align:right">0.830271</td>
+<td style="text-align:right">0.159867</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td style="text-align:right">0.043984</td>
+<td style="text-align:right">0.041667</td>
+<td style="text-align:right">0.057290</td>
+<td style="text-align:right">0.088895</td>
+<td style="text-align:right">0.004764</td>
+<td style="text-align:right">23.461</td>
+<td style="text-align:right">0.846132</td>
+<td style="text-align:right">0.155849</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td style="text-align:right">0.043842</td>
+<td style="text-align:right">0.042436</td>
+<td style="text-align:right">0.056604</td>
+<td style="text-align:right">0.080433</td>
+<td style="text-align:right">0.004663</td>
+<td style="text-align:right">23.538</td>
+<td style="text-align:right">0.850069</td>
+<td style="text-align:right">0.156987</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_2</td>
+<td style="text-align:right">0.045161</td>
+<td style="text-align:right">0.044165</td>
+<td style="text-align:right">0.054626</td>
+<td style="text-align:right">0.069088</td>
+<td style="text-align:right">0.004959</td>
+<td style="text-align:right">23.170</td>
+<td style="text-align:right">0.829658</td>
+<td style="text-align:right">0.159940</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td style="text-align:right">0.044127</td>
+<td style="text-align:right">0.041900</td>
+<td style="text-align:right">0.056835</td>
+<td style="text-align:right">0.085735</td>
+<td style="text-align:right">0.004777</td>
+<td style="text-align:right">23.445</td>
+<td style="text-align:right">0.845760</td>
+<td style="text-align:right">0.155812</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td style="text-align:right">0.044094</td>
+<td style="text-align:right">0.042611</td>
+<td style="text-align:right">0.057381</td>
+<td style="text-align:right">0.080214</td>
+<td style="text-align:right">0.004689</td>
+<td style="text-align:right">23.509</td>
+<td style="text-align:right">0.849871</td>
+<td style="text-align:right">0.156745</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_3</td>
+<td style="text-align:right">0.045041</td>
+<td style="text-align:right">0.043977</td>
+<td style="text-align:right">0.054375</td>
+<td style="text-align:right">0.069669</td>
+<td style="text-align:right">0.004941</td>
+<td style="text-align:right">23.187</td>
+<td style="text-align:right">0.830296</td>
+<td style="text-align:right">0.159856</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td style="text-align:right">0.044098</td>
+<td style="text-align:right">0.042019</td>
+<td style="text-align:right">0.057164</td>
+<td style="text-align:right">0.084140</td>
+<td style="text-align:right">0.004778</td>
+<td style="text-align:right">23.446</td>
+<td style="text-align:right">0.846125</td>
+<td style="text-align:right">0.156121</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td style="text-align:right">0.043927</td>
+<td style="text-align:right">0.042634</td>
+<td style="text-align:right">0.057230</td>
+<td style="text-align:right">0.077671</td>
+<td style="text-align:right">0.004668</td>
+<td style="text-align:right">23.525</td>
+<td style="text-align:right">0.850060</td>
+<td style="text-align:right">0.156689</td>
+<td style="text-align:right">0.750000</td>
+</tr>
+</tbody>
+</table>
+<h3>Dataset/eye/mode 等权 macro（clamp-domain）</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Mode</th>
+<th style="text-align:right">RGB L1</th>
+<th style="text-align:right">MSE</th>
+<th style="text-align:right">PSNR</th>
+<th style="text-align:right">SSIM</th>
+<th style="text-align:right">LPIPS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.034263</td>
+<td style="text-align:right">0.003777</td>
+<td style="text-align:right">24.666</td>
+<td style="text-align:right">0.886960</td>
+<td style="text-align:right">0.164680</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.032787</td>
+<td style="text-align:right">0.003353</td>
+<td style="text-align:right">25.283</td>
+<td style="text-align:right">0.905837</td>
+<td style="text-align:right">0.140308</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.032584</td>
+<td style="text-align:right">0.003328</td>
+<td style="text-align:right">25.296</td>
+<td style="text-align:right">0.906394</td>
+<td style="text-align:right">0.141055</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.033324</td>
+<td style="text-align:right">0.003490</td>
+<td style="text-align:right">25.219</td>
+<td style="text-align:right">0.905371</td>
+<td style="text-align:right">0.140714</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.033510</td>
+<td style="text-align:right">0.003513</td>
+<td style="text-align:right">25.182</td>
+<td style="text-align:right">0.905392</td>
+<td style="text-align:right">0.141572</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0.052250</td>
+<td style="text-align:right">0.006414</td>
+<td style="text-align:right">22.117</td>
+<td style="text-align:right">0.778473</td>
+<td style="text-align:right">0.199739</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0.049293</td>
+<td style="text-align:right">0.005502</td>
+<td style="text-align:right">22.796</td>
+<td style="text-align:right">0.834885</td>
+<td style="text-align:right">0.164122</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0.049141</td>
+<td style="text-align:right">0.005475</td>
+<td style="text-align:right">22.816</td>
+<td style="text-align:right">0.835270</td>
+<td style="text-align:right">0.164177</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0.049234</td>
+<td style="text-align:right">0.005488</td>
+<td style="text-align:right">22.804</td>
+<td style="text-align:right">0.834885</td>
+<td style="text-align:right">0.164221</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0.049113</td>
+<td style="text-align:right">0.005462</td>
+<td style="text-align:right">22.816</td>
+<td style="text-align:right">0.835377</td>
+<td style="text-align:right">0.164154</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>stereo/four_frame</td>
+<td style="text-align:right">0.048049</td>
+<td style="text-align:right">0.005822</td>
+<td style="text-align:right">22.541</td>
+<td style="text-align:right">0.783413</td>
+<td style="text-align:right">0.193893</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>stereo/single_frame/source_0</td>
+<td style="text-align:right">0.044496</td>
+<td style="text-align:right">0.004814</td>
+<td style="text-align:right">23.370</td>
+<td style="text-align:right">0.841730</td>
+<td style="text-align:right">0.157461</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>stereo/single_frame/source_1</td>
+<td style="text-align:right">0.044284</td>
+<td style="text-align:right">0.004788</td>
+<td style="text-align:right">23.395</td>
+<td style="text-align:right">0.842158</td>
+<td style="text-align:right">0.157567</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>stereo/single_frame/source_2</td>
+<td style="text-align:right">0.044461</td>
+<td style="text-align:right">0.004808</td>
+<td style="text-align:right">23.375</td>
+<td style="text-align:right">0.841763</td>
+<td style="text-align:right">0.157499</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>stereo/single_frame/source_3</td>
+<td style="text-align:right">0.044355</td>
+<td style="text-align:right">0.004796</td>
+<td style="text-align:right">23.386</td>
+<td style="text-align:right">0.842161</td>
+<td style="text-align:right">0.157555</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>Raw RGB 数值稳定性诊断</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><p>Raw L1/MSE 只用于诊断 decoder 数值稳定性，不作为正式图像质量结论。</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view</th>
+<th>Mode</th>
+<th>Raw L1 mean/P50/P90/P99</th>
+<th>Raw MSE mean/P50/P90/P99</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>0.046341/0.045431/0.053823/0.086109</td>
+<td>0.228618/0.229137/0.239544/0.245112</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.041559/0.041656/0.047640/0.087240</td>
+<td>0.077965/0.078114/0.086344/0.095486</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.041519/0.041221/0.047844/0.088447</td>
+<td>0.078232/0.078401/0.086235/0.095091</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.041697/0.041484/0.048081/0.099947</td>
+<td>0.078400/0.078088/0.087359/0.093989</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.041644/0.041304/0.047536/0.105316</td>
+<td>0.078203/0.078068/0.086619/0.093816</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.043023/0.039567/0.059749/0.098037</td>
+<td>0.219858/0.220504/0.234558/0.246421</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.035323/0.032181/0.049420/0.090961</td>
+<td>0.070060/0.070460/0.081906/0.090665</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.035032/0.031895/0.047746/0.084597</td>
+<td>0.070979/0.070627/0.082572/0.095468</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.036356/0.032249/0.054887/0.091446</td>
+<td>0.072184/0.071618/0.084125/0.100743</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.036729/0.032161/0.055020/0.097231</td>
+<td>0.071328/0.071605/0.082851/0.094434</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>0.067440/0.066458/0.078495/0.095786</td>
+<td>0.307217/0.308905/0.322746/0.330246</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.058583/0.057897/0.068799/0.087174</td>
+<td>0.105395/0.106032/0.116610/0.126325</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.058625/0.057889/0.069472/0.087228</td>
+<td>0.104781/0.105524/0.116289/0.126227</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.058651/0.057745/0.069209/0.083673</td>
+<td>0.104960/0.105697/0.116498/0.123624</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.058613/0.057453/0.069299/0.085388</td>
+<td>0.105219/0.106018/0.117284/0.127122</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/four_frame</td>
+<td>0.067986/0.067186/0.079197/0.095440</td>
+<td>0.308201/0.310091/0.323327/0.330224</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.059211/0.058623/0.070246/0.083476</td>
+<td>0.106021/0.107236/0.117287/0.127742</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.059030/0.058226/0.069731/0.084733</td>
+<td>0.105495/0.106898/0.116700/0.124816</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.059067/0.058236/0.069386/0.084930</td>
+<td>0.105469/0.106536/0.116353/0.126391</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.058993/0.058200/0.069199/0.083972</td>
+<td>0.105759/0.106542/0.116865/0.126063</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.065739/0.063311/0.080243/0.111719</td>
+<td>0.304011/0.305827/0.320180/0.330162</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.056620/0.054104/0.069768/0.100491</td>
+<td>0.102606/0.104617/0.114267/0.124804</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.056456/0.054022/0.070238/0.109512</td>
+<td>0.103086/0.104701/0.114862/0.124405</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.056641/0.054218/0.071236/0.100780</td>
+<td>0.103522/0.104614/0.114953/0.126864</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.056562/0.054456/0.071410/0.098853</td>
+<td>0.102676/0.103817/0.114652/0.125048</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td>0.067273/0.065377/0.081927/0.115202</td>
+<td>0.304009/0.306408/0.321276/0.330330</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.057824/0.055412/0.072148/0.108251</td>
+<td>0.103323/0.105288/0.114332/0.124194</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.057716/0.055241/0.070523/0.106110</td>
+<td>0.103624/0.105508/0.115318/0.124831</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.057713/0.055570/0.071801/0.106403</td>
+<td>0.103230/0.105046/0.114942/0.123802</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.057661/0.055467/0.071703/0.103314</td>
+<td>0.103298/0.104757/0.115065/0.125139</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.065491/0.064191/0.079456/0.099932</td>
+<td>0.301323/0.303084/0.322105/0.329942</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.056425/0.054448/0.071447/0.093633</td>
+<td>0.100282/0.102012/0.114424/0.122588</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.055732/0.054028/0.069509/0.095354</td>
+<td>0.100469/0.102228/0.113659/0.122542</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.056074/0.054466/0.071061/0.091678</td>
+<td>0.100430/0.102292/0.113724/0.122689</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.055921/0.054698/0.070311/0.090084</td>
+<td>0.100886/0.102238/0.114799/0.123783</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td>0.065313/0.064337/0.080447/0.099287</td>
+<td>0.302123/0.303883/0.321497/0.330246</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.055979/0.054455/0.070562/0.091837</td>
+<td>0.100871/0.102872/0.113918/0.122837</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.056192/0.054801/0.070606/0.090569</td>
+<td>0.100583/0.102651/0.114374/0.123194</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.056144/0.054739/0.070865/0.091473</td>
+<td>0.100497/0.102785/0.114395/0.123187</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.055784/0.054545/0.069576/0.088603</td>
+<td>0.100300/0.102110/0.114687/0.122606</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/four_frame</td>
+<td>0.063194/0.062681/0.073655/0.089406</td>
+<td>0.308786/0.310819/0.322725/0.329359</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/four_frame</td>
+<td>0.062016/0.060304/0.075202/0.101220</td>
+<td>0.305160/0.307280/0.320616/0.329285</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/four_frame</td>
+<td>0.061827/0.060965/0.075948/0.097453</td>
+<td>0.302415/0.304585/0.321605/0.330607</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.053297/0.052688/0.063412/0.078083</td>
+<td>0.107884/0.108888/0.119104/0.130754</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.052242/0.050370/0.064904/0.094561</td>
+<td>0.103959/0.105879/0.116231/0.127766</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.052161/0.050542/0.065978/0.088829</td>
+<td>0.101515/0.104074/0.115474/0.124655</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.053292/0.052532/0.063438/0.077543</td>
+<td>0.107365/0.108821/0.117724/0.126968</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.052034/0.049751/0.065268/0.097458</td>
+<td>0.104182/0.106186/0.116614/0.126799</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.051741/0.050360/0.064373/0.087883</td>
+<td>0.101484/0.103743/0.116151/0.127301</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.053434/0.052553/0.063108/0.077797</td>
+<td>0.107586/0.108712/0.118819/0.125805</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.052178/0.050068/0.065081/0.093512</td>
+<td>0.104273/0.106161/0.116769/0.127236</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.051987/0.050527/0.065335/0.087441</td>
+<td>0.101573/0.103856/0.116193/0.125870</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.053322/0.052281/0.062953/0.078265</td>
+<td>0.107725/0.108814/0.118549/0.127767</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.052145/0.050247/0.065273/0.092478</td>
+<td>0.104007/0.105781/0.117109/0.127714</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.051814/0.050917/0.065145/0.085918</td>
+<td>0.101612/0.103559/0.116685/0.125536</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>RGB 越界与 overshoot 诊断</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><p>越界像素定义为 valid 时空像素中任一 RGB channel 超出 [-0.5,0.5]。每个 sample/view 先对正 overshoot <code>max_channel(relu(abs(output)-0.5))</code> 的全部越界像素精确求 P50/P90/P99/max，再汇总样本分布；不是全局近似分位数。无越界样本的 positive count 和这些统计均为 0。</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view</th>
+<th>Mode</th>
+<th>OOR ratio mean/P50/P90/P99</th>
+<th>sample P50 mean/P50/P90/P99</th>
+<th>sample P90 mean/P50/P90/P99</th>
+<th>sample P99 mean/P50/P90/P99</th>
+<th>sample max mean/P50/P90/P99</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>0.00835665/0.00769424/0.01124001/0.02165680</td>
+<td>0.34657439/0.33472686/0.60962614/0.72394407</td>
+<td>4.84540598/4.83163714/6.64704704/8.05983768</td>
+<td>40.60893264/41.35866356/44.23078156/45.79235497</td>
+<td>85.33156237/85.47948837/86.03841782/86.28866730</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.00741756/0.00683594/0.00983429/0.01619720</td>
+<td>0.27131496/0.26623935/0.45749980/0.57440369</td>
+<td>3.19033620/3.16892850/4.37016106/5.01285322</td>
+<td>22.57566146/23.00369358/25.00942612/26.92655249</td>
+<td>37.94003081/38.08866310/39.96145058/42.14300938</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.00748348/0.00689697/0.01075745/0.01761093</td>
+<td>0.27144973/0.26412082/0.45861360/0.58873640</td>
+<td>3.17652386/3.15021992/4.33603311/5.18179419</td>
+<td>22.59007915/22.97447586/25.10975075/27.26328020</td>
+<td>38.06364553/38.10995674/40.05050659/42.08514462</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.00745910/0.00689697/0.00997925/0.01741714</td>
+<td>0.26552688/0.25346573/0.46159706/0.58429997</td>
+<td>3.16942118/3.10102713/4.35236859/5.05145144</td>
+<td>22.62612249/22.90137196/25.05540752/26.54286880</td>
+<td>38.13995098/38.04659081/40.05077934/42.12517033</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.00748581/0.00687408/0.01004791/0.01814804</td>
+<td>0.26805348/0.26206365/0.44831541/0.56859889</td>
+<td>3.16457495/3.13466227/4.35220861/4.93955097</td>
+<td>22.60658024/23.01809978/24.89604664/27.19467821</td>
+<td>38.08102097/38.08680725/39.90208626/41.92250977</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.01243483/0.00760460/0.01735687/0.09850769</td>
+<td>0.31965244/0.33858508/0.56210175/0.66234469</td>
+<td>4.30474524/4.86215949/6.09916186/7.03704109</td>
+<td>37.06707839/40.10607147/43.49580574/44.91384392</td>
+<td>84.49526019/84.86384964/85.73464584/86.09913445</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.00943702/0.00692749/0.01376343/0.04742661</td>
+<td>0.25040715/0.26173446/0.44858816/0.54878752</td>
+<td>2.79941488/3.07891893/4.09450769/4.94169295</td>
+<td>20.30824576/21.98483467/23.86015224/26.30340643</td>
+<td>35.73052927/36.27949524/38.91127396/40.82783127</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.00944507/0.00686646/0.01699066/0.04167709</td>
+<td>0.25156870/0.26513013/0.44344360/0.53253051</td>
+<td>2.81391553/3.05599034/4.14628625/5.15964496</td>
+<td>20.37757783/21.59910297/23.75567436/27.64758978</td>
+<td>36.11870221/36.20031357/39.10986137/42.04642639</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.00907463/0.00672913/0.01630402/0.04271469</td>
+<td>0.25730936/0.26991360/0.44436440/0.52073973</td>
+<td>2.89509698/3.14361167/4.18051720/5.13915913</td>
+<td>20.69198266/22.13221169/24.04116917/26.44618893</td>
+<td>36.28435666/36.29061127/39.48102379/42.37663689</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.00902724/0.00689697/0.01532745/0.03680115</td>
+<td>0.25133573/0.25915807/0.44787708/0.51419486</td>
+<td>2.81239133/3.09585094/4.12223577/4.72313490</td>
+<td>20.43216624/22.06548691/23.91885185/26.04047852</td>
+<td>35.92287745/36.25763512/38.79506683/41.30283566</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>0.02940388/0.02331797/0.05445201/0.11118362</td>
+<td>0.09006421/0.04502362/0.23617809/0.46131790</td>
+<td>2.01732725/1.78573018/3.93975348/5.62164652</td>
+<td>26.56220513/27.76223755/39.60819244/43.32298935</td>
+<td>84.85611974/85.13730621/85.85143661/86.16365639</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.03296216/0.02561442/0.06245321/0.13168070</td>
+<td>0.06971854/0.04001224/0.17488693/0.33640744</td>
+<td>1.21561009/1.00128815/2.45382843/3.62333367</td>
+<td>13.04214799/13.17688751/21.20133266/23.62917170</td>
+<td>38.09688523/38.33993530/40.12599564/41.77842838</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.03311370/0.02522786/0.06228434/0.13200094</td>
+<td>0.06873614/0.03855401/0.17396036/0.35857691</td>
+<td>1.20072832/1.05761856/2.37594724/3.60754845</td>
+<td>12.93639383/13.47471380/21.00200253/23.38257849</td>
+<td>37.94193450/38.31269646/40.11441994/41.67415600</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.03325766/0.02584839/0.06295980/0.13042277</td>
+<td>0.06596521/0.03920799/0.16205191/0.31566836</td>
+<td>1.18377866/1.00074157/2.34736364/3.25608310</td>
+<td>12.84634581/12.85007906/20.82454681/23.25678181</td>
+<td>38.01378010/38.25463867/40.16791115/41.38843395</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.03317414/0.02554321/0.06291707/0.13213908</td>
+<td>0.06731497/0.03836477/0.16984360/0.33965412</td>
+<td>1.19481225/1.03365016/2.37488108/3.48444625</td>
+<td>12.95593667/13.37120342/20.89537220/23.65651321</td>
+<td>38.04731870/38.30189323/40.16003494/41.80766392</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/four_frame</td>
+<td>0.02859982/0.02263387/0.04932760/0.12545217</td>
+<td>0.09094462/0.04560971/0.25372144/0.43323950</td>
+<td>2.04366818/1.85486126/4.02609158/5.54422973</td>
+<td>26.93594487/28.25423050/39.59005737/43.68388451</td>
+<td>84.90270975/85.18821335/85.86237564/86.20010780</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.03157888/0.02446493/0.05702922/0.13731323</td>
+<td>0.06903749/0.03938144/0.16937245/0.34078384</td>
+<td>1.23226757/1.11767447/2.38951490/3.53519763</td>
+<td>13.29084206/13.75048018/20.99353962/23.91166756</td>
+<td>38.21737151/38.54415131/40.27307434/41.78806118</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.03197990/0.02478027/0.05779419/0.14770304</td>
+<td>0.06827655/0.03915194/0.17436213/0.32652086</td>
+<td>1.22244710/1.09901899/2.39238636/3.49733238</td>
+<td>13.16421110/13.62740517/21.06538067/23.46847889</td>
+<td>38.09291160/38.45544434/40.11253204/41.62225563</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.03189258/0.02438354/0.05726725/0.15010396</td>
+<td>0.06922822/0.03981255/0.17651877/0.32040878</td>
+<td>1.23011710/1.11757410/2.35948920/3.49959401</td>
+<td>13.24536238/13.95748806/21.01303101/23.51688025</td>
+<td>38.08410047/38.44376945/40.14920616/41.97828262</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.03151449/0.02484131/0.05793457/0.14462301</td>
+<td>0.07010190/0.04069731/0.17780140/0.33003350</td>
+<td>1.24110597/1.10283369/2.42605028/3.46576427</td>
+<td>13.30835948/13.77610874/21.14297447/23.68428328</td>
+<td>38.16270704/38.39888763/40.20862656/41.77751633</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.02638304/0.02032216/0.04977620/0.11020350</td>
+<td>0.10026724/0.05024761/0.27923511/0.50041710</td>
+<td>2.23412444/2.03265119/4.34897966/5.77427701</td>
+<td>28.17400617/29.26086807/40.10160065/43.68460106</td>
+<td>85.02820094/85.31444550/85.88962326/86.19664986</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.02928398/0.02143351/0.05563151/0.13452576</td>
+<td>0.07953665/0.04407048/0.20493429/0.41364250</td>
+<td>1.37569687/1.28636646/2.61544838/4.04998038</td>
+<td>14.03092237/14.49142885/21.41280003/24.03151823</td>
+<td>37.56337027/38.13330841/39.75845528/41.17041718</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.02937249/0.02155558/0.05568644/0.13879639</td>
+<td>0.07870393/0.04427901/0.20849720/0.37046759</td>
+<td>1.37565385/1.31638694/2.67237091/3.74692496</td>
+<td>14.05864674/14.55622625/21.46951065/24.01473396</td>
+<td>37.71895944/38.09484100/39.85391769/41.38716431</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.02871823/0.02073161/0.05464274/0.13262797</td>
+<td>0.07888806/0.04330257/0.20152196/0.35897231</td>
+<td>1.39544757/1.35637546/2.61065357/3.71046653</td>
+<td>14.25893390/14.80796576/21.53146248/23.66616913</td>
+<td>37.79215102/38.17732430/39.88398437/41.52043156</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.02881984/0.02157593/0.05404460/0.13968994</td>
+<td>0.07957761/0.04354760/0.19808589/0.38076138</td>
+<td>1.38767431/1.32636416/2.65210898/3.72834396</td>
+<td>14.16676513/14.71772814/21.35350208/23.65840738</td>
+<td>37.61397343/38.03631020/39.86623497/41.51651306</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td>0.02695819/0.02088165/0.05048319/0.10355403</td>
+<td>0.09531539/0.04588751/0.26180533/0.48193282</td>
+<td>2.13754579/1.97978568/4.26689000/5.88554451</td>
+<td>27.44912551/28.99179173/39.82037773/43.96434895</td>
+<td>84.93433918/85.33070755/85.95327835/86.21453537</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.02965619/0.02195231/0.05630086/0.13398966</td>
+<td>0.07590768/0.04208121/0.19947735/0.36400662</td>
+<td>1.32529315/1.26676559/2.56812587/3.72528543</td>
+<td>13.78605391/14.52110863/21.29614868/23.67055492</td>
+<td>37.72067774/38.17562485/39.74659805/41.48251255</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.02953227/0.02208455/0.05731405/0.12552266</td>
+<td>0.07492413/0.04129995/0.20205382/0.36848905</td>
+<td>1.32681920/1.27441686/2.55193086/3.89549313</td>
+<td>13.82129327/14.56582689/21.45298386/24.16758675</td>
+<td>37.73152069/38.20395470/39.92123070/41.60399105</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.02935270/0.02221680/0.05691528/0.12324117</td>
+<td>0.07709159/0.04124343/0.19593999/0.40684621</td>
+<td>1.33415761/1.24917746/2.54689431/4.05583592</td>
+<td>13.76740428/14.38074589/21.26612835/24.13205090</td>
+<td>37.70032611/38.20159721/39.86048317/41.19603592</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.02937180/0.02226766/0.05560099/0.12857524</td>
+<td>0.07527761/0.04154252/0.19123034/0.39163570</td>
+<td>1.32952768/1.22921860/2.59159346/3.83006658</td>
+<td>13.84960603/14.33646679/21.46028080/23.97978945</td>
+<td>37.73224661/38.12105751/39.88447037/41.56119514</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td>0.02567397/0.01844533/0.04666494/0.13310674</td>
+<td>0.11932198/0.05667634/0.30732364/0.61311872</td>
+<td>2.44552687/2.19803333/4.71501255/6.70649314</td>
+<td>29.12157695/30.42502403/40.67475052/44.55077991</td>
+<td>85.02341769/85.31958771/85.93978806/86.25210716</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>0.02769854/0.01908366/0.05263875/0.15617513</td>
+<td>0.09625415/0.05067798/0.25514839/0.45645897</td>
+<td>1.54295885/1.44920713/2.95512457/4.33790362</td>
+<td>14.81395774/15.26308155/21.87034683/24.20472029</td>
+<td>37.10421330/37.68556213/39.70733452/40.94800346</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>0.02769059/0.01915487/0.05338338/0.15598470</td>
+<td>0.09450994/0.04900721/0.25065137/0.45720824</td>
+<td>1.52962534/1.49452001/2.89662917/4.19003404</td>
+<td>14.79585190/15.19496965/21.75601482/24.38594410</td>
+<td>37.19104347/37.66755486/39.74496422/41.27979733</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>0.02737574/0.01900228/0.05273234/0.15736348</td>
+<td>0.09609022/0.04961547/0.25041095/0.44950744</td>
+<td>1.54565836/1.50168085/2.95901661/4.34852193</td>
+<td>14.81262254/15.25238800/21.80313301/24.58475252</td>
+<td>37.16711564/37.69251823/39.66703835/41.40954124</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>0.02723624/0.01870728/0.05057373/0.16222839</td>
+<td>0.09694227/0.05155480/0.25289972/0.43910798</td>
+<td>1.55143281/1.52975082/2.97006812/4.15346695</td>
+<td>14.91512156/15.64911366/21.88376560/24.22257463</td>
+<td>37.29517696/37.69600105/39.82138481/41.49145832</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td>0.02717635/0.01905823/0.05033162/0.15665721</td>
+<td>0.11376212/0.05483519/0.30511250/0.60619594</td>
+<td>2.36261278/2.14435351/4.65924606/6.87378487</td>
+<td>28.56900874/30.00413513/40.63900528/44.60586628</td>
+<td>85.05888627/85.33766937/85.96734772/86.27769180</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>0.02866888/0.01925659/0.05481771/0.16263387</td>
+<td>0.09530847/0.04895124/0.25869350/0.44432917</td>
+<td>1.52007869/1.43986809/2.99286840/4.26214154</td>
+<td>14.69280270/15.31918430/21.89010220/24.07487562</td>
+<td>37.26083993/37.75811005/39.68565941/41.21435436</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>0.02862032/0.01946004/0.05426229/0.17491292</td>
+<td>0.09501187/0.05057827/0.24898336/0.48591677</td>
+<td>1.52601817/1.48259014/2.98748558/4.32402496</td>
+<td>14.65729102/15.32695198/21.86857700/23.94367168</td>
+<td>37.21668474/37.73607445/39.70443878/41.01439583</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>0.02896263/0.01939901/0.05635173/0.17628947</td>
+<td>0.09276172/0.04793136/0.23627118/0.44292437</td>
+<td>1.49081519/1.44205111/2.93451920/4.09772382</td>
+<td>14.52901738/15.09539318/21.87951851/24.09087444</td>
+<td>37.15879580/37.77509880/39.68153000/40.99987831</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>0.02859805/0.01952108/0.05525106/0.16844482</td>
+<td>0.09238851/0.04759899/0.24292830/0.44849212</td>
+<td>1.49324925/1.41379845/2.88812554/4.16063419</td>
+<td>14.59268532/15.20270443/21.82096062/24.33063490</td>
+<td>37.15610097/37.64834976/39.78831902/41.10271896</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/four_frame</td>
+<td>0.02601890/0.01990509/0.04672902/0.08944300</td>
+<td>0.11489104/0.05589180/0.30334578/0.48704945</td>
+<td>2.34347556/2.09981823/4.64246674/5.89140215</td>
+<td>28.77422920/29.64052963/40.80913811/44.00299904</td>
+<td>84.81722212/85.13199234/85.94108353/86.30983864</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/four_frame</td>
+<td>0.02380461/0.01827240/0.04474386/0.09702576</td>
+<td>0.12482662/0.06055510/0.34067955/0.54953744</td>
+<td>2.54179808/2.24264479/4.86329355/6.50501238</td>
+<td>29.88722631/31.22270775/41.38395119/44.46070686</td>
+<td>85.02267609/85.29380035/85.98957596/86.29950653</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/four_frame</td>
+<td>0.02269888/0.01641846/0.04193370/0.10431325</td>
+<td>0.14524106/0.07608187/0.37335449/0.59486063</td>
+<td>2.76484118/2.54205728/5.16986370/6.74758763</td>
+<td>30.99351465/32.83872223/41.93456993/44.87793007</td>
+<td>85.13382718/85.34740067/86.03963318/86.35109009</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.02674234/0.02015177/0.04780477/0.11084941</td>
+<td>0.08974624/0.04677421/0.23129254/0.39453283</td>
+<td>1.50661949/1.38298595/2.86577389/3.95796018</td>
+<td>15.24068160/15.33700085/22.52138824/24.71435949</td>
+<td>38.73867614/39.03475189/40.73141136/42.88752907</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.02437301/0.01810710/0.04726969/0.10362610</td>
+<td>0.10076559/0.05155930/0.26977423/0.47136778</td>
+<td>1.63722675/1.55734277/3.09677322/4.33049929</td>
+<td>15.74784541/16.37332153/22.60044384/24.83952496</td>
+<td>37.95630974/38.46432304/40.21130409/42.02498306</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>0.02267597/0.01567586/0.04229126/0.11904399</td>
+<td>0.12061210/0.06870201/0.30419545/0.52259104</td>
+<td>1.82903824/1.74653852/3.32803268/4.67532524</td>
+<td>16.60130826/18.25369358/22.88708401/25.05008698</td>
+<td>37.51523178/38.14468765/40.08821335/41.57253864</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.02683385/0.02024333/0.04993896/0.11326274</td>
+<td>0.09012389/0.04759854/0.23755712/0.42618724</td>
+<td>1.50564488/1.38366735/2.90161123/4.11033174</td>
+<td>15.18417650/15.29856253/22.41453304/24.55131338</td>
+<td>38.64445809/39.03308296/40.53806496/42.21849709</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.02443381/0.01753743/0.04755452/0.10461283</td>
+<td>0.09931032/0.05225268/0.26798378/0.42384476</td>
+<td>1.63992114/1.58625740/3.11076429/4.37944908</td>
+<td>15.87365786/16.62723923/22.76921215/25.39888903</td>
+<td>38.02722191/38.50289154/40.33651695/42.02230820</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>0.02274160/0.01548258/0.04404704/0.12328166</td>
+<td>0.11918253/0.06613250/0.30308571/0.49413342</td>
+<td>1.81995228/1.76509690/3.27618611/4.53045090</td>
+<td>16.56143166/18.26808262/22.82913685/24.99617723</td>
+<td>37.48471749/37.99547386/40.18212738/42.03038284</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.02697162/0.02057902/0.05112101/0.11022827</td>
+<td>0.08717712/0.04738961/0.22016152/0.39571646</td>
+<td>1.49577732/1.38730597/2.82226026/4.12512255</td>
+<td>15.21368330/15.38801861/22.50226097/24.85726551</td>
+<td>38.69376739/38.98782349/40.68428764/41.93212910</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.02378172/0.01762899/0.04596965/0.10560282</td>
+<td>0.09949984/0.05360675/0.26615003/0.45000514</td>
+<td>1.65558966/1.60391420/3.06160140/4.22255819</td>
+<td>16.01135959/17.01123047/22.63355007/24.76501499</td>
+<td>38.02522427/38.45841408/40.31558914/42.28260628</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>0.02231079/0.01568604/0.04123942/0.12074300</td>
+<td>0.12185725/0.06673978/0.31235587/0.48924462</td>
+<td>1.83102394/1.75130713/3.35731502/4.56688403</td>
+<td>16.56705417/18.21036816/22.80849819/25.14065420</td>
+<td>37.49997399/38.08247566/40.14750671/41.90921127</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.02701020/0.02009074/0.04889730/0.11285217</td>
+<td>0.08826135/0.04600511/0.23366227/0.41530542</td>
+<td>1.48669300/1.41306436/2.73007867/3.94581114</td>
+<td>15.16463250/15.43896294/22.21018105/24.74419657</td>
+<td>38.73495087/39.06537437/40.71242752/42.31384556</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.02407038/0.01752726/0.04679769/0.10900431</td>
+<td>0.09974302/0.05331948/0.26345808/0.47775557</td>
+<td>1.64704012/1.59686869/3.00135138/4.33747202</td>
+<td>15.93008885/16.77839756/22.58101482/24.52444696</td>
+<td>37.96405685/38.41384506/40.36297913/42.11703392</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>0.02247308/0.01547241/0.04036255/0.12336670</td>
+<td>0.12001473/0.06682478/0.30562453/0.47451911</td>
+<td>1.81836056/1.79622954/3.35859947/4.43543136</td>
+<td>16.55894187/18.39522743/22.86578121/24.92082081</td>
+<td>37.53759112/38.01078224/40.24456558/41.93690002</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>Four-frame 时间一致性（clamp-domain）</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><p>先逐帧 clamp 到 [-0.5,0.5]，再计算相邻帧 temporal delta。</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view</th>
+<th style="text-align:right">Δ L1</th>
+<th style="text-align:right">Δ LPIPS</th>
+<th>Δ01 L1/LPIPS</th>
+<th>Δ12 L1/LPIPS</th>
+<th>Δ23 L1/LPIPS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td style="text-align:right">0.013064</td>
+<td style="text-align:right">0.148949</td>
+<td>0.013795/0.151068</td>
+<td>0.014248/0.156865</td>
+<td>0.011149/0.138914</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td style="text-align:right">0.019626</td>
+<td style="text-align:right">0.165039</td>
+<td>0.019851/0.166582</td>
+<td>0.020723/0.170154</td>
+<td>0.018304/0.158381</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td style="text-align:right">0.034243</td>
+<td style="text-align:right">0.268896</td>
+<td>0.035102/0.270686</td>
+<td>0.035485/0.271486</td>
+<td>0.032143/0.264516</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td style="text-align:right">0.034725</td>
+<td style="text-align:right">0.271805</td>
+<td>0.035665/0.273677</td>
+<td>0.035923/0.274396</td>
+<td>0.032588/0.267343</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td style="text-align:right">0.033221</td>
+<td style="text-align:right">0.252504</td>
+<td>0.034096/0.253245</td>
+<td>0.034624/0.259318</td>
+<td>0.030944/0.244949</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td style="text-align:right">0.033896</td>
+<td style="text-align:right">0.255842</td>
+<td>0.034835/0.256173</td>
+<td>0.035193/0.262552</td>
+<td>0.031660/0.248800</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td style="text-align:right">0.036575</td>
+<td style="text-align:right">0.247502</td>
+<td>0.037406/0.247957</td>
+<td>0.037701/0.254388</td>
+<td>0.034620/0.240161</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td style="text-align:right">0.036040</td>
+<td style="text-align:right">0.246373</td>
+<td>0.036927/0.247346</td>
+<td>0.037279/0.253304</td>
+<td>0.033914/0.238469</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td style="text-align:right">0.033316</td>
+<td style="text-align:right">0.263131</td>
+<td>0.034230/0.265104</td>
+<td>0.034397/0.265974</td>
+<td>0.031320/0.258315</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td style="text-align:right">0.032373</td>
+<td style="text-align:right">0.248406</td>
+<td>0.033316/0.249243</td>
+<td>0.033688/0.255430</td>
+<td>0.030114/0.240544</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td style="text-align:right">0.035443</td>
+<td style="text-align:right">0.244173</td>
+<td>0.036390/0.244926</td>
+<td>0.036554/0.251421</td>
+<td>0.033384/0.236172</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>Teacher-relative 几何（非真实 GT accuracy）</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera/view</th>
+<th>Mode</th>
+<th>Metric kind</th>
+<th style="text-align:right">log-L1</th>
+<th style="text-align:right">RMSE</th>
+<th style="text-align:right">SILog</th>
+<th style="text-align:right">Mask coverage</th>
+<th style="text-align:right">Valid samples</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.079414</td>
+<td style="text-align:right">0.111719</td>
+<td style="text-align:right">0.111719</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.106625</td>
+<td style="text-align:right">0.155381</td>
+<td style="text-align:right">0.155381</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.105597</td>
+<td style="text-align:right">0.153507</td>
+<td style="text-align:right">0.153507</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.104421</td>
+<td style="text-align:right">0.152233</td>
+<td style="text-align:right">0.152233</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.105921</td>
+<td style="text-align:right">0.152768</td>
+<td style="text-align:right">0.152768</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.079671</td>
+<td style="text-align:right">0.097630</td>
+<td style="text-align:right">0.097630</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.121015</td>
+<td style="text-align:right">0.152649</td>
+<td style="text-align:right">0.152649</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.120096</td>
+<td style="text-align:right">0.151428</td>
+<td style="text-align:right">0.151428</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.122475</td>
+<td style="text-align:right">0.154862</td>
+<td style="text-align:right">0.154862</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.120660</td>
+<td style="text-align:right">0.151922</td>
+<td style="text-align:right">0.151922</td>
+<td style="text-align:right">1.000000</td>
+<td style="text-align:right">256</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.146792</td>
+<td style="text-align:right">0.196607</td>
+<td style="text-align:right">0.196607</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.160126</td>
+<td style="text-align:right">0.212104</td>
+<td style="text-align:right">0.212104</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.159950</td>
+<td style="text-align:right">0.212495</td>
+<td style="text-align:right">0.212495</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.160510</td>
+<td style="text-align:right">0.213057</td>
+<td style="text-align:right">0.213057</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.160455</td>
+<td style="text-align:right">0.212978</td>
+<td style="text-align:right">0.212978</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.150023</td>
+<td style="text-align:right">0.201921</td>
+<td style="text-align:right">0.201921</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.165705</td>
+<td style="text-align:right">0.219675</td>
+<td style="text-align:right">0.219675</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.164139</td>
+<td style="text-align:right">0.218116</td>
+<td style="text-align:right">0.218116</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.163606</td>
+<td style="text-align:right">0.218377</td>
+<td style="text-align:right">0.218377</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.163170</td>
+<td style="text-align:right">0.217120</td>
+<td style="text-align:right">0.217120</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.197353</td>
+<td style="text-align:right">0.253018</td>
+<td style="text-align:right">0.253018</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.208447</td>
+<td style="text-align:right">0.267644</td>
+<td style="text-align:right">0.267644</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.210632</td>
+<td style="text-align:right">0.269688</td>
+<td style="text-align:right">0.269688</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.209260</td>
+<td style="text-align:right">0.268140</td>
+<td style="text-align:right">0.268140</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.208820</td>
+<td style="text-align:right">0.267706</td>
+<td style="text-align:right">0.267706</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.200025</td>
+<td style="text-align:right">0.257601</td>
+<td style="text-align:right">0.257601</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.213994</td>
+<td style="text-align:right">0.274123</td>
+<td style="text-align:right">0.274123</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.214010</td>
+<td style="text-align:right">0.273918</td>
+<td style="text-align:right">0.273918</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.214323</td>
+<td style="text-align:right">0.273466</td>
+<td style="text-align:right">0.273466</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.213424</td>
+<td style="text-align:right">0.272362</td>
+<td style="text-align:right">0.272362</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.195156</td>
+<td style="text-align:right">0.250148</td>
+<td style="text-align:right">0.250148</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.205249</td>
+<td style="text-align:right">0.262358</td>
+<td style="text-align:right">0.262358</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.205234</td>
+<td style="text-align:right">0.263064</td>
+<td style="text-align:right">0.263064</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.205046</td>
+<td style="text-align:right">0.263193</td>
+<td style="text-align:right">0.263193</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.207247</td>
+<td style="text-align:right">0.265328</td>
+<td style="text-align:right">0.265328</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.194836</td>
+<td style="text-align:right">0.250616</td>
+<td style="text-align:right">0.250616</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.196601</td>
+<td style="text-align:right">0.251337</td>
+<td style="text-align:right">0.251337</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.198700</td>
+<td style="text-align:right">0.253774</td>
+<td style="text-align:right">0.253774</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.199448</td>
+<td style="text-align:right">0.255777</td>
+<td style="text-align:right">0.255777</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td>reconstruction_teacher</td>
+<td style="text-align:right">0.197706</td>
+<td style="text-align:right">0.252961</td>
+<td style="text-align:right">0.252961</td>
+<td style="text-align:right">0.750000</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/four_frame</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.220685</td>
+<td style="text-align:right">0.278301</td>
+<td style="text-align:right">0.213585</td>
+<td style="text-align:right">0.526239</td>
+<td style="text-align:right">1020</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/four_frame</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.237258</td>
+<td style="text-align:right">0.317115</td>
+<td style="text-align:right">0.281658</td>
+<td style="text-align:right">0.416859</td>
+<td style="text-align:right">1024</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/four_frame</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.213092</td>
+<td style="text-align:right">0.289846</td>
+<td style="text-align:right">0.259936</td>
+<td style="text-align:right">0.378510</td>
+<td style="text-align:right">1023</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_0</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.225577</td>
+<td style="text-align:right">0.282544</td>
+<td style="text-align:right">0.218956</td>
+<td style="text-align:right">0.526239</td>
+<td style="text-align:right">1019</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.241560</td>
+<td style="text-align:right">0.317114</td>
+<td style="text-align:right">0.277141</td>
+<td style="text-align:right">0.418622</td>
+<td style="text-align:right">1021</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_0</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.215912</td>
+<td style="text-align:right">0.286056</td>
+<td style="text-align:right">0.248549</td>
+<td style="text-align:right">0.378661</td>
+<td style="text-align:right">1022</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_1</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.225889</td>
+<td style="text-align:right">0.282876</td>
+<td style="text-align:right">0.218246</td>
+<td style="text-align:right">0.528044</td>
+<td style="text-align:right">1020</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.243023</td>
+<td style="text-align:right">0.318425</td>
+<td style="text-align:right">0.277312</td>
+<td style="text-align:right">0.418617</td>
+<td style="text-align:right">1018</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_1</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.221134</td>
+<td style="text-align:right">0.291918</td>
+<td style="text-align:right">0.251521</td>
+<td style="text-align:right">0.378371</td>
+<td style="text-align:right">1021</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_2</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.225261</td>
+<td style="text-align:right">0.282268</td>
+<td style="text-align:right">0.220114</td>
+<td style="text-align:right">0.525319</td>
+<td style="text-align:right">1019</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.240560</td>
+<td style="text-align:right">0.316820</td>
+<td style="text-align:right">0.277463</td>
+<td style="text-align:right">0.415353</td>
+<td style="text-align:right">1021</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_2</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.217990</td>
+<td style="text-align:right">0.287572</td>
+<td style="text-align:right">0.250165</td>
+<td style="text-align:right">0.377930</td>
+<td style="text-align:right">1017</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>head</td>
+<td>stereo/single_frame/source_3</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.219105</td>
+<td style="text-align:right">0.274535</td>
+<td style="text-align:right">0.214810</td>
+<td style="text-align:right">0.525353</td>
+<td style="text-align:right">1020</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>left_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.241506</td>
+<td style="text-align:right">0.316472</td>
+<td style="text-align:right">0.277094</td>
+<td style="text-align:right">0.414843</td>
+<td style="text-align:right">1021</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>right_wrist</td>
+<td>stereo/single_frame/source_3</td>
+<td>depth_head_teacher</td>
+<td style="text-align:right">0.219764</td>
+<td style="text-align:right">0.291111</td>
+<td style="text-align:right">0.253940</td>
+<td style="text-align:right">0.379078</td>
+<td style="text-align:right">1018</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section'><summary><span>Bottleneck 与效率</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><table>
+<thead>
+<tr>
+<th>Eye</th>
+<th>Mode</th>
+<th>Encode P50/P90 ms</th>
+<th>Posterior mean P50/P90 ms</th>
+<th>Decode P50/P90 ms</th>
+<th>E2E P50/P90 ms</th>
+<th style="text-align:right">samples/s</th>
+<th style="text-align:right">frames/s</th>
+<th>Peak alloc/reserved GiB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mono</td>
+<td>four_frame</td>
+<td>4.128/4.215</td>
+<td>0.010/0.010</td>
+<td>4.117/4.197</td>
+<td>8.201/8.396</td>
+<td style="text-align:right">121.940</td>
+<td style="text-align:right">487.761</td>
+<td>0.376/0.389</td>
+</tr>
+<tr>
+<td>mono</td>
+<td>single_frame</td>
+<td>2.596/2.682</td>
+<td>0.010/0.010</td>
+<td>2.619/2.751</td>
+<td>5.367/5.490</td>
+<td style="text-align:right">186.317</td>
+<td style="text-align:right">186.317</td>
+<td>0.363/0.369</td>
+</tr>
+<tr>
+<td>stereo</td>
+<td>four_frame</td>
+<td>4.982/5.000</td>
+<td>0.010/0.010</td>
+<td>3.941/3.972</td>
+<td>8.668/8.742</td>
+<td style="text-align:right">115.363</td>
+<td style="text-align:right">461.452</td>
+<td>0.534/0.660</td>
+</tr>
+<tr>
+<td>stereo</td>
+<td>single_frame</td>
+<td>3.302/3.323</td>
+<td>0.010/0.010</td>
+<td>2.592/2.624</td>
+<td>5.959/5.995</td>
+<td style="text-align:right">167.802</td>
+<td style="text-align:right">167.802</td>
+<td>0.409/0.428</td>
+</tr>
+</tbody>
+</table>
+<h3>Latent ABI</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera</th>
+<th>Mode</th>
+<th>Input shape/dtype</th>
+<th>Latent shape/dtype</th>
+<th style="text-align:right">C</th>
+<th style="text-align:right">Tokens/window</th>
+<th style="text-align:right">Tokens/input frame</th>
+<th style="text-align:right">Spatial ×</th>
+<th style="text-align:right">Temporal ×</th>
+<th style="text-align:right">View ×</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td><code>[1, 1, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">64.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td><code>[1, 1, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[1, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">256</td>
+<td style="text-align:right">256.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">1.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/four_frame</td>
+<td><code>[3, 2, 3, 4, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[3, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">768</td>
+<td style="text-align:right">192.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">4.0</td>
+<td style="text-align:right">2.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_0</td>
+<td><code>[3, 2, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[3, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">768</td>
+<td style="text-align:right">768.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">2.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_1</td>
+<td><code>[3, 2, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[3, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">768</td>
+<td style="text-align:right">768.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">2.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_2</td>
+<td><code>[3, 2, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[3, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">768</td>
+<td style="text-align:right">768.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">2.0</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_3</td>
+<td><code>[3, 2, 3, 1, 256, 256]</code> / <code>torch.float32</code></td>
+<td><code>[3, 48, 1, 16, 16]</code> / <code>torch.float32</code></td>
+<td style="text-align:right">48</td>
+<td style="text-align:right">768</td>
+<td style="text-align:right">768.000</td>
+<td style="text-align:right">256.0</td>
+<td style="text-align:right">1.0</td>
+<td style="text-align:right">2.0</td>
+</tr>
+</tbody>
+</table>
+</div></details>
+<details class='report-section exclusion-heavy'><summary><span>输出健康、失败与排除样本</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Eye</th>
+<th>Camera</th>
+<th>Mode</th>
+<th style="text-align:right">NaN</th>
+<th style="text-align:right">Inf</th>
+<th style="text-align:right">Invalid</th>
+<th style="text-align:right">Teacher-empty</th>
+<th>All raw min/max</th>
+<th>Valid raw min/max</th>
+<th>OOR pixels/valid pixels</th>
+<th style="text-align:right">OOR ratio</th>
+<th style="text-align:right">Valid RGB values</th>
+<th style="text-align:right">Valid teacher pixels</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.820450/64.991417</td>
+<td>-86.820450/64.991417</td>
+<td>560805/67108864</td>
+<td style="text-align:right">0.00835665</td>
+<td style="text-align:right">201326592</td>
+<td style="text-align:right">134217728</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.801605/43.214970</td>
+<td>-43.801605/43.214970</td>
+<td>124446/16777216</td>
+<td style="text-align:right">0.00741756</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.231117/43.153522</td>
+<td>-43.231117/43.153522</td>
+<td>125552/16777216</td>
+<td style="text-align:right">0.00748348</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.120827/42.352318</td>
+<td>-43.120827/42.352318</td>
+<td>125143/16777216</td>
+<td style="text-align:right">0.00745910</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-42.730122/42.281548</td>
+<td>-42.730122/42.281548</td>
+<td>125591/16777216</td>
+<td style="text-align:right">0.00748581</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.751846/64.710304</td>
+<td>-86.751846/64.710304</td>
+<td>834487/67108864</td>
+<td style="text-align:right">0.01243483</td>
+<td style="text-align:right">201326592</td>
+<td style="text-align:right">134217728</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-42.409969/41.637680</td>
+<td>-42.409969/41.637680</td>
+<td>158327/16777216</td>
+<td style="text-align:right">0.00943702</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.303570/42.714619</td>
+<td>-43.303570/42.714619</td>
+<td>158462/16777216</td>
+<td style="text-align:right">0.00944507</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.819431/42.882030</td>
+<td>-43.819431/42.882030</td>
+<td>152247/16777216</td>
+<td style="text-align:right">0.00907463</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>libero</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.608147/43.038261</td>
+<td>-43.608147/43.038261</td>
+<td>151452/16777216</td>
+<td style="text-align:right">0.00902724</td>
+<td style="text-align:right">50331648</td>
+<td style="text-align:right">33554432</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.883881/64.906387</td>
+<td>-86.883881/64.906387</td>
+<td>5919782/201326592</td>
+<td style="text-align:right">0.02940388</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.684895/42.646675</td>
+<td>-43.684895/42.646675</td>
+<td>1659040/50331648</td>
+<td style="text-align:right">0.03296216</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.574772/42.698967</td>
+<td>-43.574772/42.698967</td>
+<td>1666667/50331648</td>
+<td style="text-align:right">0.03311370</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.529404/42.345100</td>
+<td>-43.529404/42.345100</td>
+<td>1673913/50331648</td>
+<td style="text-align:right">0.03325766</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.372585/42.251106</td>
+<td>-43.372585/42.251106</td>
+<td>1669709/50331648</td>
+<td style="text-align:right">0.03317414</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-87.038551/64.910995</td>
+<td>-87.038551/64.910995</td>
+<td>5757904/201326592</td>
+<td style="text-align:right">0.02859982</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.360569/42.285198</td>
+<td>-43.360569/42.285198</td>
+<td>1589417/50331648</td>
+<td style="text-align:right">0.03157888</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.633308/42.619213</td>
+<td>-43.633308/42.619213</td>
+<td>1609601/50331648</td>
+<td style="text-align:right">0.03197990</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.901798/43.172749</td>
+<td>-43.901798/43.172749</td>
+<td>1605206/50331648</td>
+<td style="text-align:right">0.03189258</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_head_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.181591/41.940979</td>
+<td>-43.181591/41.940979</td>
+<td>1586176/50331648</td>
+<td style="text-align:right">0.03151449</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.879013/64.870895</td>
+<td>-86.879013/64.870895</td>
+<td>5311607/201326592</td>
+<td style="text-align:right">0.02638304</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.325211/42.297691</td>
+<td>-43.325211/42.297691</td>
+<td>1473911/50331648</td>
+<td style="text-align:right">0.02928398</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.512081/42.563568</td>
+<td>-43.512081/42.563568</td>
+<td>1478366/50331648</td>
+<td style="text-align:right">0.02937249</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.726734/42.706066</td>
+<td>-43.726734/42.706066</td>
+<td>1445436/50331648</td>
+<td style="text-align:right">0.02871823</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.090057/42.513237</td>
+<td>-43.090057/42.513237</td>
+<td>1450550/50331648</td>
+<td style="text-align:right">0.02881984</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.965309/64.919266</td>
+<td>-86.965309/64.919266</td>
+<td>5427401/201326592</td>
+<td style="text-align:right">0.02695819</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-42.930603/42.005245</td>
+<td>-42.930603/42.005245</td>
+<td>1492645/50331648</td>
+<td style="text-align:right">0.02965619</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.582115/42.737141</td>
+<td>-43.582115/42.737141</td>
+<td>1486408/50331648</td>
+<td style="text-align:right">0.02953227</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.439827/42.225487</td>
+<td>-43.439827/42.225487</td>
+<td>1477370/50331648</td>
+<td style="text-align:right">0.02935270</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_left_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.789352/43.133942</td>
+<td>-43.789352/43.133942</td>
+<td>1478331/50331648</td>
+<td style="text-align:right">0.02937180</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-86.966415/65.597237</td>
+<td>-86.966415/65.597237</td>
+<td>5168852/201326592</td>
+<td style="text-align:right">0.02567397</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-42.435051/41.628635</td>
+<td>-42.435051/41.628635</td>
+<td>1394113/50331648</td>
+<td style="text-align:right">0.02769854</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.987152/42.976295</td>
+<td>-43.987152/42.976295</td>
+<td>1393713/50331648</td>
+<td style="text-align:right">0.02769059</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-42.838943/41.799263</td>
+<td>-42.838943/41.799263</td>
+<td>1377866/50331648</td>
+<td style="text-align:right">0.02737574</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_left</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.514740/42.981125</td>
+<td>-43.514740/42.981125</td>
+<td>1370845/50331648</td>
+<td style="text-align:right">0.02723624</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-87.095703/65.580727</td>
+<td>-87.095703/65.580727</td>
+<td>5471321/201326592</td>
+<td style="text-align:right">0.02717635</td>
+<td style="text-align:right">603979776</td>
+<td style="text-align:right">402653184</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.638218/42.225807</td>
+<td>-43.638218/42.225807</td>
+<td>1442952/50331648</td>
+<td style="text-align:right">0.02866888</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.523060/42.563976</td>
+<td>-43.523060/42.563976</td>
+<td>1440508/50331648</td>
+<td style="text-align:right">0.02862032</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.418545/42.219936</td>
+<td>-43.418545/42.219936</td>
+<td>1457737/50331648</td>
+<td style="text-align:right">0.02896263</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>mono</td>
+<td>observation.images.cam_right_wrist_right</td>
+<td>mono/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td>-43.646072/42.825951</td>
+<td>-43.646072/42.825951</td>
+<td>1439387/50331648</td>
+<td style="text-align:right">0.02859805</td>
+<td style="text-align:right">150994944</td>
+<td style="text-align:right">100663296</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/four_frame</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">5</td>
+<td>-87.202667/65.159447</td>
+<td>-87.202667/65.159447</td>
+<td>14600687/603979776</td>
+<td style="text-align:right">0.02417413</td>
+<td style="text-align:right">1811939328</td>
+<td style="text-align:right">958746112</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">10</td>
+<td>-44.371330/43.335358</td>
+<td>-44.371330/43.335358</td>
+<td>3714039/150994944</td>
+<td style="text-align:right">0.02459711</td>
+<td style="text-align:right">452984832</td>
+<td style="text-align:right">239815028</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_1</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">13</td>
+<td>-44.454636/43.490757</td>
+<td>-44.454636/43.490757</td>
+<td>3725008/150994944</td>
+<td style="text-align:right">0.02466975</td>
+<td style="text-align:right">452984832</td>
+<td style="text-align:right">239916366</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_2</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">15</td>
+<td>-44.296494/43.421337</td>
+<td>-44.296494/43.421337</td>
+<td>3677438/150994944</td>
+<td style="text-align:right">0.02435471</td>
+<td style="text-align:right">452984832</td>
+<td style="text-align:right">239484785</td>
+</tr>
+<tr>
+<td>umi</td>
+<td>stereo</td>
+<td>three canonical pairs</td>
+<td>stereo/single_frame/source_3</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">0</td>
+<td style="text-align:right">13</td>
+<td>-44.784473/44.197182</td>
+<td>-44.784473/44.197182</td>
+<td>3702077/150994944</td>
+<td style="text-align:right">0.02451789</td>
+<td style="text-align:right">452984832</td>
+<td style="text-align:right">239529933</td>
+</tr>
+</tbody>
+</table>
+<p>Teacher-empty view/frame 不影响同一固定窗口的 RGB 指标；该 view 的 teacher-relative error 缺失，几何汇总的 valid-sample count 会相应减少。</p>
+<ul>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/four_frame, sample=umi:287772baf29dc722bdef7d29126df886:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/four_frame, sample=umi:af26783a68d1d4a4e17ae6148806fe96:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/four_frame, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/four_frame, sample=umi:e7205350a32022dbc4f3b103db63e599:2, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/four_frame, sample=umi:f54f6da3dbd8f015f98e94aa6004c3af:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:0f6af76e9db792b61c974753a7b97fa4:6, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:13e6224066dfa3c4b56be18531bdda6a:12, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:287772baf29dc722bdef7d29126df886:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:438e5d86513758438146be83a3889785:8, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:64e456085d2fdd337c3cbd5fcd98760f:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:af26783a68d1d4a4e17ae6148806fe96:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:e7205350a32022dbc4f3b103db63e599:2, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_0, sample=umi:f54f6da3dbd8f015f98e94aa6004c3af:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:2781342d156371b34f1cecc963f15fff:8, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:287772baf29dc722bdef7d29126df886:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:2c5040b9d650bfdaa02a12c86e0d5855:7, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:64e456085d2fdd337c3cbd5fcd98760f:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:6ef55cb9e3a061f447d8c0c373c55672:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:868dc9f0e05715cd0a2989385a3301e5:8, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:af26783a68d1d4a4e17ae6148806fe96:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:e7205350a32022dbc4f3b103db63e599:2, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:ef59b0d080fb3e9b5d5cc8b24544baea:12, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:f54f6da3dbd8f015f98e94aa6004c3af:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_1, sample=umi:ffc79c0a739e8ee6ee07de5ba7ee0aca:5, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:1e73c4a60530e18d75e07ef0516fb56e:7, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:287772baf29dc722bdef7d29126df886:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:64e456085d2fdd337c3cbd5fcd98760f:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:6ef55cb9e3a061f447d8c0c373c55672:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:75955c91cdcdb6894dca027b366d8f65:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:8445fa774321259fc93002fead8820e4:11, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:868dc9f0e05715cd0a2989385a3301e5:8, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:9bd16bd9afa9890686f2b9cd713bb495:8, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:9ca747dc894fe5a6af09c2ff16618103:5, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:af26783a68d1d4a4e17ae6148806fe96:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:b3af57c9e72ad60afd43969138a761a7:4, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:e7205350a32022dbc4f3b103db63e599:2, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:f54f6da3dbd8f015f98e94aa6004c3af:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_2, sample=umi:fdacd407615f0cd4182ad18b377e0c00:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:2781342d156371b34f1cecc963f15fff:8, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:287772baf29dc722bdef7d29126df886:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:4d8abd81af6c74150c4825429ee90788:4, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:6ef55cb9e3a061f447d8c0c373c55672:6, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:868dc9f0e05715cd0a2989385a3301e5:8, view=left_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:ae6cb93bc2f3b2d150cd931325f583c3:12, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:af26783a68d1d4a4e17ae6148806fe96:0, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:b3af57c9e72ad60afd43969138a761a7:4, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:e6aae8374d88c18178115896e1dce2b8:1, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:e7205350a32022dbc4f3b103db63e599:2, view=head, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:e7bf2a8e9d15550128fc0322b9dfffc0:6, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:f54f6da3dbd8f015f98e94aa6004c3af:9, view=right_wrist, reason=empty_teacher_mask</li>
+<li>teacher exclusion: dataset=umi, eye=stereo, camera=three canonical pairs, mode=stereo/single_frame/source_3, sample=umi:fdacd407615f0cd4182ad18b377e0c00:9, view=right_wrist, reason=empty_teacher_mask</li>
+</ul>
+<p>每个 selection 的 decode checked/rejected 与 rejected episode IDs SHA256 已记录在数据表；完整排除原因保存在 selection JSON。</p>
+<h3>固定案例</h3>
+<p>共 16 个固定窗口：UMI 8、LIBERO 8；每个窗口保存四个 source position 的原图/重建与几何图，<code>cases.json</code> 和每个 PNG 均已在报告生成时核验。</p>
+</div></details>
+<details class='report-section'><summary><span>几何口径</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><ul>
+<li>Mono：DA3 分别推理原图与重建图，报告 <code>reconstruction_teacher_relative_*</code>。</li>
+<li>Stereo：decoder 不重建右眼，报告 <code>depth_head_teacher_relative_*</code>；不称为 stereo 重建精度。</li>
+<li>没有独立真实 depth/disparity GT，因此本报告不声称真实几何 accuracy。</li>
+</ul>
+</div></details>
+<details class='report-section'><summary><span>阻断与未完成项</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><ul>
+<li>每个 selection 的 decode checked/rejected 与 rejected episode IDs SHA256 已记录；完整排除原因保存在 selection JSON。</li>
+<li>HY：BLOCKED，不进入任何 macro average；原因是 canonical Lance <code>index</code> 与 pinned loader 的物理 offset 合同冲突。</li>
+<li>rFID、RAFT warp/static flicker/motion consistency：Pending Stage A2。</li>
+<li>rFVD：N/A，现有冻结 I3D-FVD 实现不支持本项目原生 4 帧合同；扩帧/插帧会改变评测对象。</li>
+<li>FVMD：N/A，尚无经验证适用于原生 4 帧的冻结实现。</li>
+</ul>
+</div></details>
+<details class='report-section' open><summary><span>决策</span><span class='toggle-hint'>展开</span></summary><div class='section-body'><ol>
+<li><strong>值得继续，但需要补 A2 与 HY 修复。</strong> A1 可作为 preliminary baseline，不能表述成完整 Stage A。</li>
+<li><strong>最大风险：</strong> 当前几何指标只有 teacher-relative 证据；若误写为真实 depth/disparity accuracy，会得到错误结论。</li>
+<li><strong>最缺的关键证据：</strong> 独立真实几何 GT，以及 rFID/显式 warp-motion 指标；HY 的 identity/offset 合同也仍缺上游确认。</li>
+<li><strong>今天可执行的最小下一步：</strong> 固定同一批 16 个案例做人工异常审查，并为 A2 锁定 rFID 与 RAFT 的权重、预处理和版本。</li>
+<li><strong>置信度：80%（中等）。</strong> 对 A1 已报告数字和可复现合同置信度较高；因 HY、A2 与独立几何 GT 缺失，不给高置信度。</li>
+</ol>
+</div></details></section>
+<footer>Markdown SHA256: <code>a28c96528000ba457cbdd6cc79d052c0cfebf750e7253335190af6307ae71691</code><br>job-status SHA256: <code>dd6be88507934594214485feb5820f6300a1905c97d1185a802d820df7cb121e</code><br>source.patch SHA256: <code>2b639c4d2b3d8041cd497810408e8294d40a2a85346907d7d91a92d0572ae87a</code><br>Artifact: <code>/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a/20260903-stagec-update162500-baseline-a1-v5-rgb-domain</code></footer>
+</main>
+<script>
+(()=>{const root=document.getElementById("stage-a1-report");const sections=[...root.querySelectorAll("details.report-section")];root.querySelector('[data-action="expand"]').addEventListener("click",()=>sections.forEach(section=>{section.open=true}));root.querySelector('[data-action="collapse"]').addEventListener("click",()=>sections.forEach(section=>{section.open=false}))})();
+</script>
+</body>
+</html>

@@ -20,6 +20,7 @@ from evaluation.stage_a_manifest import _apportion_counts, assign_splits
 from evaluation.stage_a_metrics import (
     StageA1MetricSuite,
     _content_crop,
+    _rgb_overshoot_stats,
     _teacher_targets,
 )
 from evaluation.tokenizer_stage_a import (
@@ -246,15 +247,15 @@ class StageA1MetricTest(unittest.TestCase):
         )
         result = suite.finalize("mono/four_frame", ("cam_head_left",))
         macro = result["per_sample_macro"]
-        self.assertAlmostEqual(macro["rgb_l1"]["mean"], 0.1, places=6)
-        self.assertAlmostEqual(macro["rgb_mse"]["mean"], 0.01, places=6)
-        self.assertAlmostEqual(macro["temporal_delta_l1"]["mean"], 0.0, places=6)
+        self.assertAlmostEqual(macro["clamped_rgb_l1"]["mean"], 0.1, places=6)
+        self.assertAlmostEqual(macro["clamped_rgb_mse"]["mean"], 0.01, places=6)
+        self.assertAlmostEqual(macro["clamped_temporal_delta_l1"]["mean"], 0.0, places=6)
         for pair in ("pair_01", "pair_12", "pair_23"):
             self.assertAlmostEqual(
-                macro[f"temporal_delta_l1_{pair}"]["mean"], 0.0, places=6
+                macro[f"clamped_temporal_delta_l1_{pair}"]["mean"], 0.0, places=6
             )
             self.assertAlmostEqual(
-                macro[f"temporal_delta_lpips_{pair}"]["mean"], 0.0, places=6
+                macro[f"clamped_temporal_delta_lpips_{pair}"]["mean"], 0.0, places=6
             )
         self.assertEqual(result["output_health"]["nan_count"], 0)
         self.assertEqual(result["output_health"]["inf_count"], 0)
@@ -263,6 +264,154 @@ class StageA1MetricTest(unittest.TestCase):
             result["valid_rgb_values"], 2 * 1 * 3 * 4 * 12 * 16
         )
 
+
+    def test_rgb_v2_clamp_padding_overshoot_and_fail_closed_contracts(self):
+        class RecordingLPIPS(_DummyLPIPS):
+            def __init__(self):
+                super().__init__()
+                self.ranges = []
+
+            def forward(self, prediction, target):
+                self.ranges.append(
+                    (
+                        float(prediction.min()),
+                        float(prediction.max()),
+                        float(target.min()),
+                        float(target.max()),
+                    )
+                )
+                return super().forward(prediction, target)
+
+        target = torch.zeros(1, 1, 1, 3, 1, 16, 16)
+        prediction = torch.zeros(1, 1, 3, 1, 16, 16)
+        mask = torch.zeros(1, 1, 1, 1, 16, 16, dtype=torch.bool)
+        mask[..., 2:14, :] = True
+        prediction[:, :, :, :, 0, :] = 100.0
+        prediction[0, 0, 0, 0, 2, 0] = 0.75
+        prediction[0, 0, 2, 0, 2, 1] = -1.0
+        batch = {
+            "video": target,
+            "rgb_valid_mask": mask,
+            "sample_id": ["spike"],
+        }
+        output = SimpleNamespace(
+            rgb=prediction,
+            latent=torch.zeros(1, 1, 48, 1, 4, 4),
+            raw_relative_log_depth=torch.zeros(1, 1, 1, 1, 16, 16),
+        )
+        lpips = RecordingLPIPS()
+        suite = StageA1MetricSuite(relative_depth_epsilon=1e-6)
+        suite.update(
+            "mono/single_frame/source_0",
+            batch,
+            output,
+            ("head",),
+            lpips,
+        )
+        result = suite.finalize("mono/single_frame/source_0", ("head",))
+        metric = result["per_view"]["head"]
+        denominator = 3 * 12 * 16
+        self.assertAlmostEqual(metric["raw_rgb_l1"]["mean"], 1.75 / denominator)
+        self.assertAlmostEqual(metric["raw_rgb_mse"]["mean"], 1.5625 / denominator)
+        self.assertAlmostEqual(metric["clamped_rgb_l1"]["mean"], 1.0 / denominator)
+        self.assertAlmostEqual(metric["clamped_rgb_mse"]["mean"], 0.5 / denominator)
+        self.assertLessEqual(
+            metric["clamped_rgb_l1"]["mean"], metric["raw_rgb_l1"]["mean"]
+        )
+        self.assertLessEqual(
+            metric["clamped_rgb_mse"]["mean"], metric["raw_rgb_mse"]["mean"]
+        )
+        self.assertAlmostEqual(
+            metric["rgb_out_of_range_pixel_ratio"]["mean"], 2 / (12 * 16)
+        )
+        self.assertAlmostEqual(metric["rgb_overshoot_positive_p50"]["mean"], 0.375)
+        self.assertAlmostEqual(metric["rgb_overshoot_positive_p90"]["mean"], 0.475)
+        self.assertAlmostEqual(metric["rgb_overshoot_positive_p99"]["mean"], 0.4975)
+        self.assertAlmostEqual(metric["rgb_overshoot_positive_max"]["mean"], 0.5)
+        health = result["output_health"]
+        self.assertEqual(health["out_of_range_pixel_count"], 2)
+        self.assertEqual(health["valid_pixel_count"], 12 * 16)
+        self.assertEqual(health["valid_value_count"], denominator)
+        self.assertEqual(health["all_raw_max"], 100.0)
+        self.assertEqual(health["valid_raw_min"], -1.0)
+        self.assertEqual(health["valid_raw_max"], 0.75)
+        self.assertTrue(
+            all(-1.0 <= value <= 1.0 for bounds in lpips.ranges for value in bounds)
+        )
+
+        no_overshoot = _rgb_overshoot_stats(
+            torch.zeros(3, 1, 2, 2), torch.ones(1, 2, 2, dtype=torch.bool)
+        )
+        self.assertEqual(no_overshoot["rgb_out_of_range_pixels"], 0)
+        for name in (
+            "rgb_overshoot_positive_p50",
+            "rgb_overshoot_positive_p90",
+            "rgb_overshoot_positive_p99",
+            "rgb_overshoot_positive_max",
+        ):
+            self.assertEqual(no_overshoot[name], 0.0)
+
+        bad_target = dict(batch)
+        bad_target["video"] = target.clone()
+        bad_target["video"][0, 0, 0, 0, 0, 2, 0] = 0.6
+        with self.assertRaisesRegex(ValueError, "normalized"):
+            StageA1MetricSuite(relative_depth_epsilon=1e-6).update(
+                "mono/single_frame/source_0",
+                bad_target,
+                output,
+                ("head",),
+                _DummyLPIPS(),
+            )
+
+        nan_prediction = prediction.clone()
+        nan_prediction[0, 0, 0, 0, 0, 0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "NaN or Inf"):
+            StageA1MetricSuite(relative_depth_epsilon=1e-6).update(
+                "mono/single_frame/source_0",
+                batch,
+                SimpleNamespace(
+                    rgb=nan_prediction,
+                    latent=output.latent,
+                    raw_relative_log_depth=output.raw_relative_log_depth,
+                ),
+                ("head",),
+                _DummyLPIPS(),
+            )
+
+    def test_temporal_delta_uses_clamped_frames(self):
+        target = torch.zeros(1, 1, 1, 3, 4, 16, 16)
+        prediction = torch.zeros(1, 1, 3, 4, 16, 16)
+        prediction[:, :, :, 1] = 2.0
+        prediction[:, :, :, 2] = -2.0
+        mask = torch.ones(1, 1, 1, 4, 16, 16, dtype=torch.bool)
+        suite = StageA1MetricSuite(relative_depth_epsilon=1e-6)
+        suite.update(
+            "mono/four_frame",
+            {
+                "video": target,
+                "rgb_valid_mask": mask,
+                "sample_id": ["temporal"],
+            },
+            SimpleNamespace(
+                rgb=prediction,
+                latent=torch.zeros(1, 1, 48, 1, 4, 4),
+                raw_relative_log_depth=torch.zeros(1, 1, 1, 4, 16, 16),
+            ),
+            ("head",),
+            _DummyLPIPS(),
+        )
+        metric = suite.finalize("mono/four_frame", ("head",))["per_view"]["head"]
+        self.assertAlmostEqual(metric["clamped_temporal_delta_l1"]["mean"], 2 / 3)
+        self.assertAlmostEqual(
+            metric["clamped_temporal_delta_l1_pair_01"]["mean"], 0.5
+        )
+        self.assertAlmostEqual(
+            metric["clamped_temporal_delta_l1_pair_12"]["mean"], 1.0
+        )
+        self.assertAlmostEqual(
+            metric["clamped_temporal_delta_l1_pair_23"]["mean"], 0.5
+        )
+        self.assertNotIn("temporal_delta_l1", metric)
 
     def test_empty_teacher_view_is_recorded_without_dropping_rgb_sample(self):
         batch_size, views, frames, height, width = 2, 2, 1, 16, 16
@@ -382,43 +531,50 @@ class StageA1MetricTest(unittest.TestCase):
         def digest(path):
             return hashlib.sha256(path.read_bytes()).hexdigest()
 
-        def summary(value=0.1):
+        def summary(value=0.1, count=1):
             return {
-                "count": 1,
+                "count": count,
                 "mean": value,
                 "p50": value,
                 "p90": value,
                 "p99": value,
             }
 
-        def mode(eye_mode, four_frame, view_name):
+        def mode(eye_mode, four_frame, view_name, count):
             geometry = (
                 "reconstruction_teacher" if eye_mode == "mono"
                 else "depth_head_teacher"
             )
             metrics = {
-                "rgb_l1": summary(),
-                "rgb_mse": summary(0.01),
-                "psnr_db": summary(20.0),
-                "ssim": summary(0.8),
-                "lpips": summary(0.2),
-                "rgb_valid_ratio": summary(1.0),
-                f"{geometry}_relative_log_l1": summary(0.3),
-                f"{geometry}_relative_log_rmse": summary(0.4),
-                f"{geometry}_relative_log_silog": summary(0.2),
-                f"{geometry}_valid_ratio": summary(0.9),
+                "raw_rgb_l1": summary(0.12, count),
+                "raw_rgb_mse": summary(0.02, count),
+                "clamped_rgb_l1": summary(0.1, count),
+                "clamped_rgb_mse": summary(0.01, count),
+                "clamped_psnr_db": summary(20.0, count),
+                "clamped_ssim": summary(0.8, count),
+                "clamped_lpips": summary(0.2, count),
+                "rgb_valid_ratio": summary(1.0, count),
+                "rgb_out_of_range_pixel_ratio": summary(0.0, count),
+                "rgb_overshoot_positive_p50": summary(0.0, count),
+                "rgb_overshoot_positive_p90": summary(0.0, count),
+                "rgb_overshoot_positive_p99": summary(0.0, count),
+                "rgb_overshoot_positive_max": summary(0.0, count),
+                f"{geometry}_relative_log_l1": summary(0.3, count),
+                f"{geometry}_relative_log_rmse": summary(0.4, count),
+                f"{geometry}_relative_log_silog": summary(0.2, count),
+                f"{geometry}_valid_ratio": summary(0.9, count),
             }
             if four_frame:
-                metrics["temporal_delta_l1"] = summary(0.05)
-                metrics["temporal_delta_lpips"] = summary(0.06)
+                metrics["clamped_temporal_delta_l1"] = summary(0.05, count)
+                metrics["clamped_temporal_delta_lpips"] = summary(0.06, count)
                 for pair in ("pair_01", "pair_12", "pair_23"):
-                    metrics[f"temporal_delta_l1_{pair}"] = summary(0.05)
-                    metrics[f"temporal_delta_lpips_{pair}"] = summary(0.06)
+                    metrics[f"clamped_temporal_delta_l1_{pair}"] = summary(0.05, count)
+                    metrics[f"clamped_temporal_delta_lpips_{pair}"] = summary(0.06, count)
             return {
                 "sample_count": 1,
                 "per_view": {view_name: metrics},
                 "per_sample_macro": metrics,
-                "valid_rgb_values": 100,
+                "valid_rgb_values": 300,
                 "valid_teacher_pixels": 90,
                 "teacher_invalid_count": 0,
                 "teacher_invalid_samples": [],
@@ -427,9 +583,15 @@ class StageA1MetricTest(unittest.TestCase):
                     "inf_count": 0,
                     "invalid_sample_count": 0,
                     "invalid_sample_ids": [],
-                    "raw_min": -0.5,
-                    "raw_max": 0.5,
-                    "abs_gt_one_ratio": 0.0,
+                    "all_value_count": 300,
+                    "all_raw_min": -0.5,
+                    "all_raw_max": 0.5,
+                    "valid_value_count": 300,
+                    "valid_raw_min": -0.5,
+                    "valid_raw_max": 0.5,
+                    "valid_pixel_count": 100,
+                    "out_of_range_pixel_count": 0,
+                    "out_of_range_pixel_ratio": 0.0,
                 },
                 "latent_abi": {
                     "input_shape_without_batch": [1, 1, 3, 4, 256, 256],
@@ -512,12 +674,12 @@ class StageA1MetricTest(unittest.TestCase):
                 view_name = camera or "head_pair"
                 modes = {
                     f"{eye_mode}/single_frame/source_{source}": mode(
-                        eye_mode, False, view_name
+                        eye_mode, False, view_name, count
                     )
                     for source in range(4)
                 }
                 modes[f"{eye_mode}/four_frame"] = mode(
-                    eye_mode, True, view_name
+                    eye_mode, True, view_name, count
                 )
                 for value in modes.values():
                     value["sample_count"] = count
@@ -551,7 +713,7 @@ class StageA1MetricTest(unittest.TestCase):
                     )
                     resolved_args["visualization_dir"] = str(visual_dir)
                 payload = {
-                    "schema": "stereo-tokenizer-stage-a1-result-v1",
+                    "schema": "stereo-tokenizer-stage-a1-result-v2",
                     "status": "formal",
                     "posterior": "mean",
                     "quality_precision": "fp32",
@@ -688,6 +850,34 @@ class StageA1MetricTest(unittest.TestCase):
             self.assertIn("depth_head_teacher", rendered)
             self.assertIn("HY：BLOCKED", rendered)
             self.assertIn("置信度：80%", rendered)
+            self.assertIn("Clamp-domain RGB 图像质量", rendered)
+            self.assertNotIn("| abs(output)>1 |", rendered)
+
+            legacy_path = quality_dir / "quality-0.json"
+            legacy = json.loads(legacy_path.read_text())
+            legacy["schema"] = "stereo-tokenizer-stage-a1-result-v1"
+            legacy_path.write_text(json.dumps(legacy))
+            for job in jobs:
+                if job["artifact"] == str(legacy_path.relative_to(root)):
+                    job["sha256"] = digest(legacy_path)
+            (root / "job-status.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "stereo-tokenizer-stage-a1-job-status-v1",
+                        "jobs": jobs,
+                    }
+                )
+            )
+            output.unlink()
+            with mock.patch(
+                "evaluation.tokenizer_stage_a.VGG16_CHECKPOINT_SHA256",
+                digest(metric_backbone),
+            ):
+                with self.assertRaisesRegex(ValueError, "quality result schema mismatch"):
+                    _report_command(
+                        ["--artifact-root", str(root), "--output", str(output)]
+                    )
+            self.assertFalse(output.exists())
 
     def test_content_crop_rejects_non_rectangular_mask(self):
         target = torch.zeros(3, 1, 16, 16)

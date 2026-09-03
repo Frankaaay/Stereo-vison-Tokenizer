@@ -612,7 +612,7 @@ def _run_command(argv: list[str]) -> None:
         args, dataset, teacher, model, specs, device
     )
     result = {
-        "schema": "stereo-tokenizer-stage-a1-result-v1",
+        "schema": "stereo-tokenizer-stage-a1-result-v2",
         "status": "smoke" if args.max_batches is not None else "formal",
         "posterior": "mean",
         "quality_precision": "fp32",
@@ -863,6 +863,76 @@ def _report_command(argv: list[str]) -> None:
             raise ValueError(f"{label} VGG16 path is missing")
         return backbone
 
+    def require_summary(container, name, expected_count, label):
+        summary = container.get(name)
+        if not isinstance(summary, dict):
+            raise ValueError(f"{label} is missing metric {name}")
+        if int(summary.get("count", -1)) != expected_count:
+            raise ValueError(f"{label}/{name} sample count mismatch")
+        for field in ("mean", "p50", "p90", "p99"):
+            value = summary.get(field)
+            if not isinstance(value, (int, float)) or not np.isfinite(value):
+                raise ValueError(f"{label}/{name}/{field} must be finite")
+        if not summary["p50"] <= summary["p90"] <= summary["p99"]:
+            raise ValueError(f"{label}/{name} percentiles are not monotonic")
+        return summary
+
+    def require_rgb_v2_metrics(container, expected_count, *, four_frame, label):
+        required = (
+            "raw_rgb_l1",
+            "raw_rgb_mse",
+            "clamped_rgb_l1",
+            "clamped_rgb_mse",
+            "clamped_psnr_db",
+            "clamped_ssim",
+            "clamped_lpips",
+            "rgb_valid_ratio",
+            "rgb_out_of_range_pixel_ratio",
+            "rgb_overshoot_positive_p50",
+            "rgb_overshoot_positive_p90",
+            "rgb_overshoot_positive_p99",
+            "rgb_overshoot_positive_max",
+        )
+        summaries = {
+            name: require_summary(container, name, expected_count, label)
+            for name in required
+        }
+        for field in ("mean", "p50", "p90", "p99"):
+            if summaries["clamped_rgb_l1"][field] > summaries["raw_rgb_l1"][field] + 1e-8:
+                raise ValueError(f"{label}: clamped L1 exceeds raw L1")
+            if summaries["clamped_rgb_mse"][field] > summaries["raw_rgb_mse"][field] + 1e-8:
+                raise ValueError(f"{label}: clamped MSE exceeds raw MSE")
+            ratio = summaries["rgb_out_of_range_pixel_ratio"][field]
+            if not 0.0 <= ratio <= 1.0:
+                raise ValueError(f"{label}: out-of-range ratio is outside [0,1]")
+            if not (
+                summaries["rgb_overshoot_positive_p50"][field]
+                <= summaries["rgb_overshoot_positive_p90"][field]
+                <= summaries["rgb_overshoot_positive_p99"][field]
+                <= summaries["rgb_overshoot_positive_max"][field]
+            ):
+                raise ValueError(f"{label}: overshoot summaries are not monotonic")
+        legacy = {
+            "rgb_l1", "rgb_mse", "psnr_db", "ssim", "lpips",
+            "temporal_delta_l1", "temporal_delta_lpips",
+        }
+        if legacy.intersection(container) or any(
+            name.startswith("temporal_delta_") for name in container
+        ):
+            raise ValueError(f"{label}: legacy or mixed-domain metrics are present")
+        if four_frame:
+            for name in (
+                "clamped_temporal_delta_l1",
+                "clamped_temporal_delta_lpips",
+                "clamped_temporal_delta_l1_pair_01",
+                "clamped_temporal_delta_lpips_pair_01",
+                "clamped_temporal_delta_l1_pair_12",
+                "clamped_temporal_delta_lpips_pair_12",
+                "clamped_temporal_delta_l1_pair_23",
+                "clamped_temporal_delta_lpips_pair_23",
+            ):
+                require_summary(container, name, expected_count, label)
+
     status_path = root / "job-status.json"
     if not status_path.is_file():
         raise FileNotFoundError("A1 report requires job-status.json")
@@ -911,7 +981,7 @@ def _report_command(argv: list[str]) -> None:
     environment_fingerprints = set()
     selection_rows = {}
     for result in quality:
-        if result.get("schema") != "stereo-tokenizer-stage-a1-result-v1":
+        if result.get("schema") != "stereo-tokenizer-stage-a1-result-v2":
             raise ValueError("quality result schema mismatch")
         dataset = result["dataset"]
         key = (dataset["dataset_id"], dataset["eye_mode"], dataset["camera_key"])
@@ -1010,7 +1080,7 @@ def _report_command(argv: list[str]) -> None:
             raise ValueError(f"Tokenizer freeze/parameter provenance mismatch for {key}")
         if set(result.get("metrics", {})) != expected_modes:
             raise ValueError(f"metric mode coverage mismatch for {key}")
-        for mode in result["metrics"].values():
+        for mode_id, mode in result["metrics"].items():
             if mode["sample_count"] != expected_count:
                 raise ValueError(f"metric sample count mismatch for {key}")
             if int(mode.get("valid_rgb_values", 0)) <= 0 or int(mode.get("valid_teacher_pixels", 0)) <= 0:
@@ -1023,6 +1093,51 @@ def _report_command(argv: list[str]) -> None:
                 or health.get("invalid_sample_ids")
             ):
                 raise ValueError(f"invalid output in {key}")
+            expected_health = {
+                "all_value_count",
+                "all_raw_min",
+                "all_raw_max",
+                "valid_value_count",
+                "valid_raw_min",
+                "valid_raw_max",
+                "valid_pixel_count",
+                "out_of_range_pixel_count",
+                "out_of_range_pixel_ratio",
+            }
+            if not expected_health.issubset(health):
+                raise ValueError(f"RGB v2 output health is incomplete for {key}")
+            if {"value_count", "raw_min", "raw_max", "abs_gt_one_count", "abs_gt_one_ratio"}.intersection(health):
+                raise ValueError(f"legacy output health is present for {key}")
+            for name in ("all_raw_min", "all_raw_max", "valid_raw_min", "valid_raw_max", "out_of_range_pixel_ratio"):
+                if not np.isfinite(health[name]):
+                    raise ValueError(f"non-finite output health field {name} for {key}")
+            if (
+                int(health["all_value_count"]) <= 0
+                or int(health["valid_value_count"]) != int(mode["valid_rgb_values"])
+                or int(health["valid_pixel_count"]) * 3 != int(health["valid_value_count"])
+                or not 0 <= int(health["out_of_range_pixel_count"]) <= int(health["valid_pixel_count"])
+                or not 0.0 <= float(health["out_of_range_pixel_ratio"]) <= 1.0
+                or abs(
+                    float(health["out_of_range_pixel_ratio"])
+                    - int(health["out_of_range_pixel_count"]) / int(health["valid_pixel_count"])
+                ) > 1e-12
+                or float(health["all_raw_min"]) > float(health["all_raw_max"])
+                or float(health["valid_raw_min"]) > float(health["valid_raw_max"])
+            ):
+                raise ValueError(f"RGB v2 output health contract mismatch for {key}")
+            for view_name, view_metrics in mode.get("per_view", {}).items():
+                require_rgb_v2_metrics(
+                    view_metrics,
+                    expected_count,
+                    four_frame=mode_id.endswith("/four_frame"),
+                    label=f"{key}/{mode_id}/{view_name}",
+                )
+            require_rgb_v2_metrics(
+                mode.get("per_sample_macro", {}),
+                expected_count,
+                four_frame=mode_id.endswith("/four_frame"),
+                label=f"{key}/{mode_id}/macro",
+            )
             teacher_invalid = mode.get("teacher_invalid_samples", [])
             if int(mode.get("teacher_invalid_count", -1)) != len(teacher_invalid):
                 raise ValueError(f"teacher-invalid count mismatch for {key}")
@@ -1148,7 +1263,9 @@ def _report_command(argv: list[str]) -> None:
     lines = [
         "# Stereo Tokenizer Stage A1 Baseline（Preliminary）",
         "",
-        "> 状态：PRELIMINARY。HY 因 canonical Lance index/loader 合同冲突被阻断；rFID 与 RAFT 指标留待 A2。",
+        "> 状态：PRELIMINARY。v5 修正 RGB 指标域并 supersede v4 的 RGB 结论；HY 因 canonical Lance index/loader 合同冲突被阻断；rFID 与 RAFT 指标留待 A2。",
+        "",
+        "> v4 失效原因：raw L1/MSE/PSNR/LPIPS 与 clamp 后 SSIM 不在同一图像域，且旧越界阈值 abs(output)>1 与合法域 [-0.5,0.5] 不一致。v4 artifact 仅保留作审计。",
         "",
         "## 实验合同与 provenance",
         "",
@@ -1201,7 +1318,9 @@ def _report_command(argv: list[str]) -> None:
     lines.append("| HY | mono | N/A | 0 | BLOCKED | no |")
     lines.extend([
         "",
-        "## RGB 重建（per camera/view）",
+        "## Clamp-domain RGB 图像质量（per camera/view）",
+        "",
+        "下表所有 L1/MSE/PSNR/SSIM/LPIPS 都使用 `prediction.clamp(-0.5, 0.5)`；PSNR data_range=1.0。",
         "",
         "| Dataset | Eye | Camera/view | Mode | L1 mean | P50 | P90 | P99 | MSE | PSNR | SSIM | LPIPS | RGB mask |",
         "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -1214,15 +1333,15 @@ def _report_command(argv: list[str]) -> None:
             for view_name, metric in mode["per_view"].items():
                 lines.append(
                     f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | {mode_id} | "
-                    f"{metric['rgb_l1']['mean']:.6f} | {metric['rgb_l1']['p50']:.6f} | "
-                    f"{metric['rgb_l1']['p90']:.6f} | {metric['rgb_l1']['p99']:.6f} | "
-                    f"{metric['rgb_mse']['mean']:.6f} | {metric['psnr_db']['mean']:.3f} | "
-                    f"{metric['ssim']['mean']:.6f} | {metric['lpips']['mean']:.6f} | "
+                    f"{metric['clamped_rgb_l1']['mean']:.6f} | {metric['clamped_rgb_l1']['p50']:.6f} | "
+                    f"{metric['clamped_rgb_l1']['p90']:.6f} | {metric['clamped_rgb_l1']['p99']:.6f} | "
+                    f"{metric['clamped_rgb_mse']['mean']:.6f} | {metric['clamped_psnr_db']['mean']:.3f} | "
+                    f"{metric['clamped_ssim']['mean']:.6f} | {metric['clamped_lpips']['mean']:.6f} | "
                     f"{metric['rgb_valid_ratio']['mean']:.6f} |"
                 )
     lines.extend([
         "",
-        "### Dataset/eye/mode 等权 macro",
+        "### Dataset/eye/mode 等权 macro（clamp-domain）",
         "",
         "| Dataset | Eye | Mode | RGB L1 | MSE | PSNR | SSIM | LPIPS |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
@@ -1236,16 +1355,75 @@ def _report_command(argv: list[str]) -> None:
     for key, cells in sorted(macro_cells.items()):
         means = {
             name: float(np.mean([cell[name]["mean"] for cell in cells]))
-            for name in ("rgb_l1", "rgb_mse", "psnr_db", "ssim", "lpips")
+            for name in (
+                "clamped_rgb_l1",
+                "clamped_rgb_mse",
+                "clamped_psnr_db",
+                "clamped_ssim",
+                "clamped_lpips",
+            )
         }
         lines.append(
-            f"| {key[0]} | {key[1]} | {key[2]} | {means['rgb_l1']:.6f} | "
-            f"{means['rgb_mse']:.6f} | {means['psnr_db']:.3f} | "
-            f"{means['ssim']:.6f} | {means['lpips']:.6f} |"
+            f"| {key[0]} | {key[1]} | {key[2]} | {means['clamped_rgb_l1']:.6f} | "
+            f"{means['clamped_rgb_mse']:.6f} | {means['clamped_psnr_db']:.3f} | "
+            f"{means['clamped_ssim']:.6f} | {means['clamped_lpips']:.6f} |"
         )
     lines.extend([
         "",
-        "## Four-frame 时间一致性",
+        "## Raw RGB 数值稳定性诊断",
+        "",
+        "Raw L1/MSE 只用于诊断 decoder 数值稳定性，不作为正式图像质量结论。",
+        "",
+        "| Dataset | Eye | Camera/view | Mode | Raw L1 mean/P50/P90/P99 | Raw MSE mean/P50/P90/P99 |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            for view_name, metric in mode["per_view"].items():
+                l1 = metric["raw_rgb_l1"]
+                mse = metric["raw_rgb_mse"]
+                lines.append(
+                    f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | {mode_id} | "
+                    f"{l1['mean']:.6f}/{l1['p50']:.6f}/{l1['p90']:.6f}/{l1['p99']:.6f} | "
+                    f"{mse['mean']:.6f}/{mse['p50']:.6f}/{mse['p90']:.6f}/{mse['p99']:.6f} |"
+                )
+    lines.extend([
+        "",
+        "## RGB 越界与 overshoot 诊断",
+        "",
+        "越界像素定义为 valid 时空像素中任一 RGB channel 超出 [-0.5,0.5]。每个 sample/view 先对正 overshoot `max_channel(relu(abs(output)-0.5))` 的全部越界像素精确求 P50/P90/P99/max，再汇总样本分布；不是全局近似分位数。无越界样本的 positive count 和这些统计均为 0。",
+        "",
+        "| Dataset | Eye | Camera/view | Mode | OOR ratio mean/P50/P90/P99 | sample P50 mean/P50/P90/P99 | sample P90 mean/P50/P90/P99 | sample P99 mean/P50/P90/P99 | sample max mean/P50/P90/P99 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        for mode_id, mode in result["metrics"].items():
+            for view_name, metric in mode["per_view"].items():
+                def render_summary(name):
+                    value = metric[name]
+                    return (
+                        f"{value['mean']:.8f}/{value['p50']:.8f}/"
+                        f"{value['p90']:.8f}/{value['p99']:.8f}"
+                    )
+                lines.append(
+                    f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | {mode_id} | "
+                    f"{render_summary('rgb_out_of_range_pixel_ratio')} | "
+                    f"{render_summary('rgb_overshoot_positive_p50')} | "
+                    f"{render_summary('rgb_overshoot_positive_p90')} | "
+                    f"{render_summary('rgb_overshoot_positive_p99')} | "
+                    f"{render_summary('rgb_overshoot_positive_max')} |"
+                )
+    lines.extend([
+        "",
+        "## Four-frame 时间一致性（clamp-domain）",
+        "",
+        "先逐帧 clamp 到 [-0.5,0.5]，再计算相邻帧 temporal delta。",
         "",
         "| Dataset | Eye | Camera/view | Δ L1 | Δ LPIPS | Δ01 L1/LPIPS | Δ12 L1/LPIPS | Δ23 L1/LPIPS |",
         "| --- | --- | --- | ---: | ---: | --- | --- | --- |",
@@ -1259,13 +1437,13 @@ def _report_command(argv: list[str]) -> None:
             pairs = []
             for pair in ("pair_01", "pair_12", "pair_23"):
                 pairs.append(
-                    f"{metric['temporal_delta_l1_' + pair]['mean']:.6f}/"
-                    f"{metric['temporal_delta_lpips_' + pair]['mean']:.6f}"
+                    f"{metric['clamped_temporal_delta_l1_' + pair]['mean']:.6f}/"
+                    f"{metric['clamped_temporal_delta_lpips_' + pair]['mean']:.6f}"
                 )
             lines.append(
                 f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | "
-                f"{metric['temporal_delta_l1']['mean']:.6f} | "
-                f"{metric['temporal_delta_lpips']['mean']:.6f} | "
+                f"{metric['clamped_temporal_delta_l1']['mean']:.6f} | "
+                f"{metric['clamped_temporal_delta_lpips']['mean']:.6f} | "
                 f"{pairs[0]} | {pairs[1]} | {pairs[2]} |"
             )
     lines.extend([
@@ -1342,8 +1520,8 @@ def _report_command(argv: list[str]) -> None:
         "",
         "## 输出健康、失败与排除样本",
         "",
-        "| Dataset | Eye | Camera | Mode | NaN | Inf | Invalid outputs | Teacher-empty views | Raw min/max | abs(output)>1 | Valid RGB values | Valid teacher pixels |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
+        "| Dataset | Eye | Camera | Mode | NaN | Inf | Invalid | Teacher-empty | All raw min/max | Valid raw min/max | OOR pixels/valid pixels | OOR ratio | Valid RGB values | Valid teacher pixels |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: |",
     ])
     teacher_exclusions = []
     for result in sorted(quality, key=lambda value: (
@@ -1356,10 +1534,11 @@ def _report_command(argv: list[str]) -> None:
                 f"| {dataset['dataset_id']} | {dataset['eye_mode']} | "
                 f"{dataset['camera_key'] or 'three canonical pairs'} | {mode_id} | "
                 f"{health['nan_count']} | {health['inf_count']} | "
-                f"{health['invalid_sample_count']} | "
-                f"{mode['teacher_invalid_count']} | "
-                f"{health['raw_min']:.6f}/{health['raw_max']:.6f} | "
-                f"{health['abs_gt_one_ratio']:.8f} | {mode['valid_rgb_values']} | "
+                f"{health['invalid_sample_count']} | {mode['teacher_invalid_count']} | "
+                f"{health['all_raw_min']:.6f}/{health['all_raw_max']:.6f} | "
+                f"{health['valid_raw_min']:.6f}/{health['valid_raw_max']:.6f} | "
+                f"{health['out_of_range_pixel_count']}/{health['valid_pixel_count']} | "
+                f"{health['out_of_range_pixel_ratio']:.8f} | {mode['valid_rgb_values']} | "
                 f"{mode['valid_teacher_pixels']} |"
             )
             teacher_exclusions.extend(

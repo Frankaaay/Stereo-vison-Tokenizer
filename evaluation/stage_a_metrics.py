@@ -17,6 +17,8 @@ from stereo_tokenizer.modules.relative_depth import (
 
 
 PERCENTILES = (0.50, 0.90, 0.99)
+RGB_MIN = -0.5
+RGB_MAX = 0.5
 
 
 def _summary(values: list[float]) -> dict[str, float | int]:
@@ -74,6 +76,43 @@ def _ssim_mean(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return float(value.item())
 
 
+
+def _rgb_overshoot_stats(
+    prediction: torch.Tensor, mask: torch.Tensor
+) -> dict[str, float | int]:
+    """Return exact per-sample/view overshoot statistics on valid RGB pixels."""
+
+    if prediction.ndim != 4 or prediction.shape[0] != 3:
+        raise ValueError("RGB prediction must use [3,T,H,W]")
+    if mask.dtype != torch.bool or tuple(mask.shape) != tuple(prediction.shape[1:]):
+        raise ValueError("RGB overshoot mask must use bool [T,H,W]")
+    valid_pixels = int(mask.sum().item())
+    if valid_pixels == 0:
+        raise ValueError("RGB overshoot mask is empty")
+    pixel_overshoot = (prediction.abs() - RGB_MAX).clamp_min(0).amax(dim=0)
+    valid_overshoot = pixel_overshoot.masked_select(mask)
+    positive = valid_overshoot[valid_overshoot > 0]
+    out_of_range_pixels = int(positive.numel())
+    if out_of_range_pixels:
+        quantiles = torch.quantile(
+            positive.float(),
+            torch.tensor((0.5, 0.9, 0.99), device=positive.device),
+        )
+        p50, p90, p99 = (float(value.item()) for value in quantiles)
+        maximum = float(positive.max().item())
+    else:
+        p50 = p90 = p99 = maximum = 0.0
+    return {
+        "rgb_valid_pixels": valid_pixels,
+        "rgb_out_of_range_pixels": out_of_range_pixels,
+        "rgb_out_of_range_pixel_ratio": out_of_range_pixels / valid_pixels,
+        "rgb_overshoot_positive_pixels": out_of_range_pixels,
+        "rgb_overshoot_positive_p50": p50,
+        "rgb_overshoot_positive_p90": p90,
+        "rgb_overshoot_positive_p99": p99,
+        "rgb_overshoot_positive_max": maximum,
+    }
+
 def _teacher_targets(batch: dict[str, Any], epsilon: float):
     valid = batch.get("valid_mask")
     if valid is None:
@@ -115,10 +154,14 @@ class StageA1MetricSuite:
             lambda: {
                 "nan_count": 0,
                 "inf_count": 0,
-                "value_count": 0,
-                "abs_gt_one_count": 0,
-                "raw_min": float("inf"),
-                "raw_max": float("-inf"),
+                "all_value_count": 0,
+                "all_raw_min": float("inf"),
+                "all_raw_max": float("-inf"),
+                "valid_value_count": 0,
+                "valid_raw_min": float("inf"),
+                "valid_raw_max": float("-inf"),
+                "valid_pixel_count": 0,
+                "out_of_range_pixel_count": 0,
                 "invalid_sample_count": 0,
                 "invalid_sample_ids": [],
             }
@@ -155,8 +198,7 @@ class StageA1MetricSuite:
         health = self.health[mode_id]
         health["nan_count"] += int(torch.isnan(prediction).sum().item())
         health["inf_count"] += int(torch.isinf(prediction).sum().item())
-        health["value_count"] += prediction.numel()
-        health["abs_gt_one_count"] += int((prediction.abs() > 1).sum().item())
+        health["all_value_count"] += prediction.numel()
         finite = torch.isfinite(prediction)
         finite_by_sample = finite.flatten(1).all(dim=1)
         invalid_indices = torch.nonzero(~finite_by_sample, as_tuple=False).flatten()
@@ -165,14 +207,33 @@ class StageA1MetricSuite:
             sample_ids[int(index)] for index in invalid_indices.tolist()
         )
         if finite.any():
-            health["raw_min"] = min(
-                health["raw_min"], float(prediction[finite].min().item())
+            health["all_raw_min"] = min(
+                health["all_raw_min"], float(prediction[finite].min().item())
             )
-            health["raw_max"] = max(
-                health["raw_max"], float(prediction[finite].max().item())
+            health["all_raw_max"] = max(
+                health["all_raw_max"], float(prediction[finite].max().item())
             )
         if not finite.all():
             raise ValueError(f"{mode_id}: reconstruction contains NaN or Inf")
+        expanded_mask = mask.expand_as(target)
+        valid_target = target.masked_select(expanded_mask)
+        if (
+            not torch.isfinite(valid_target).all()
+            or torch.any(valid_target < RGB_MIN)
+            or torch.any(valid_target > RGB_MAX)
+        ):
+            raise ValueError(
+                f"{mode_id}: valid RGB target must be finite and normalized to "
+                f"[{RGB_MIN},{RGB_MAX}]"
+            )
+        valid_prediction = prediction.masked_select(expanded_mask)
+        health["valid_value_count"] += int(valid_prediction.numel())
+        health["valid_raw_min"] = min(
+            health["valid_raw_min"], float(valid_prediction.min().item())
+        )
+        health["valid_raw_max"] = max(
+            health["valid_raw_max"], float(valid_prediction.max().item())
+        )
 
         teacher_target, reconstruction_teacher, teacher_kind = _teacher_targets(
             batch, self.relative_depth_epsilon
@@ -188,39 +249,62 @@ class StageA1MetricSuite:
             for view_index, view_name in enumerate(view_names):
                 target_view = target[batch_index, view_index]
                 prediction_view = prediction[batch_index, view_index]
+                clamped_prediction_view = prediction_view.clamp(RGB_MIN, RGB_MAX)
                 mask_view = mask[batch_index, view_index, 0]
                 expanded = mask_view.unsqueeze(0).expand_as(target_view)
-                error = prediction_view - target_view
+                raw_error = prediction_view - target_view
+                clamped_error = clamped_prediction_view - target_view
                 valid_count = int(expanded.sum().item())
                 if valid_count == 0:
                     raise ValueError(f"{mode_id}/{view_name}: empty RGB mask")
-                mse = error.square().masked_select(expanded).mean()
-                target_crop, prediction_crop = _content_crop(
-                    target_view, prediction_view, mask_view
+                raw_mse = raw_error.square().masked_select(expanded).mean()
+                clamped_mse = clamped_error.square().masked_select(expanded).mean()
+                target_crop, clamped_prediction_crop = _content_crop(
+                    target_view, clamped_prediction_view, mask_view
                 )
                 values = {
-                    "rgb_l1": float(
-                        error.abs().masked_select(expanded).mean().item()
+                    "raw_rgb_l1": float(
+                        raw_error.abs().masked_select(expanded).mean().item()
                     ),
-                    "rgb_mse": float(mse.item()),
-                    "psnr_db": float(
-                        (-10.0 * torch.log10(mse.clamp_min(1e-12))).item()
+                    "raw_rgb_mse": float(raw_mse.item()),
+                    "clamped_rgb_l1": float(
+                        clamped_error.abs().masked_select(expanded).mean().item()
                     ),
-                    "ssim": _ssim_mean(prediction_crop, target_crop),
-                    "lpips": _lpips_mean(
-                        perceptual_model, prediction_crop, target_crop
+                    "clamped_rgb_mse": float(clamped_mse.item()),
+                    "clamped_psnr_db": float(
+                        (
+                            -10.0
+                            * torch.log10(clamped_mse.clamp_min(1e-12))
+                        ).item()
+                    ),
+                    "clamped_ssim": _ssim_mean(
+                        clamped_prediction_crop, target_crop
+                    ),
+                    "clamped_lpips": _lpips_mean(
+                        perceptual_model, clamped_prediction_crop, target_crop
                     ),
                     "rgb_valid_values": valid_count,
                     "rgb_valid_ratio": valid_count / expanded.numel(),
+                    **_rgb_overshoot_stats(prediction_view, mask_view),
                 }
+                if (
+                    values["clamped_rgb_l1"] > values["raw_rgb_l1"] + 1e-8
+                    or values["clamped_rgb_mse"] > values["raw_rgb_mse"] + 1e-8
+                ):
+                    raise RuntimeError("clamped RGB error exceeded raw RGB error")
+                health["valid_pixel_count"] += values["rgb_valid_pixels"]
+                health["out_of_range_pixel_count"] += values[
+                    "rgb_out_of_range_pixels"
+                ]
                 if target_view.shape[1] > 1:
                     target_delta = target_view[:, 1:] - target_view[:, :-1]
                     prediction_delta = (
-                        prediction_view[:, 1:] - prediction_view[:, :-1]
+                        clamped_prediction_view[:, 1:]
+                        - clamped_prediction_view[:, :-1]
                     )
                     delta_mask = mask_view[1:] & mask_view[:-1]
                     delta_expanded = delta_mask.unsqueeze(0).expand_as(target_delta)
-                    values["temporal_delta_l1"] = float(
+                    values["clamped_temporal_delta_l1"] = float(
                         (prediction_delta - target_delta)
                         .abs()
                         .masked_select(delta_expanded)
@@ -229,9 +313,10 @@ class StageA1MetricSuite:
                     )
                     target_delta_crop = target_crop[1:] - target_crop[:-1]
                     prediction_delta_crop = (
-                        prediction_crop[1:] - prediction_crop[:-1]
+                        clamped_prediction_crop[1:]
+                        - clamped_prediction_crop[:-1]
                     )
-                    values["temporal_delta_lpips"] = float(
+                    values["clamped_temporal_delta_lpips"] = float(
                         perceptual_model(
                             prediction_delta_crop.float(), target_delta_crop.float()
                         )
@@ -248,10 +333,10 @@ class StageA1MetricSuite:
                             - target_delta[:, pair_index]
                         )
                         pair_name = f"pair_{pair_index}{pair_index + 1}"
-                        values[f"temporal_delta_l1_{pair_name}"] = float(
+                        values[f"clamped_temporal_delta_l1_{pair_name}"] = float(
                             pair_error.abs().masked_select(pair_mask).mean().item()
                         )
-                        values[f"temporal_delta_lpips_{pair_name}"] = float(
+                        values[f"clamped_temporal_delta_lpips_{pair_name}"] = float(
                             perceptual_model(
                                 prediction_delta_crop[pair_index : pair_index + 1].float(),
                                 target_delta_crop[pair_index : pair_index + 1].float(),
@@ -374,8 +459,10 @@ class StageA1MetricSuite:
             )
         }
         health = dict(self.health[mode_id])
-        health["abs_gt_one_ratio"] = (
-            health.pop("abs_gt_one_count") / health["value_count"]
+        if health["valid_pixel_count"] <= 0:
+            raise ValueError(f"{mode_id}: no valid RGB pixels")
+        health["out_of_range_pixel_ratio"] = (
+            health["out_of_range_pixel_count"] / health["valid_pixel_count"]
         )
         abi_values = self.abis[mode_id]
         if len(abi_values) != 1:
