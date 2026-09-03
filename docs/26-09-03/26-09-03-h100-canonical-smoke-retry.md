@@ -41,3 +41,14 @@
 - LIBERO：1,684 条 train records；33,564 个 train windows，每个 window 有 2 个 mono camera variant，因此 DataLoader 长度为 67,128 samples。全 manifest 为 1,712 records、34,192 windows。
 - UMI：81,141 个 train episodes、1,494,802 个 train stereo samples；每个 sample 同时包含 head、left wrist、right wrist 三组双目。全 manifest 为 90,157 episodes、1,661,796 samples，另有 val 4,507 episodes/83,027 samples 和 test 4,509 episodes/83,967 samples。
 - 三个 train DataLoader 的表面长度合计为 50,668,081 samples，但单个 Hy/LIBERO sample 是一路 mono，单个 UMI sample 是三组双目，不能按此总数直接比较像素或相机帧量。实际 sampler 使用四模式权重 `1:1:1:1`、mono 数据源权重 Hy:LIBERO=`1:1`，不会按原始数据量比例抽样。
+
+## 真实 8 卡 smoke 结果
+
+- launcher 修复 SHA 为 `be0c7a25dc2842f752df674566bc7d76727682af`；H100 锁定 runtime 通过 8 个 launcher/distributed 定向测试及 `bash -n`。
+- Job `2538` 使用单节点 8×H100，最终 `COMPLETED (0:0)`，elapsed `00:04:57`。日志确认 `GLOBAL_RANK 0..7`、`LOCAL_RANK 0..7`、`Starting with 8 processes`，且没有 Traceback、RuntimeError、ValueError、OOM 或 kill。
+- 输出目录为 `/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/h100-canonical-smoke4-be0c7a2-timing-v1`，Slurm 日志为 `/gpfs/jiuquyun/home/Frank/logs/stereo-smoke8-be0c7a2-2538.out`。
+- `last.ckpt` 直接读取结果：`generator_updates=4`、`batch_updates=5`、`discriminator_updates=0`、`single_frame_updates=2`、`four_frame_updates=2`、`world_size_contract=8`。四个模式各完成 1 个 logical update、各消费 192 samples，合计 768 samples；这与 BS `24:24:24:12`、GA `1:1:1:2` 的有效全局 batch 192 一致。
+- 四模式逻辑 update 速度：mono/single `0.395 s, 485.64 samples/s`；mono/four `0.597 s, 321.75 samples/s`；stereo/single `0.544 s, 353.12 samples/s`；stereo/four `3.599 s, 53.35 samples/s`。训练 update 区间合计 5.135 秒，对应聚合约 149.57 samples/s，不含进程启动、模型/数据初始化、validation 和 checkpoint。
+- 8 个 rank 中的最大 CUDA allocated/reserved：mono/single `8.190/58.607 GiB`；mono/four `33.172/65.080 GiB`；stereo/single `23.886/65.080 GiB`；stereo/four `54.021/58.607 GiB`。全程最大 reserved 为 `65.080 GiB/GPU`，相对 80 GiB H100 名义容量余量约 `14.92 GiB`，未发生 OOM。reserved 会保留此前模式的 allocator cache，模式工作峰值应优先看 allocated。
+- 每个模式仅测 1 个 logical update 且 warmup 为 0；结果足以证明四模式容量、DDP、数据和 checkpoint 闭环，但属于冷启动 smoke，不作为稳态吞吐 benchmark。stereo/four 的首个 micro-batch 明显包含冷启动成本，其两个 micro-batch 分别为 36.69 和 99.60 samples/s。
+- 产物包括 `best-epoch=0-step=4.ckpt`、`epoch=0-step=4.ckpt`、`last.ckpt`、`resolved_config.json`、`run_manifest.json` 和 `step_timing.json`，均非空。
