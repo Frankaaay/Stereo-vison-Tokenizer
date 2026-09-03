@@ -145,3 +145,25 @@ is copied or re-encoded, and the existing manifest is not overwritten.
   memory usage of approximately 119--124 GiB per H200. The first scheduled mode
   is Hy `mono/four_frame` with GA1, so this proves the run passed generator
   update 44,001 rather than merely completing distributed initialization.
+
+## Stop and H100 checkpoint handoff
+
+- On 2026-09-03 the user requested that v4 stop and that its latest complete
+  checkpoint be copied to H100 for evaluation. A normal `Ctrl-C` was sent to
+  tmux session `stereo-stagea-threeview-bs384-h2001-v4`.
+- The post-stop gate confirmed that the tmux session, all matching training
+  processes, and all eight GPU compute processes had exited. The wrapper wrote
+  `exit_code.txt=1`, which records the requested interrupt rather than a model
+  failure.
+- The latest complete source checkpoint is
+  `stereo-vae/852e9jwo/checkpoints/last.ckpt`, size 729,459,383 bytes. Its direct
+  fields report Lightning `global_step=80000`,
+  `stereo_update_counters.generator_updates=124000`, and source generator
+  update 44,000.
+- Source SHA256 is
+  `605be7940202b7f0aff2380ac4a99dfe1e15d20847ab0377d3e7b2a27352f7b7`.
+- The file was copied to H100 as `last.ckpt.partial`, verified against the
+  source SHA256, and atomically renamed to
+  `/gpfs/jiuquyun/projects/Frank/stereo-tokenizer-checkpoints/v1/stagea-threeview-update124000/last.ckpt`.
+  The final H100 file is owned by `Frank:ai-users`, has mode `0640`, the same
+  729,459,383-byte size and SHA256, and no `.partial` file remains.
