@@ -28,6 +28,13 @@
 - 失败前进度条的最后累计速率为约 0.66 logical update/s；按每个逻辑 update 192 samples 折算约 127 samples/s。样本过少且混合不同模式，这不是稳态或分模式吞吐。
 - Slurm accounting 记录 `gres/gpumem=2330M`、`gres/gpuutil=14`；训练未完整覆盖四模式且没有 Torch per-rank peak-memory 埋点，因此 2,330 MiB 只能作为本次失败短跑的 accounting 观测，不能作为 BS `24:24:24:12` 的可信峰值显存或容量结论。
 
+### timing 重跑与 launcher 门禁
+
+- Hy 修复 SHA `ad717d57b9315a92a5c04a3a6488703947970833` 在 H100 锁定 runtime 通过 `tests.stereo.test_hy_mono_data` 的 5 个测试。
+- timing Job `2535`：Slurm `COMPLETED (0:0)`，4 个逻辑 update、5 个 micro-batch、20 个 validation batch，生成三个 step-4 checkpoint 与 `step_timing.json`；但产物自证 `world_size=1`，日志也显示 `Starting with 1 processes`。该作业虽然申请 8 GPU，实际仅单进程运行，不能作为 8 卡显存或吞吐结论。
+- 根因是 H100 Slurm allocation 使用一个 task，`DISTRIBUTED_MODE=single` launcher 又直接调用 `python3`；Lightning 采用 Slurm world size 1，没有自行拉起 8 个 rank。
+- 单节点多卡 `single` launcher 改为 `torchrun --standalone --nnodes 1 --nproc_per_node GPU_COUNT`；单卡仍直接使用 `python3`，双节点 `ib` 路径不变。后续 smoke 必须同时满足 Job exit 0、`step_timing.json world_size=8`、checkpoint 直接 counters 和 8 个 rank 的显存记录。
+
 ## 训练数据规模
 
 - Hy：211,381 条 train manifest records；16,368,717 个 train windows，每个 window 有 3 个 mono camera variant，因此 DataLoader 长度为 49,106,151 samples。全 manifest 为 215,577 records、16,703,900 windows。

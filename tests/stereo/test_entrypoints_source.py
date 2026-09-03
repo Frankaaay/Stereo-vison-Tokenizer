@@ -96,6 +96,10 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         ):
             self.assertIn(f"${{{name}:?", source)
         self.assertIn('TRAIN_LAUNCHER=(python3)', source)
+        self.assertIn(
+            'DISTRIBUTED_MODE}" == "single" && "${GPU_COUNT}" -gt 1', source
+        )
+        self.assertIn("--standalone", source)
         self.assertIn('"${TRAIN_LAUNCHER[@]}" train_stereo_vae.py', source)
         self.assertIn("--latent_channels 48", source)
         self.assertIn(

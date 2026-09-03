@@ -297,7 +297,14 @@ if [[ -n "${DISCRIMINATOR_EXPANSION_CHECKPOINT:-}" ]]; then
 fi
 
 TRAIN_LAUNCHER=(python3)
-if [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
+if [[ "${DISTRIBUTED_MODE}" == "single" && "${GPU_COUNT}" -gt 1 ]]; then
+  TRAIN_LAUNCHER=(
+    torchrun
+    --standalone
+    --nnodes 1
+    --nproc_per_node "${GPU_COUNT}"
+  )
+elif [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
   mkdir -p "${OUTPUT_ROOT}"
   export NODE_RANK MASTER_ADDR MASTER_PORT
   export NCCL_IB_DISABLE=0
