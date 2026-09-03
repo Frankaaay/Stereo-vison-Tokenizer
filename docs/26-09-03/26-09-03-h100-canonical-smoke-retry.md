@@ -52,3 +52,14 @@
 - 8 个 rank 中的最大 CUDA allocated/reserved：mono/single `8.190/58.607 GiB`；mono/four `33.172/65.080 GiB`；stereo/single `23.886/65.080 GiB`；stereo/four `54.021/58.607 GiB`。全程最大 reserved 为 `65.080 GiB/GPU`，相对 80 GiB H100 名义容量余量约 `14.92 GiB`，未发生 OOM。reserved 会保留此前模式的 allocator cache，模式工作峰值应优先看 allocated。
 - 每个模式仅测 1 个 logical update 且 warmup 为 0；结果足以证明四模式容量、DDP、数据和 checkpoint 闭环，但属于冷启动 smoke，不作为稳态吞吐 benchmark。stereo/four 的首个 micro-batch 明显包含冷启动成本，其两个 micro-batch 分别为 36.69 和 99.60 samples/s。
 - 产物包括 `best-epoch=0-step=4.ckpt`、`epoch=0-step=4.ckpt`、`last.ckpt`、`resolved_config.json`、`run_manifest.json` 和 `step_timing.json`，均非空。
+
+## 8 卡 BS24/12 与 BS30/15 稳态 A/B
+
+- A/B 使用同一 clean SHA `5c7e638d5d4f446dc8140cd632b7b7780351e114`（相对训练代码 SHA `be0c7a25dc2842f752df674566bc7d76727682af` 只增加文档）、seed 1234、数据、teacher、持久化 VGG 和四模式 `1:1:1:1` 调度；分别在 `xn01-gpu1-0049` 与 `xn01-gpu1-0050` 并行运行。
+- 基线 Job `2553`：BS `24:24:24:12`、GA `1:1:1:2`，`COMPLETED (0:0)`，640 logical updates/800 micro-batches/122,880 samples，纯训练 timing 1,050.52 秒（17.51 分钟），Slurm elapsed 22:23。
+- 候选 Job `2554`：BS `30:30:30:15`、GA `1:1:1:2`，`COMPLETED (0:0)`，480 logical updates/600 micro-batches/115,200 samples，纯训练 timing 1,190.62 秒（19.84 分钟），Slurm elapsed 24:45。两者均确认 8 ranks，无 OOM、Traceback、RuntimeError、ValueError、残留作业或空产物。
+- 每模式先丢弃 64 个 warmup update 后，基线稳定窗口为 384 updates/73,728 samples/621.84 秒，前后半段聚合吞吐为 116.88/120.30 samples/s；候选稳定窗口为 224 updates/53,760 samples/557.35 秒，前后半段为 97.54/95.40 samples/s，均已进入相对稳定区间。
+- 等模式、等样本量窗口各为 53,760 samples：基线 119.47 samples/s，候选 96.46 samples/s，候选下降 19.27%。分模式变化为 mono/single `+3.19%`、mono/four `-17.00%`、stereo/single `+11.68%`、stereo/four `-32.47%`；最重模式的退化抵消了单帧收益。
+- 8 ranks 最大 allocated/reserved（GiB）：基线 mono/single `8.194/74.889`、mono/four `33.296/76.451`、stereo/single `23.886/74.889`、stereo/four `54.437/74.889`；候选依次为 `9.859/73.607`、`41.209/76.975`、`29.453/73.607`、`67.582/73.607`。候选 stereo/four allocated 增加 13.145 GiB，且全局最大 reserved 达 76.975 GiB。
+- 结论：`30:30:30:15 / 1:1:1:2` 可以完成长于 15 分钟的 8 卡训练，不会立即 OOM；但显存余量明显收窄，等样本吞吐下降 19.27%，stereo/four 单项下降 32.47%，不建议作为当前四模式默认值。保留 `24:24:24:12 / 1:1:1:2` 更合适。
+- 输出目录：`/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/h100-ab-bs24-20260903-2553` 与 `/gpfs/jiuquyun/projects/Frank/stereo-vae/outputs/h100-ab-bs30-20260903-2554`；提交脚本和分析脚本保存在 `/gpfs/jiuquyun/projects/Frank/stereo-vae/runtime/benchmarks-20260903`。
