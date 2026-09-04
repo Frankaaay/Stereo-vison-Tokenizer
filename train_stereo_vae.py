@@ -192,6 +192,7 @@ def main():
         check_val_every_n_epoch=check_val_every_n_epoch,
         val_check_interval=val_check_interval,
         use_distributed_sampler=False,
+        detect_anomaly=True,
     )
     with profiler if profiler is not None else nullcontext():
         trainer.fit(

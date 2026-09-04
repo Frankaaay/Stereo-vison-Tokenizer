@@ -78,3 +78,5 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   prediction，说明 BF16 LPIPS backward 还存在其他溢出路径。LPIPS 每个 frame 的
   forward/recompute 和输入梯度改为 FP32；tokenizer 主干继续 BF16，activation
   checkpoint、batch、loss 与 optimizer 合同不变。
+- FP32 LPIPS 同合同重跑仍复现相同失败；下一次仅运行短诊断，临时启用 autograd
+  anomaly detection 定位首个 non-finite backward 算子，不计入正式 ablation。
