@@ -405,7 +405,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model.mode_samples = {
             mode_id: count * 24 for mode_id, count in model.mode_updates.items()
         }
-        model.batch_updates = 11
+        model.batch_updates = 7
         checkpoint = {}
         model.on_save_checkpoint(checkpoint)
 
@@ -416,7 +416,12 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertEqual(restored.discriminator_updates, 0)
         self.assertEqual(restored.four_frame_updates, 4)
         self.assertEqual(restored.single_frame_updates, 3)
-        self.assertEqual(restored.batch_updates, 11)
+        self.assertEqual(restored.batch_updates, 7)
+
+        mismatched_args = self._args()
+        mismatched_args.stereo_training_input = "same_left"
+        with self.assertRaisesRegex(ValueError, "stereo training input mismatch"):
+            StereoVAE(mismatched_args).on_load_checkpoint(checkpoint)
 
     def test_checkpoint_without_temporal_counters_is_rejected(self) -> None:
         model = StereoVAE(self._args())
