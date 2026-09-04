@@ -150,3 +150,17 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 - benchmark 于 18:38:55 CST 人工停止并确认 tmux、torchrun/rank 全部退出，8 张
   GPU 均为 0 MiB、0%。`exit_code=1` 来自人工 SIGTERM，不是训练异常；尚未启动
   新的正式三组串行训练。
+
+## Per-mode BS 48:32:48:32 可行性测试
+
+- 按用户要求定向恢复首次 OOM 时的计算路径：LPIPS 使用普通 forward 并保留激活，
+  normalization 恢复 epsilon 位于范数外的原公式，encoder/decoder temporal
+  Transformer 保持 BF16；不回滚 latent ablation、三视角数据和实验记录。
+- 候选物理 batch 为 `48:32:48:32`，GA 为 `1:1:1:1`；按 mode 顺序对应
+  mono single/four、stereo single/four。8 卡 effective global batch 分别为
+  384/256/384/256。
+- runtime、launcher 和 checkpoint 已能记录并校验不等的 per-mode effective batch；
+  mode schedule 仍按 update 权重 `35:35:15:15`，因此样本占比不再等于 update 占比，
+  后续正式训练预算必须按真实 per-mode sample counter 对齐。
+- 先在 Z96 上运行四模式短测试；每种模式分别记录显存、有限梯度和 samples/s，再决定
+  是否继续向上搜索 batch 上限或启动正式训练。

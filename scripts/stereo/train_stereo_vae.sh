@@ -5,7 +5,6 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 : "${OUTPUT_ROOT:?set a repository-external output directory}"
 : "${GPU_COUNT:?set the number of visible GPUs}"
-: "${GLOBAL_BATCH_SIZE:?set the intended global batch size}"
 : "${PER_DEVICE_BATCH_SIZE:?set the per-GPU micro batch}"
 : "${GRAD_ACCUMULATES:?set gradient accumulation}"
 : "${MAX_STEPS:?set the smoke/overfit step budget}"
@@ -73,7 +72,7 @@ fi
 
 MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
 MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
-MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-24:24:24:24}"
+MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-48:32:48:32}"
 MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-1:1:1:1}"
 if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
   echo "four-mode training keeps GRAD_ACCUMULATES=1; use MODE_GRAD_ACCUMULATES" >&2
@@ -162,14 +161,6 @@ ONLINE_GT_ARGS+=(
   --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
 )
 WORLD_SIZE=$((NUM_NODES * GPU_COUNT))
-for index in 0 1 2 3; do
-  EXPECTED_MODE_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * MODE_BATCH_SIZE_VALUES[index] * MODE_GRAD_ACCUMULATE_VALUES[index]))
-  if [[ "${EXPECTED_MODE_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
-    echo "mode ${index} global batch mismatch: expected ${EXPECTED_MODE_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
-    exit 2
-  fi
-done
-
 WANDB_ARGS=()
 if [[ "${DISABLE_WANDB:-0}" == "1" ]]; then
   WANDB_ARGS+=(--disable_wandb)

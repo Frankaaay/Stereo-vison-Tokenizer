@@ -184,17 +184,6 @@ def _validate_four_mode_batch_contract(args):
         if mode_id.startswith("mono/")
     ):
         raise ValueError("mono modes currently require accumulation factor 1")
-    effective_global_batches = {
-        mode_id: mode_batch_sizes[mode_id]
-        * mode_grad_accumulates[mode_id]
-        * world_size
-        for mode_id in MODE_IDS
-    }
-    if len(set(effective_global_batches.values())) != 1:
-        raise ValueError(
-            "four-mode effective global batch sizes must be equal: "
-            f"{effective_global_batches}"
-        )
     parse_weight_spec(args.mode_update_weights, MODE_IDS)
     parse_weight_spec(args.mono_dataset_weights, ("hy", "libero"))
     if args.num_nodes > 1 and not args.node_manifest_contracts:

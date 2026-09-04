@@ -273,8 +273,8 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
         values = dict(
             grad_accumulates=1,
             batch_size=24,
-            mode_batch_sizes="48:48:48:24",
-            mode_grad_accumulates="1:1:1:2",
+            mode_batch_sizes="48:32:48:32",
+            mode_grad_accumulates="1:1:1:1",
             devices=8,
             num_nodes=1,
             mode_update_weights="35:35:15:15",
@@ -295,14 +295,8 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "global grad_accumulates=1"):
             _validate_four_mode_batch_contract(self._args(grad_accumulates=2))
 
-    def test_accepts_equal_effective_global_batches(self):
+    def test_accepts_per_mode_effective_global_batches(self):
         _validate_four_mode_batch_contract(self._args())
-
-    def test_rejects_unequal_effective_global_batches(self):
-        with self.assertRaisesRegex(ValueError, "effective global batch sizes"):
-            _validate_four_mode_batch_contract(
-                self._args(mode_batch_sizes="48:48:48:25")
-            )
 
     def test_rejects_mono_accumulation(self):
         with self.assertRaisesRegex(ValueError, "mono modes"):

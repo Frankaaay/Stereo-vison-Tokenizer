@@ -299,7 +299,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("UMI_EPISODE_CACHE_CAPACITY", launcher)
         self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)
         self.assertIn(
-            'MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-24:24:24:24}"',
+            'MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-48:32:48:32}"',
             launcher,
         )
         self.assertIn(

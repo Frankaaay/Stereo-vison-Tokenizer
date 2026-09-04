@@ -13,7 +13,6 @@ from stereo_tokenizer.mode_sampling import (
     parse_weight_spec,
 )
 from stereo_tokenizer.modules.attention import PEG
-from stereo_tokenizer.modules.lpips import normalize_tensor
 from stereo_tokenizer.training.checkpoints import _load_continuation_checkpoint
 
 
@@ -262,14 +261,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
         self.assertTrue(model.training)
         self.assertFalse(model.perceptual_model.training)
-
-    def test_lpips_normalization_has_finite_gradient_at_zero_features(self) -> None:
-        features = torch.zeros(2, 64, 4, 4, requires_grad=True)
-
-        normalize_tensor(features).sum().backward()
-
-        self.assertIsNotNone(features.grad)
-        self.assertTrue(torch.isfinite(features.grad).all())
 
     def test_perceptual_loss_chunks_views_and_frames_without_changing_mean(
         self,
