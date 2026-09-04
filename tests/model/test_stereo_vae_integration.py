@@ -394,13 +394,13 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model = StereoVAE(self._args())
         model.generator_updates = 7
         model.discriminator_updates = 0
-        model.four_frame_updates = 4
-        model.single_frame_updates = 3
+        model.four_frame_updates = 3
+        model.single_frame_updates = 4
         model.mode_updates = {
-            "mono/single_frame": 2,
+            "mono/single_frame": 1,
             "mono/four_frame": 2,
-            "stereo/single_frame": 1,
-            "stereo/four_frame": 2,
+            "stereo/single_frame": 3,
+            "stereo/four_frame": 1,
         }
         model.mode_samples = {
             mode_id: count * 24 for mode_id, count in model.mode_updates.items()
@@ -414,8 +414,8 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
         self.assertEqual(restored.generator_updates, 7)
         self.assertEqual(restored.discriminator_updates, 0)
-        self.assertEqual(restored.four_frame_updates, 4)
-        self.assertEqual(restored.single_frame_updates, 3)
+        self.assertEqual(restored.four_frame_updates, 3)
+        self.assertEqual(restored.single_frame_updates, 4)
         self.assertEqual(restored.batch_updates, 7)
 
         mismatched_args = self._args()
