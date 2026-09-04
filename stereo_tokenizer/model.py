@@ -209,6 +209,8 @@ class StereoVAE(pl.LightningModule):
         if self.perceptual_weight > 0:
             self.perceptual_model = LPIPS().eval()
             self.perceptual_model.requires_grad_(False)
+            if getattr(args, "perceptual_model_bf16", False):
+                self.perceptual_model.to(dtype=torch.bfloat16)
         else:
             self.perceptual_model = None
 
@@ -1523,6 +1525,7 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--video_gan_weight", type=float, required=True)
         parser.add_argument("--gan_feat_weight", type=float, required=True)
         parser.add_argument("--perceptual_weight", type=float, required=True)
+        parser.add_argument("--perceptual_model_bf16", action="store_true")
         parser.add_argument(
             "--norm_type",
             choices=["batch", "group"],
