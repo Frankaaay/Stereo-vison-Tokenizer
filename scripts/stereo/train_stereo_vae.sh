@@ -270,7 +270,7 @@ fi
 TRAIN_LAUNCHER=(python3)
 if [[ "${DISTRIBUTED_MODE}" == "single" && "${GPU_COUNT}" -gt 1 ]]; then
   TRAIN_LAUNCHER=(
-    torchrun
+    python3 -m torch.distributed.run
     --standalone
     --nnodes 1
     --nproc_per_node "${GPU_COUNT}"
@@ -285,7 +285,7 @@ elif [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
   export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
   export NCCL_DEBUG_FILE="${NCCL_DEBUG_FILE:-${OUTPUT_ROOT}/nccl-%h-%p.log}"
   TRAIN_LAUNCHER=(
-    torchrun
+    python3 -m torch.distributed.run
     --nnodes "${NUM_NODES}"
     --nproc_per_node "${GPU_COUNT}"
     --node_rank "${NODE_RANK}"

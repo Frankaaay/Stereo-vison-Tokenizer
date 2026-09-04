@@ -53,5 +53,14 @@ M48 的学生网络只接收三视角左图 `E=1` 并跳过 StereoFusion；D48 �
 
 ## 启动记录
 
-尚未启动。完成服务器门禁后补充代码 SHA、tmux、output、W&B、resolved config、
-直接 counters、显存和首个健康检查结果。
+首次 v1 启动没有进入 Python 或占用 GPU，M48 写入 `exit_code=127`，D48 未启动。
+第一根因是冻结 venv 的 `torchrun` console script shebang 仍指向跳板机 NFS 路径
+`/data-214-30-239-40/.../python`，H200-1 上该解释器不存在。已验证同一 venv 的
+`python -m torch.distributed.run` 可执行；launcher 改为模块入口，不修改 DDP、训练或
+数据合同。失败输出保留在
+`/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v1`。
+
+修复后的 v2 输出根为
+`/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v2`。
+完成服务器门禁后补充代码 SHA、tmux、W&B、resolved config、直接 counters、显存和
+首个健康检查结果。

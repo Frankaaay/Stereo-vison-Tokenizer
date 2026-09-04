@@ -78,6 +78,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         ):
             self.assertIn(f"${{{name}:?", source)
         self.assertIn('TRAIN_LAUNCHER=(python3)', source)
+        self.assertIn("python3 -m torch.distributed.run", source)
         self.assertIn(
             'PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True', source
         )
