@@ -62,5 +62,26 @@ M48 的学生网络只接收三视角左图 `E=1` 并跳过 StereoFusion；D48 �
 
 修复后的 v2 输出根为
 `/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v2`。
-完成服务器门禁后补充代码 SHA、tmux、W&B、resolved config、直接 counters、显存和
-首个健康检查结果。
+v2 在 Python 和 8-rank DDP 初始化后、读取首个 batch 前退出，M48 没有完成任何
+generator update，D48 未启动。第一根因是启动脚本仍引用旧版 Hy manifest
+`hy-cam-high-episode-v1`，而当前三视角 DataLoader fail-closed 要求
+`hy-mono-three-camera-episode-v2`。失败现场完整保留。
+
+当前有效启动为 v3：
+
+- 训练代码 SHA：`7372ab97097ab97827e7054bd86d9173e9f4f2df`，H200-1 checkout
+  clean，并与 `origin/hezhou-las2-h` 同步。
+- tmux：`stereo-input-ablation-h2001-20260904-v3`。
+- 输出根：
+  `/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v3`。
+- 启动时间：2026-09-04 23:13:44 CST；启动脚本 SHA256：
+  `2c8524bd4a0a9080713d5fcd507e9ba0a6dd1301e40cd512dd5ab08a0db8570e`。
+- Hy 使用验证后的 immutable 三视角 manifest
+  `/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260902-threeview-v4/manifests/hy_formal_90_5_5_threeview_validated_v3.jsonl`，
+  SHA256 `821fb1d2610bc9113471cd8150b9cd791488cf52fcb81f36091a89d7d099907a`。
+- 当前运行 M48-left-only，offline W&B run ID 为 `4drs7uhx`；D48 由串行
+  wrapper 排队，只有 M48 正常完成 40,000 updates 后才会启动。
+- 23:17:18 CST 的一次健康检查确认 generator update 1 已完成，首步约 38 秒；
+  8 张 H200 均进入计算，单卡显存约 113.5 GiB，未发现 traceback、OOM、坏帧、
+  CUDA error 或 non-finite 日志。首步包含数据与在线 teacher 冷启动，不用它推算
+  稳态吞吐或 ETA；尚未到 5,000-update checkpoint 门槛。
