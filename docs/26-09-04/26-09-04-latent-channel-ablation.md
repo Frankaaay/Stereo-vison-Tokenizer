@@ -46,8 +46,8 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 
 ## 状态
 
-当前为本地实现阶段，尚未启动远端训练。启动后的 commit、run ID、tmux、输出、
-实时计数和健康检查结果将在本文件追加。
+正式串行训练 v11 已在 H200-2 运行，当前为 Z96；Z24/Z48 等待 Z96 正常退出后
+由同一 wrapper 自动启动。训练代码、输出、W&B 和五分钟健康检查见下文。
 
 ## Z96 首次启动与显存修复
 
@@ -95,3 +95,28 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   encoder/decoder temporal Transformer 固定为 FP32；空间主干与其余训练仍 BF16。
 - 移除无效的整体 backward 缩放、状态探针、anomaly 和不必要的 FP32 LPIPS；保留
   LPIPS activation checkpoint 与零特征稳定 normalization。
+
+## 正式串行训练 v11
+
+- 训练代码 commit：`872ac395d168db637588ad776a631d1f1cda027c`。
+- 启动时间：2026-09-04 17:21:59 CST；tmux：
+  `stereo-latent-ablation-bs384-20260904-v11`。
+- 输出根：
+  `/data/home/frank/experiments/stereo-latent-ablation-bs384-h2002-20260904-v11`；
+  当前 Z96 W&B offline run：`0pzk4bih`。
+- launch artifact：
+  `/data/home/frank/experiments/stereo-latent-ablation-bs384-h2002-20260904-v11.launch.sh`，
+  SHA256 `e23c008e16f5e2f681642695a6cb585b6f36c6a9e40dcd96ad8848c231a2aef3`。
+- 2026-09-04 17:27:46 CST 的五分钟门禁通过：tmux 和 8 个训练 rank 存活，
+  8 卡利用率 99--100%，未检出 traceback、OOM 或 non-finite；重型 batch 下每卡
+  显存约 125,421/143,771 MiB，保留约 18.3 GiB 余量。
+- W&B 原始 datastore 在约 5 分钟时已记录 115 generator updates / 133 batch
+  updates；四种模式计数分别为 stereo single/four 17/18、mono single/four
+  41/39，证明 GA2 和四种数据路径均有真实 optimizer 更新。
+- 去除前 20 个 batch 的启动段后，当前 Z96 实测为 2.033 s/batch、
+  2.344 s/generator update；这是短窗口健康检查数字，不替代完整训练吞吐统计。
+- 2026-08-29 的旧 mode-aware BS384 稳态为 1.226 s/batch，因此当前工程配置
+  端到端约慢 65.8%。该对照包含 Z48→Z96、mono 单视角→三视角、LPIPS
+  activation checkpoint 以及 temporal FP32 等多项差异，不能将 65.8% 全部归因
+  于 LPIPS checkpoint。无 checkpoint 的当前同合同 Z96 在首个 optimizer update
+  前 OOM，无法得到同合同吞吐基线。
