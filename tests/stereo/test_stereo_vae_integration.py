@@ -614,6 +614,8 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         batch = {
             "video": torch.zeros(1, 1, 1, 3, 4, 1, 1),
             "mode_id": ["stereo/four_frame"],
+            "eye_mode": ["stereo"],
+            "temporal_mode": ["four_frame"],
         }
 
         with mock.patch.object(model, "_profiled_training_step") as step:
