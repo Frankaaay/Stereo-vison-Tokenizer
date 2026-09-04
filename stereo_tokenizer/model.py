@@ -269,8 +269,8 @@ class StereoVAE(pl.LightningModule):
             raise ValueError(
                 "single_frame_source_index must select one of the four source frames"
             )
-        if args.latent_channels != 48:
-            raise ValueError("StereoVAE latent_channels must be 48")
+        if args.latent_channels not in (24, 48, 96):
+            raise ValueError("StereoVAE latent_channels must be one of 24, 48, or 96")
         if len(args.enc_block) != args.spatial_depth:
             raise ValueError("enc_block length must equal spatial_depth")
         if len(args.dec_block) != args.spatial_depth:
@@ -754,7 +754,9 @@ class StereoVAE(pl.LightningModule):
         if not 1 <= view_count <= self.stereo_num_views:
             raise ValueError("latent view count must be in [1,3]")
         if latent.shape[2] != self.latent_channels or latent.shape[3] != 1:
-            raise ValueError("latent must contain 48 channels and one temporal slot")
+            raise ValueError(
+                f"latent must contain {self.latent_channels} channels and one temporal slot"
+            )
         flattened = rearrange(latent, "b v c t h w -> (b v) c t h w")
         with profile_region("stereo/decoder/latent_projection"):
             projected = self.latent_projection(flattened)

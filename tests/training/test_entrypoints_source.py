@@ -86,7 +86,9 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         )
         self.assertIn("--standalone", source)
         self.assertIn('"${TRAIN_LAUNCHER[@]}" train_stereo_vae.py', source)
-        self.assertIn("--latent_channels 48", source)
+        self.assertIn('LATENT_CHANNELS="${LATENT_CHANNELS:-48}"', source)
+        self.assertIn('--latent_channels "${LATENT_CHANNELS}"', source)
+        self.assertIn("LATENT_CHANNELS must be 24, 48, or 96", source)
         self.assertIn(
             '--single_frame_source_index "${SINGLE_FRAME_SOURCE_INDEX}"',
             source,
@@ -100,6 +102,17 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("DISCRIMINATOR_EXPANSION_CHECKPOINT", source)
         self.assertNotIn("--use_vae", source)
         self.assertNotIn("--fp16", source)
+
+    def test_latent_ablation_serial_order_and_failure_contract(self):
+        source = (
+            ROOT / "scripts" / "stereo" / "run_latent_ablation_serial.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("for latent_channels in 96 24 48", source)
+        self.assertIn('LATENT_CHANNELS="${latent_channels}"', source)
+        self.assertIn('OUTPUT_ROOT="${ABLATION_OUTPUT_ROOT}/z${latent_channels}"', source)
+        self.assertIn("refusing to reuse existing ABLATION_OUTPUT_ROOT", source)
+        self.assertIn('train_status=${PIPESTATUS[0]}', source)
+        self.assertIn('> "${OUTPUT_ROOT}/exit_code.txt"', source)
 
     def test_profile_regions_are_opt_in_and_cover_requested_components(self):
         helper = (ROOT / "stereo_tokenizer" / "profiling.py").read_text(
@@ -285,6 +298,14 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertNotIn("UMI_ROOT_ALIASES", launcher)
         self.assertNotIn("UMI_EPISODE_CACHE_CAPACITY", launcher)
         self.assertNotIn("four-mode training is frozen to per-device BS24", launcher)
+        self.assertIn(
+            'MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-48:48:48:24}"',
+            launcher,
+        )
+        self.assertIn(
+            'MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-1:1:1:2}"',
+            launcher,
+        )
         self.assertIn('"val/mixed/total_loss"', train)
         self.assertIn("OnlineDepthAnything3GTCallback", train)
         self.assertIn("mode_occurrences_before", train)

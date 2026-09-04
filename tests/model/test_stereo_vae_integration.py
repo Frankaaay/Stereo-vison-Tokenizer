@@ -128,6 +128,34 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             output.raw_relative_log_depth.shape, (1, 3, 1, 4, 32, 32)
         )
 
+    def test_forward_supports_ablation_latent_channels(self) -> None:
+        for latent_channels in (24, 96):
+            with self.subTest(latent_channels=latent_channels):
+                args = self._args()
+                args.latent_channels = latent_channels
+                model = StereoVAE(args).eval()
+                output = model(
+                    self._batch()["video"],
+                    eye_mode="stereo",
+                    temporal_mode="four_frame",
+                    sample_posterior=False,
+                )
+                self.assertEqual(
+                    output.latent.shape,
+                    (1, 3, latent_channels, 1, 4, 4),
+                )
+                decoded = model.decode(
+                    output.latent,
+                    temporal_mode="four_frame",
+                )
+                self.assertEqual(decoded.rgb.shape, (1, 3, 3, 4, 32, 32))
+
+    def test_constructor_rejects_unapproved_latent_channels(self) -> None:
+        args = self._args()
+        args.latent_channels = 32
+        with self.assertRaisesRegex(ValueError, "one of 24, 48, or 96"):
+            StereoVAE(args)
+
     def test_mono_two_views_use_one_four_frame_forward(self) -> None:
         model = StereoVAE(self._args()).eval()
         output = model(

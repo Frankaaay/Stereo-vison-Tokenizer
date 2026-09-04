@@ -20,6 +20,12 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 : "${PERCEPTUAL_WEIGHT:?set the calibrated LPIPS weight}"
 : "${SINGLE_FRAME_SOURCE_INDEX:?set the current source frame index}"
 
+LATENT_CHANNELS="${LATENT_CHANNELS:-48}"
+if [[ "${LATENT_CHANNELS}" != "24" && "${LATENT_CHANNELS}" != "48" && "${LATENT_CHANNELS}" != "96" ]]; then
+  echo "LATENT_CHANNELS must be 24, 48, or 96" >&2
+  exit 2
+fi
+
 DISTRIBUTED_MODE="${DISTRIBUTED_MODE:-single}"
 NUM_NODES="${NUM_NODES:-1}"
 case "${DISTRIBUTED_MODE}" in
@@ -67,8 +73,8 @@ fi
 
 MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
 MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
-MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}}"
-MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}}"
+MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-48:48:48:24}"
+MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-1:1:1:2}"
 if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
   echo "four-mode training keeps GRAD_ACCUMULATES=1; use MODE_GRAD_ACCUMULATES" >&2
   exit 2
@@ -302,7 +308,7 @@ fi
   --spatial_depth 4 \
   --temporal_depth 4 \
   --embedding_dim 512 \
-  --latent_channels 48 \
+  --latent_channels "${LATENT_CHANNELS}" \
   --enc_block ttww \
   --dec_block tttt \
   --twod_window_size 8 \
