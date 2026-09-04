@@ -319,7 +319,7 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
             _validate_four_mode_batch_contract(self._args(mono_dataset_weights="9:0"))
 
     def test_validation_interval_expands_to_complete_logical_updates(self):
-        args = self._args()
+        args = self._args(mode_grad_accumulates="1:1:1:2")
         weights = parse_weight_spec(args.mode_update_weights, MODE_IDS)
         expected = sum(
             2
@@ -339,7 +339,11 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
 
     def test_periodic_validation_expands_complete_schedule_cycles(self):
         interval = _resolve_val_check_interval(
-            self._args(max_steps=1000, online_val_check_interval_steps=500)
+            self._args(
+                max_steps=1000,
+                online_val_check_interval_steps=500,
+                mode_grad_accumulates="1:1:1:2",
+            )
         )
         self.assertEqual(interval, 575)
 
