@@ -131,3 +131,22 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   避免 backward 重算 LPIPS feature forward。
 - 先只运行 Z96 短测速，以稳定 `samples/s` 对比 v11；不同 batch 的 `step/s`
   不作为结论。通过显存和有限梯度门禁后，再决定是否作为正式三组训练合同。
+
+### v12-bench 结果
+
+- 代码 commit：`985df742bef45ab0c76d6a6728ce3c7287d7d355`；启动时间
+  2026-09-04 18:31:44 CST；W&B offline run：`waq8kwq7`。
+- 输出：
+  `/data/home/frank/experiments/stereo-latent-ablation-bs192-h2002-20260904-v12-bench`；
+  launch artifact SHA256：
+  `57349b2214f4b4c9181f2054b1553ca14071d59ba0b6ec98a5c0ec07050a7c2d`。
+- Z96 运行至 W&B 记录 177 generator updates，四种 mode 均覆盖；未检出 OOM、
+  non-finite 或 traceback。重型 batch 下每卡约 89,823/143,771 MiB。
+- 从 generator update 20 开始按 W&B 时间戳计算：v12 BS24/BF16 temporal/
+  LPIPS 保留激活为 1.101 s/update、174.42 samples/s；v11 BS384/FP32 temporal/
+  LPIPS checkpoint 为 2.275 s/update、168.81 samples/s。因此 v12 按样本吞吐快
+  约 3.3%，同时显存降低约 35.6 GiB/卡；其 step/s 约快一倍主要来自 global batch
+  减半，不能作为吞吐翻倍解释。
+- benchmark 于 18:38:55 CST 人工停止并确认 tmux、torchrun/rank 全部退出，8 张
+  GPU 均为 0 MiB、0%。`exit_code=1` 来自人工 SIGTERM，不是训练异常；尚未启动
+  新的正式三组串行训练。
