@@ -252,14 +252,24 @@ def read_selection(path: str | Path) -> dict[str, Any]:
     records = payload.get("records", [])
     if len(records) != int(payload.get("sample_count", -1)):
         raise ValueError(f"{selection}: record count mismatch")
-    identities = [
-        (
-            row["canonical_config"],
-            int(row["canonical_episode_index"]),
-            int(row["anchor_rgb_index"]),
-        )
-        for row in records
-    ]
+    if payload.get("data_backend") == "hy_lance_manifest":
+        identities = [
+            (
+                row["hy_manifest_record"]["table_name"],
+                int(row["hy_manifest_record"]["episode_index"]),
+                int(row["anchor_rgb_index"]),
+            )
+            for row in records
+        ]
+    else:
+        identities = [
+            (
+                row["canonical_config"],
+                int(row["canonical_episode_index"]),
+                int(row["anchor_rgb_index"]),
+            )
+            for row in records
+        ]
     if len(set(identities)) != len(identities):
         raise ValueError(f"{selection}: duplicate canonical windows")
     payload["selection_path"] = str(selection)

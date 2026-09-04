@@ -22,7 +22,13 @@ import eval_stereo_vae as legacy
 
 from .stage_a_contract import sha256_file
 from .stage_a_data import CanonicalStageADataset, build_canonical_selection
-from .stage_a_metrics import StageA1MetricSuite
+from .stage_a_metrics import (
+    DYNAMIC_FLOW_MIN_PX,
+    FLOW_FB_ABSOLUTE_THRESHOLD_PX2,
+    FLOW_FB_RELATIVE_THRESHOLD,
+    STATIC_FLOW_MAX_PX,
+    StageA1MetricSuite,
+)
 from stereo_tokenizer.geometry import GeometryMapping
 
 
@@ -36,6 +42,79 @@ LAS2_H_CHECKPOINT_SHA256 = (
 )
 VGG16_CHECKPOINT_SHA256 = "397923af8e79cdbb6a7127f12361acd7a2f83e06b05044ddf496e83de57a5bf0"
 VGG16_CHECKPOINT_NAME = "vgg16-397923af.pth"
+
+
+class _FrozenRAFT:
+    """Strict local-checkpoint torchvision RAFT-Large inference wrapper."""
+
+    def __init__(
+        self,
+        checkpoint: Path,
+        expected_sha256: str,
+        *,
+        device: torch.device,
+        microbatch: int,
+    ) -> None:
+        from torchvision.models.optical_flow import Raft_Large_Weights, raft_large
+
+        self.checkpoint = checkpoint.expanduser().resolve()
+        self.sha256 = sha256_file(self.checkpoint)
+        if self.sha256 != expected_sha256:
+            raise ValueError(
+                "RAFT checkpoint SHA mismatch: "
+                f"requested={expected_sha256}, actual={self.sha256}"
+            )
+        if microbatch < 1:
+            raise ValueError("RAFT microbatch must be positive")
+        self.microbatch = int(microbatch)
+        state = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            raise ValueError("RAFT checkpoint must contain a state dictionary")
+        self.model = raft_large(weights=None, progress=False)
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"RAFT checkpoint structure mismatch: missing={missing}, "
+                f"unexpected={unexpected}"
+            )
+        self.model.to(device).eval().requires_grad_(False)
+        self.transforms = Raft_Large_Weights.C_T_SKHT_V2.transforms()
+
+    @torch.inference_mode()
+    def __call__(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        if first.shape != second.shape or first.ndim != 4 or first.shape[1] != 3:
+            raise ValueError("RAFT inputs must be matching [N,3,H,W] tensors")
+        if first.shape[-2] % 8 or first.shape[-1] % 8:
+            raise ValueError("RAFT input height and width must be divisible by 8")
+        outputs = []
+        for start in range(0, first.shape[0], self.microbatch):
+            end = min(first.shape[0], start + self.microbatch)
+            first_batch, second_batch = self.transforms(
+                first[start:end].float(), second[start:end].float()
+            )
+            predictions = self.model(first_batch, second_batch)
+            if not isinstance(predictions, list) or not predictions:
+                raise RuntimeError("RAFT did not return iterative flow predictions")
+            outputs.append(predictions[-1].float())
+        return torch.cat(outputs, dim=0)
+
+    def provenance(self) -> dict[str, object]:
+        return {
+            "name": "torchvision.raft_large",
+            "architecture": "RAFT-Large",
+            "transform_contract": "Raft_Large_Weights.C_T_SKHT_V2.transforms",
+            "checkpoint": str(self.checkpoint),
+            "checkpoint_sha256": self.sha256,
+            "microbatch": self.microbatch,
+            "precision": "fp32",
+            "flow_unit": "content-crop pixels",
+            "static_flow_max_px": STATIC_FLOW_MAX_PX,
+            "dynamic_flow_min_px": DYNAMIC_FLOW_MIN_PX,
+            "forward_backward_relative_threshold": FLOW_FB_RELATIVE_THRESHOLD,
+            "forward_backward_absolute_threshold_px2": (
+                FLOW_FB_ABSOLUTE_THRESHOLD_PX2
+            ),
+        }
 
 
 def _git(*args: str) -> str:
@@ -169,6 +248,8 @@ def _checkpoint_provenance(path: Path, expected_sha256: str) -> dict:
 def _dataset_provenance(dataset) -> dict:
     result = dataset.provenance()
     result["selection_file_sha256"] = sha256_file(dataset.selection_path)
+    if result.get("data_backend") == "hy_lance_manifest":
+        return result
     config_hashes = {}
     for record in dataset.selection["records"]:
         path = str(record["canonical_config"])
@@ -184,9 +265,12 @@ def _selection_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="tokenizer_stage_a selection")
     parser.add_argument("--dataset-id", choices=("umi", "hy", "libero"), required=True)
     parser.add_argument("--identity-contract", type=Path, required=True)
-    parser.add_argument("--canonical-config-root", type=Path, required=True)
-    parser.add_argument("--canonical-loader-root", type=Path, required=True)
+    parser.add_argument("--canonical-config-root", type=Path)
+    parser.add_argument("--canonical-loader-root", type=Path)
     parser.add_argument("--umi-publish-ledger", type=Path)
+    parser.add_argument("--hy-manifest", type=Path)
+    parser.add_argument("--hy-manifest-sha256")
+    parser.add_argument("--hy-root-aliases")
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--sample-count", type=int, required=True)
     parser.add_argument("--seed", type=int, default=1234)
@@ -202,6 +286,9 @@ def _selection_command(argv: list[str]) -> None:
         seed=args.seed,
         output=args.output,
         umi_publish_ledger=args.umi_publish_ledger,
+        hy_manifest_path=args.hy_manifest,
+        hy_manifest_sha256=args.hy_manifest_sha256,
+        hy_root_aliases=args.hy_root_aliases,
     )
     print(
         json.dumps(
@@ -215,7 +302,8 @@ def _selection_command(argv: list[str]) -> None:
 def _preflight_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="tokenizer_stage_a preflight")
     parser.add_argument("--selection", type=Path, required=True)
-    parser.add_argument("--canonical-loader-root", type=Path, required=True)
+    parser.add_argument("--canonical-loader-root", type=Path)
+    parser.add_argument("--hy-root-aliases")
     parser.add_argument("--eye-mode", choices=("mono", "stereo"), required=True)
     parser.add_argument("--camera-key")
     parser.add_argument("--samples", type=int, default=2)
@@ -225,6 +313,7 @@ def _preflight_command(argv: list[str]) -> None:
         loader_root=args.canonical_loader_root,
         eye_mode=args.eye_mode,
         camera_key=args.camera_key,
+        hy_root_aliases=args.hy_root_aliases,
     )
     if args.samples < 1 or args.samples > len(dataset):
         raise ValueError("invalid preflight sample count")
@@ -259,6 +348,9 @@ def _run_parser() -> argparse.ArgumentParser:
     parser.add_argument("--canonical-loader-root", type=Path, required=True)
     parser.add_argument("--stage-a-camera-key")
     parser.add_argument("--checkpoint-sha256", required=True)
+    parser.add_argument("--raft-checkpoint", type=Path, required=True)
+    parser.add_argument("--raft-checkpoint-sha256", required=True)
+    parser.add_argument("--raft-microbatch", type=int, default=3)
     parser.add_argument("--rgb-only", action="store_true")
     runtime_required = {
         "stereo_vae_ckpt",
@@ -266,7 +358,6 @@ def _run_parser() -> argparse.ArgumentParser:
         "eval_temporal_mode",
         "stage_a_dataset_id",
         "stage_a_selection",
-        "canonical_loader_root",
     }
     for action in parser._actions:
         if action.required and action.dest not in runtime_required:
@@ -308,7 +399,15 @@ def _validate_run(args) -> None:
     if args.device != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("Stage A run requires one allocated CUDA GPU")
     if args.eval_eye_mode == "mono" and not args.stage_a_camera_key:
-        raise ValueError("mono Stage A requires --stage-a-camera-key")
+        if args.stage_a_dataset_id != "hy":
+            raise ValueError("non-Hy mono Stage A requires --stage-a-camera-key")
+    if args.stage_a_dataset_id == "hy":
+        if args.eval_eye_mode != "mono" or args.stage_a_camera_key:
+            raise ValueError("Hy Stage A evaluates its three mono views together")
+        if not args.hy_root_aliases:
+            raise ValueError("Hy Stage A requires --hy-root-aliases")
+    elif args.canonical_loader_root is None:
+        raise ValueError("canonical Stage A requires --canonical-loader-root")
     if args.eval_eye_mode == "stereo" and args.stage_a_camera_key:
         raise ValueError("stereo Stage A does not accept --stage-a-camera-key")
     if args.num_visualizations < 0:
@@ -319,6 +418,12 @@ def _validate_run(args) -> None:
         raise FileExistsError(
             f"refusing to overwrite visualization directory {args.visualization_dir}"
         )
+    if args.raft_microbatch < 1:
+        raise ValueError("--raft-microbatch must be positive")
+    if not args.raft_checkpoint.is_file():
+        raise FileNotFoundError(args.raft_checkpoint)
+    if len(args.raft_checkpoint_sha256) != 64:
+        raise ValueError("--raft-checkpoint-sha256 must contain 64 characters")
 
 
 def _mode_batch(batch: dict, temporal_mode: str, source_index: int | None):
@@ -335,15 +440,19 @@ def _attach_mono_reconstruction_teacher(args, teacher, batch, output) -> None:
     """Run DA3 on reconstructed RGB with the exact frozen geometry mapping."""
 
     prediction = output.rgb
-    if prediction.ndim != 6 or tuple(prediction.shape[1:3]) != (1, 3):
-        raise ValueError("mono reconstruction must be [B,1,3,T,H,W]")
-    batch_size, _, _, frames, height, width = prediction.shape
+    if (
+        prediction.ndim != 6
+        or not 1 <= prediction.shape[1] <= 3
+        or prediction.shape[2] != 3
+    ):
+        raise ValueError("mono reconstruction must be [B,V,3,T,H,W] with V in [1,3]")
+    batch_size, views, _, frames, height, width = prediction.shape
     geometry = GeometryMapping.from_collated(
         batch["geometry_mapping"], int(batch_size)
     )
     left, top, right, bottom = geometry.student_padding_ltrb
-    flattened = prediction[:, 0].permute(0, 2, 1, 3, 4).reshape(
-        batch_size * frames, 3, height, width
+    flattened = prediction.permute(0, 1, 3, 2, 4, 5).reshape(
+        batch_size * views * frames, 3, height, width
     )
     content = flattened[
         :,
@@ -367,11 +476,15 @@ def _attach_mono_reconstruction_teacher(args, teacher, batch, output) -> None:
         .cpu()
     )
     processed = geometry.da3_preprocess(rectified_u8).reshape(
-        batch_size, frames, 3, *geometry.da3_processed_hw
+        batch_size * views, frames, 3, *geometry.da3_processed_hw
     )
     native_depth, native_confidence = teacher.infer_processed(processed)
-    depth = geometry.map_da3_output_to_student(native_depth).unsqueeze(1)
-    confidence = geometry.map_da3_output_to_student(native_confidence).unsqueeze(1)
+    depth = geometry.map_da3_output_to_student(native_depth).reshape(
+        batch_size, views, 1, frames, *geometry.student_output_hw
+    )
+    confidence = geometry.map_da3_output_to_student(native_confidence).reshape(
+        batch_size, views, 1, frames, *geometry.student_output_hw
+    )
     non_padding = batch["non_padding_mask"]
     valid = torch.isfinite(depth) & (depth > 0) & non_padding
     if not torch.isfinite(confidence.masked_select(non_padding)).all():
@@ -507,6 +620,7 @@ def _run_command(argv: list[str]) -> None:
         loader_root=args.canonical_loader_root,
         eye_mode=args.eval_eye_mode,
         camera_key=args.stage_a_camera_key,
+        hy_root_aliases=args.hy_root_aliases,
     )
     if dataset.dataset_id != args.stage_a_dataset_id:
         raise ValueError("selection dataset ID disagrees with CLI")
@@ -530,6 +644,12 @@ def _run_command(argv: list[str]) -> None:
     model.requires_grad_(False)
     if model.perceptual_model is None:
         raise RuntimeError("checkpoint LPIPS model is unavailable")
+    flow_model = _FrozenRAFT(
+        args.raft_checkpoint,
+        args.raft_checkpoint_sha256,
+        device=device,
+        microbatch=args.raft_microbatch,
+    )
     teacher = None
     if not args.rgb_only:
         legacy.preflight_teacher_assets(args, (args.eval_eye_mode,))
@@ -576,6 +696,7 @@ def _run_command(argv: list[str]) -> None:
                         output,
                         dataset.view_names,
                         model.perceptual_model,
+                        flow_model,
                     )
     except Exception as error:
         failure_path = args.output_json.with_name(
@@ -616,7 +737,7 @@ def _run_command(argv: list[str]) -> None:
         args, dataset, teacher, model, specs, device
     )
     result = {
-        "schema": "stereo-tokenizer-stage-a1-result-v2",
+        "schema": "stereo-tokenizer-stage-a1-result-v3",
         "status": "smoke" if args.max_batches is not None else "formal",
         "posterior": "mean",
         "quality_precision": "fp32",
@@ -627,6 +748,7 @@ def _run_command(argv: list[str]) -> None:
             if teacher is None
             else legacy.teacher_provenance(args, args.eval_eye_mode)
         ),
+        "flow_teacher": flow_model.provenance(),
         "requested_modes": [mode_id for mode_id, _, _ in specs],
         "single_frame_source_indices": [0, 1, 2, 3],
         "metrics": metrics,
@@ -645,7 +767,7 @@ def _run_command(argv: list[str]) -> None:
             "rfvd": "native four-frame clips are unsupported by the frozen I3D implementation",
             "fvmd": "not validated for native four-frame clips",
         },
-        "pending_stage_a2": ["rfid", "raft_warp", "static_flicker", "motion_consistency"],
+        "pending_stage_a2": ["rfid"],
         "provenance": {
             **_source_provenance(),
             "environment": environment,
@@ -836,8 +958,8 @@ def _report_command(argv: list[str]) -> None:
         raise FileExistsError(f"refusing to overwrite {output}")
     quality_paths = sorted((root / "quality").glob("*.json"))
     benchmark_paths = sorted((root / "benchmark").glob("*.json"))
-    if len(quality_paths) != 9 or len(benchmark_paths) != 2:
-        raise ValueError("A1 report requires exactly 9 quality and 2 benchmark JSON files")
+    if len(quality_paths) != 10 or len(benchmark_paths) != 2:
+        raise ValueError("Stage A report requires exactly 10 quality and 2 benchmark JSON files")
     quality = [json.loads(path.read_text()) for path in quality_paths]
     benchmarks = [json.loads(path.read_text()) for path in benchmark_paths]
 
@@ -879,6 +1001,19 @@ def _report_command(argv: list[str]) -> None:
                 raise ValueError(f"{label}/{name}/{field} must be finite")
         if not summary["p50"] <= summary["p90"] <= summary["p99"]:
             raise ValueError(f"{label}/{name} percentiles are not monotonic")
+        return summary
+
+    def require_nonempty_summary(container, name, maximum_count, label):
+        summary = container.get(name)
+        if not isinstance(summary, dict):
+            raise ValueError(f"{label} is missing metric {name}")
+        count = int(summary.get("count", 0))
+        if not 1 <= count <= maximum_count:
+            raise ValueError(f"{label}/{name} coverage is empty or oversized")
+        for field in ("mean", "p50", "p90", "p99"):
+            value = summary.get(field)
+            if not isinstance(value, (int, float)) or not np.isfinite(value):
+                raise ValueError(f"{label}/{name}/{field} must be finite")
         return summary
 
     def require_rgb_v2_metrics(container, expected_count, *, four_frame, label):
@@ -936,6 +1071,27 @@ def _report_command(argv: list[str]) -> None:
                 "clamped_temporal_delta_lpips_pair_23",
             ):
                 require_summary(container, name, expected_count, label)
+            for name in (
+                "optical_flow_valid_ratio",
+                "static_flow_valid_ratio",
+                "dynamic_flow_valid_ratio",
+                "clamped_optical_flow_warp_l1",
+            ):
+                require_summary(container, name, expected_count, label)
+            for name in (
+                "clamped_static_flicker_l1",
+                "clamped_motion_flow_epe_px",
+            ):
+                require_nonempty_summary(container, name, expected_count, label)
+            for base in (
+                "clamped_optical_flow_warp_l1",
+                "clamped_static_flicker_l1",
+                "clamped_motion_flow_epe_px",
+            ):
+                for pair in ("pair_01", "pair_12", "pair_23"):
+                    require_nonempty_summary(
+                        container, f"{base}_{pair}", expected_count, label
+                    )
 
     status_path = root / "job-status.json"
     if not status_path.is_file():
@@ -978,6 +1134,7 @@ def _report_command(argv: list[str]) -> None:
         )),
         ("libero", "mono", "observation.images.cam_head_left"),
         ("libero", "mono", "observation.images.cam_left_wrist_left"),
+        ("hy", "mono", None),
     }
     actual = set()
     visualization_slots = set()
@@ -985,14 +1142,15 @@ def _report_command(argv: list[str]) -> None:
     environment_fingerprints = set()
     checkpoint_fingerprint = None
     checkpoint_sha256 = None
+    flow_fingerprint = None
     selection_rows = {}
     for result in quality:
-        if result.get("schema") != "stereo-tokenizer-stage-a1-result-v2":
+        if result.get("schema") != "stereo-tokenizer-stage-a1-result-v3":
             raise ValueError("quality result schema mismatch")
         dataset = result["dataset"]
         key = (dataset["dataset_id"], dataset["eye_mode"], dataset["camera_key"])
         actual.add(key)
-        expected_count = 1024 if dataset["dataset_id"] == "umi" else 256
+        expected_count = 1024 if dataset["dataset_id"] in {"umi", "hy"} else 256
         expected_modes = {
             *(f"{dataset['eye_mode']}/single_frame/source_{index}" for index in range(4)),
             f"{dataset['eye_mode']}/four_frame",
@@ -1039,22 +1197,48 @@ def _report_command(argv: list[str]) -> None:
         identity = dataset.get("identity_contract", {})
         require_sha256(identity.get("sha256"), f"{key} identity contract hash")
         require_sha256(identity.get("source_manifest_sha256"), f"{key} manifest hash")
-        config_hashes = dataset.get("canonical_config_sha256", {})
-        if not config_hashes:
-            raise ValueError(f"canonical config hashes are missing for {key}")
-        for config_path, digest in config_hashes.items():
-            require_sha256(digest, f"{config_path} config hash")
-            if sha256_file(Path(config_path)) != digest:
-                raise ValueError(f"canonical config drift for {config_path}")
-        loader_sha = dataset.get("canonical_loader", {}).get("git_sha")
-        if loader_sha != "d51377ac450b0066bc0c8eb13939bcfae47275ff":
-            raise ValueError("canonical loader SHA mismatch")
+        manifest_sha = identity["source_manifest_sha256"]
+        if dataset["dataset_id"] == "hy":
+            if (
+                dataset.get("data_backend") != "hy_lance_manifest"
+                or dataset.get("camera_key") is not None
+                or dataset.get("excluded_source_groups", {}).get("groups")
+                != ["table_014"]
+                or not dataset.get("included_source_groups")
+                or "table_014" in dataset["included_source_groups"]
+            ):
+                raise ValueError("Hy manifest backend/exclusion contract mismatch")
+            hy_manifest = dataset.get("hy_manifest", {})
+            require_sha256(hy_manifest.get("sha256"), "Hy production manifest hash")
+            hy_manifest_path = Path(str(hy_manifest.get("path", "")))
+            if (
+                not hy_manifest_path.is_file()
+                or sha256_file(hy_manifest_path) != hy_manifest["sha256"]
+                or selection_payload.get("hy_manifest") != hy_manifest
+                or selection_payload.get("excluded_source_groups")
+                != dataset["excluded_source_groups"]
+                or selection_payload.get("included_source_groups")
+                != dataset["included_source_groups"]
+            ):
+                raise ValueError("Hy production manifest or exclusion provenance drifted")
+            manifest_sha = hy_manifest["sha256"]
+        else:
+            config_hashes = dataset.get("canonical_config_sha256", {})
+            if not config_hashes:
+                raise ValueError(f"canonical config hashes are missing for {key}")
+            for config_path, digest in config_hashes.items():
+                require_sha256(digest, f"{config_path} config hash")
+                if sha256_file(Path(config_path)) != digest:
+                    raise ValueError(f"canonical config drift for {config_path}")
+            loader_sha = dataset.get("canonical_loader", {}).get("git_sha")
+            if loader_sha != "d51377ac450b0066bc0c8eb13939bcfae47275ff":
+                raise ValueError("canonical loader SHA mismatch")
         selection_rows.setdefault(
             dataset["dataset_id"],
             {
                 "semantic_sha256": dataset["selection_sha256"],
                 "file_sha256": dataset["selection_file_sha256"],
-                "manifest_sha256": identity["source_manifest_sha256"],
+                "manifest_sha256": manifest_sha,
                 "sample_count": expected_count,
                 "decode_checked": int(
                     decode_validation.get("checked_candidate_count", -1)
@@ -1065,6 +1249,11 @@ def _report_command(argv: list[str]) -> None:
                 "rejected_ids_sha256": decode_validation[
                     "rejected_episode_ids_sha256"
                 ],
+                "excluded": (
+                    dataset.get("excluded_source_groups")
+                    if dataset["dataset_id"] == "hy"
+                    else None
+                ),
             },
         )
         if selection_rows[dataset["dataset_id"]]["semantic_sha256"] != dataset["selection_sha256"]:
@@ -1080,6 +1269,31 @@ def _report_command(argv: list[str]) -> None:
             or teacher.get("checkpoint_sha256") != LAS2_H_CHECKPOINT_SHA256
         ):
             raise ValueError("LAS2-H provenance mismatch")
+
+        flow_teacher = result.get("flow_teacher", {})
+        if (
+            flow_teacher.get("name") != "torchvision.raft_large"
+            or flow_teacher.get("architecture") != "RAFT-Large"
+            or flow_teacher.get("precision") != "fp32"
+            or flow_teacher.get("flow_unit") != "content-crop pixels"
+            or float(flow_teacher.get("static_flow_max_px", -1))
+            != STATIC_FLOW_MAX_PX
+            or float(flow_teacher.get("dynamic_flow_min_px", -1))
+            != DYNAMIC_FLOW_MIN_PX
+            or float(flow_teacher.get("forward_backward_relative_threshold", -1))
+            != FLOW_FB_RELATIVE_THRESHOLD
+            or float(flow_teacher.get("forward_backward_absolute_threshold_px2", -1))
+            != FLOW_FB_ABSOLUTE_THRESHOLD_PX2
+        ):
+            raise ValueError(f"RAFT flow contract mismatch for {key}")
+        require_sha256(
+            flow_teacher.get("checkpoint_sha256"), f"{key} RAFT checkpoint hash"
+        )
+        current_flow_fingerprint = json.dumps(flow_teacher, sort_keys=True)
+        if flow_fingerprint is None:
+            flow_fingerprint = current_flow_fingerprint
+        elif current_flow_fingerprint != flow_fingerprint:
+            raise ValueError("RAFT provenance mismatch across quality results")
 
         parameters = result.get("tokenizer_parameters", {})
         if (
@@ -1149,6 +1363,28 @@ def _report_command(argv: list[str]) -> None:
                 four_frame=mode_id.endswith("/four_frame"),
                 label=f"{key}/{mode_id}/macro",
             )
+            if mode_id.endswith("/four_frame"):
+                geometry_prefix = (
+                    "reconstruction_teacher"
+                    if dataset["eye_mode"] == "mono"
+                    else "depth_head_teacher"
+                )
+                for scope_name, scope_metrics in (
+                    *tuple(mode.get("per_view", {}).items()),
+                    ("macro", mode.get("per_sample_macro", {})),
+                ):
+                    require_summary(
+                        scope_metrics,
+                        f"{geometry_prefix}_temporal_geometry_valid_ratio",
+                        expected_count,
+                        f"{key}/{mode_id}/{scope_name}",
+                    )
+                    require_nonempty_summary(
+                        scope_metrics,
+                        f"{geometry_prefix}_temporal_geometry_warp_l1",
+                        expected_count,
+                        f"{key}/{mode_id}/{scope_name}",
+                    )
             teacher_invalid = mode.get("teacher_invalid_samples", [])
             if int(mode.get("teacher_invalid_count", -1)) != len(teacher_invalid):
                 raise ValueError(f"teacher-invalid count mismatch for {key}")
@@ -1266,6 +1502,13 @@ def _report_command(argv: list[str]) -> None:
     ):
         raise ValueError("frozen LPIPS VGG16 file is missing or has changed")
     checkpoint = quality[0]["checkpoint"]
+    flow_teacher = quality[0]["flow_teacher"]
+    flow_checkpoint_path = Path(flow_teacher["checkpoint"])
+    if (
+        not flow_checkpoint_path.is_file()
+        or sha256_file(flow_checkpoint_path) != flow_teacher["checkpoint_sha256"]
+    ):
+        raise ValueError("frozen RAFT checkpoint is missing or has changed")
     parameters = quality[0]["tokenizer_parameters"]
     package_text = ", ".join(
         f"{name}={version}" for name, version in sorted(environment["packages"].items())
@@ -1274,7 +1517,7 @@ def _report_command(argv: list[str]) -> None:
     lines = [
         "# Stereo Tokenizer Stage A1 Baseline（Preliminary）",
         "",
-        "> 状态：PRELIMINARY。v5 修正 RGB 指标域并 supersede v4 的 RGB 结论；HY 因 canonical Lance index/loader 合同冲突被阻断；rFID 与 RAFT 指标留待 A2。",
+        "> 状态：PRELIMINARY。v6 增加 HY（显式排除 Table014）、RAFT warp/static flicker/motion consistency 和 teacher-relative temporal geometry；rFID 暂不执行。",
         "",
         "> v4 失效原因：raw L1/MSE/PSNR/LPIPS 与 clamp 后 SSIM 不在同一图像域，且旧越界阈值 abs(output)>1 与合法域 [-0.5,0.5] 不一致。v4 artifact 仅保留作审计。",
         "",
@@ -1292,6 +1535,7 @@ def _report_command(argv: list[str]) -> None:
         f"- Python：`{environment['python'].split()[0]}`；GPU：`{environment['gpu_name']}`；CUDA：`{environment['torch_cuda']}`；cuDNN：`{environment['cudnn']}`",
         f"- `uv.lock` SHA256：`{environment['uv_lock_sha256']}`",
         f"- LPIPS VGG16：`{metric_backbone['path']}`；SHA256：`{metric_backbone['sha256']}`；预处理：`{metric_backbone['preprocessing']}`",
+        f"- RAFT-Large：`{flow_teacher['checkpoint']}`；SHA256：`{flow_teacher['checkpoint_sha256']}`；FP32；static≤{flow_teacher['static_flow_max_px']} px；dynamic≥{flow_teacher['dynamic_flow_min_px']} px。",
         f"- 关键包：{package_text}",
         f"- Tokenizer 参数：total={parameters['total']:,}；架构可训练={parameters['architecturally_trainable']:,}；运行时 requires_grad={parameters['runtime_requires_grad']:,}",
         f"- DA3：source `{DA3_SOURCE_SHA}`；weights `{DA3_CHECKPOINT_SHA256}`",
@@ -1299,18 +1543,18 @@ def _report_command(argv: list[str]) -> None:
         "",
         "### 数据与哈希",
         "",
-        "| Dataset | Windows/cell | Decode checked/rejected | Selection semantic SHA256 | Selection file SHA256 | Manifest SHA256 |",
-        "| --- | ---: | ---: | --- | --- | --- |",
+        "| Dataset | Windows/cell | Decode checked/rejected | Explicit exclusion | Selection semantic SHA256 | Selection file SHA256 | Manifest SHA256 |",
+        "| --- | ---: | ---: | --- | --- | --- | --- |",
     ]
     for dataset_id, row in sorted(selection_rows.items()):
         lines.append(
             f"| {dataset_id} | {row['sample_count']} | "
             f"{row['decode_checked']}/{row['decode_rejected']} | "
+            f"{('none' if row['excluded'] is None else ','.join(row['excluded']['groups']) + ':' + str(row['excluded']['episode_count']))} | "
             f"`{row['semantic_sha256']}` | `{row['file_sha256']}` | "
             f"`{row['manifest_sha256']}` |"
         )
     lines.extend([
-        "| HY | 0（BLOCKED） | N/A | N/A | N/A | 已冻结但不参与本次 macro |",
         "",
         "### 覆盖矩阵",
         "",
@@ -1326,7 +1570,6 @@ def _report_command(argv: list[str]) -> None:
             f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {camera} | "
             f"{dataset['sample_count']} | single source 0/1/2/3 + four-frame | yes |"
         )
-    lines.append("| HY | mono | N/A | 0 | BLOCKED | no |")
     lines.extend([
         "",
         "## Clamp-domain RGB 图像质量（per camera/view）",
@@ -1459,6 +1702,30 @@ def _report_command(argv: list[str]) -> None:
             )
     lines.extend([
         "",
+        "### RAFT flow-aware 时间指标",
+        "",
+        "Warp L1 使用目标视频的 backward flow 对齐相邻帧；static flicker 仅统计目标 flow≤0.5 px；motion EPE 仅统计目标 flow≥1.0 px。0.5–1.0 px 灰区不进入后二者。",
+        "",
+        "| Dataset | Eye | Camera/view | Warp L1 | Static flicker L1 | Motion EPE px | Flow/static/dynamic coverage |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        mode = result["metrics"][f"{dataset['eye_mode']}/four_frame"]
+        for view_name, metric in mode["per_view"].items():
+            lines.append(
+                f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | "
+                f"{metric['clamped_optical_flow_warp_l1']['mean']:.6f} | "
+                f"{metric['clamped_static_flicker_l1']['mean']:.6f} | "
+                f"{metric['clamped_motion_flow_epe_px']['mean']:.6f} | "
+                f"{metric['optical_flow_valid_ratio']['mean']:.4f}/"
+                f"{metric['static_flow_valid_ratio']['mean']:.4f}/"
+                f"{metric['dynamic_flow_valid_ratio']['mean']:.4f} |"
+            )
+    lines.extend([
+        "",
         "## Teacher-relative 几何（非真实 GT accuracy）",
         "",
         "| Dataset | Eye | Camera/view | Mode | Metric kind | log-L1 | RMSE | SILog | Mask coverage | Valid samples |",
@@ -1481,6 +1748,31 @@ def _report_command(argv: list[str]) -> None:
                     f"{render(l1)} | {render(rmse)} | {render(silog)} | "
                     f"{render(coverage)} | {0 if l1 is None else l1['count']} |"
                 )
+    lines.extend([
+        "",
+        "### Teacher-relative temporal geometry consistency",
+        "",
+        "| Dataset | Eye | Camera/view | Flow-aligned log-geometry L1 | Valid coverage | Pairs 01/12/23 |",
+        "| --- | --- | --- | ---: | ---: | --- |",
+    ])
+    for result in sorted(quality, key=lambda value: (
+        value["dataset"]["dataset_id"], value["dataset"]["eye_mode"], value["dataset"]["camera_key"] or ""
+    )):
+        dataset = result["dataset"]
+        prefix = "reconstruction_teacher" if dataset["eye_mode"] == "mono" else "depth_head_teacher"
+        mode = result["metrics"][f"{dataset['eye_mode']}/four_frame"]
+        for view_name, metric in mode["per_view"].items():
+            name = f"{prefix}_temporal_geometry_warp_l1"
+            pair_values = "/".join(
+                f"{metric[f'{name}_pair_{pair}']['mean']:.6f}"
+                for pair in ("01", "12", "23")
+            )
+            lines.append(
+                f"| {dataset['dataset_id']} | {dataset['eye_mode']} | {view_name} | "
+                f"{metric[name]['mean']:.6f} | "
+                f"{metric[f'{prefix}_temporal_geometry_valid_ratio']['mean']:.4f} | "
+                f"{pair_values} |"
+            )
     lines.extend([
         "",
         "## Bottleneck 与效率",
@@ -1592,23 +1884,23 @@ def _report_command(argv: list[str]) -> None:
         "## 阻断与未完成项",
         "",
         "- 每个 selection 的 decode checked/rejected 与 rejected episode IDs SHA256 已记录；完整排除原因保存在 selection JSON。",
-        "- HY：BLOCKED，不进入任何 macro average；原因是 canonical Lance `index` 与 pinned loader 的物理 offset 合同冲突。",
-        "- rFID、RAFT warp/static flicker/motion consistency：Pending Stage A2。",
+        "- HY：通过训练同款 manifest reader 读取；Table014 因当前资产缺失被显式排除，排除数量和 episode IDs hash 写入 selection。",
+        "- rFID：按本轮范围暂不执行。",
         "- rFVD：N/A，现有冻结 I3D-FVD 实现不支持本项目原生 4 帧合同；扩帧/插帧会改变评测对象。",
         "- FVMD：N/A，尚无经验证适用于原生 4 帧的冻结实现。",
         "",
         "## 决策",
         "",
-        "1. **值得继续，但需要补 A2 与 HY 修复。** A1 可作为 preliminary baseline，不能表述成完整 Stage A。",
+        "1. **值得继续，但仍需补 rFID 与 Table014。** 当前结果可作为扩展后的 preliminary Stage A，不能表述成完整最终标准。",
         "2. **最大风险：** 当前几何指标只有 teacher-relative 证据；若误写为真实 depth/disparity accuracy，会得到错误结论。",
-        "3. **最缺的关键证据：** 独立真实几何 GT，以及 rFID/显式 warp-motion 指标；HY 的 identity/offset 合同也仍缺上游确认。",
-        "4. **今天可执行的最小下一步：** 固定同一批 16 个案例做人工异常审查，并为 A2 锁定 rFID 与 RAFT 的权重、预处理和版本。",
-        "5. **置信度：80%（中等）。** 对 A1 已报告数字和可复现合同置信度较高；因 HY、A2 与独立几何 GT 缺失，不给高置信度。",
+        "3. **最缺的关键证据：** 独立真实几何 GT、rFID，以及 Table014 的可读资产。",
+        "4. **下一步：** 固定同一 selection 对 baseline/candidate 重跑，并补齐 Table014 后保持其他合同不变复测 HY。",
+        "5. **置信度：80%（中等）。** 对已报告数字和可复现合同置信度较高；因 rFID、Table014 与独立几何 GT 缺失，不给高置信度。",
         "",
     ])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
-    print(json.dumps({"output": str(output), "quality_results": 9, "benchmarks": 2}, indent=2))
+    print(json.dumps({"output": str(output), "quality_results": 10, "benchmarks": 2}, indent=2))
 
 
 def main() -> None:

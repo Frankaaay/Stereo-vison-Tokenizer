@@ -65,8 +65,7 @@
 - PSNR ↑；
 - SSIM ↑；
 - LPIPS ↓；
-- rFID ↓：single-frame；
-- rFVD ↓：four-frame。
+- rFID ↓：single-frame。
 
 聚合同时包含 per-camera、per-mode、macro average，以及样本级 P50/P90/P99。额外报告 NaN/Inf、无效输出、输出范围和 `abs(output)>1` 像素比例，防止少量爆点被平均指标掩盖。
 
@@ -78,28 +77,22 @@ four-frame 模式报告：
 - temporal-delta LPIPS ↓；
 - optical-flow warp error ↓；
 - 静态区域 flicker error ↓；
-- 动态区域 motion consistency error ↓；
-- FVMD ↓，当其依赖和冻结实现可用时加入。
+- 动态区域 motion consistency error ↓。
 
-rFVD 不单独承担时间一致性结论，因为传统 I3D-FVD 可能偏向单帧内容。至少同时保留一种显式 temporal-delta/warp/motion 指标。
+时间一致性结论必须至少包含一种显式 temporal-delta/warp/motion 指标。
 
 ### 3.4 Stereo 与深度
 
-有独立真实 disparity/depth ground truth 时报告：
+当前数据合同不提供独立真实 disparity/depth ground truth，且当前 decoder 只重建目标眼、不重建可配对评测的右眼。因此 Stage A 不纳入真实 GT depth/disparity accuracy、left-right consistency 或 stereo reprojection 指标。
 
-- disparity EPE ↓；
-- D1 ↓；
-- AbsRel ↓；
-- RMSE ↓；
-- SILog ↓；
-- δ1/δ2/δ3 ↑；
-- left-right consistency error ↓；
-- stereo reprojection/warp error ↓；
-- temporal depth/disparity consistency ↓。
+当前可执行的几何代理指标为：
 
-按 foreground/background、occluded/non-occluded、robot/end-effector、manipulation object、contact boundary 和 camera/view 拆分。
+- mono：DA3 分别推理原图与重建图，报告 relative log-L1、relative log-RMSE 和 relative log-SILog；
+- stereo：将 LAS2-H disparity 转换为无物理尺度的相对目标，与模型 depth head 比较 relative log-L1、relative log-RMSE 和 relative log-SILog；
+- 同时报告 teacher valid-mask coverage、有效样本数，并按 camera/view 拆分；
+- four-frame 可在冻结 teacher 时序合同后补充 teacher-relative temporal depth/disparity consistency。
 
-没有独立 GT 时，只能报告 DA3-relative depth agreement 或 LAS2-H-relative disparity agreement，并明确标为 teacher-relative；不得将其描述为真实 depth/disparity accuracy。
+以上结果必须明确标为 teacher-relative agreement，只能说明重建或模型 depth head 对 teacher 相对几何结构的保持程度，不得描述为真实深度、视差或三维空间感知精度。
 
 ### 3.5 Bottleneck 与系统效率
 
@@ -326,7 +319,4 @@ A/B 必须使用由目标 codebase 冻结的同一 WAM 架构、训练数据、�
 - LingBot-VA 2.0：<https://arxiv.org/html/2607.08639>
 - RepWAM：<https://arxiv.org/html/2606.13674>
 - Cosmos World Foundation Model / Tokenizer：<https://arxiv.org/html/2501.03575>
-- FVD content bias：<https://arxiv.org/html/2404.12391>
-- FVMD：<https://arxiv.org/html/2407.16124>
-- KITTI Stereo 2015：<https://www.cvlibs.net/datasets/kitti/eval_scene_flow.php?benchmark=stereo>
 

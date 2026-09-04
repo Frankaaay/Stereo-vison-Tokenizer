@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import re
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 from stereo_tokenizer.geometry import GeometryMapping
+from stereo_tokenizer.pretrain_data import (
+    HY_MONO_CAMERA_IDS,
+    HY_SCHEMA,
+    HyLanceMonoDataset,
+    _mono_sample,
+    _resolve_alias_path,
+)
 
 from .stage_a_contract import (
     CANONICAL_SPLIT_SCHEMA,
@@ -35,6 +45,178 @@ CAMERA_KEYS = (
     "observation.images.cam_right_wrist_right",
 )
 STEREO_VIEW_NAMES = ("head", "left_wrist", "right_wrist")
+HY_EXCLUDED_TABLES = ("table_014",)
+
+
+def _normalise_hy_table_name(value: Any) -> str:
+    match = re.fullmatch(r"table[_-]?(\d+)", str(value).strip().lower())
+    if match is None:
+        raise ValueError(f"invalid Hy table name {value!r}")
+    return f"table_{int(match.group(1)):03d}"
+
+
+def parse_root_aliases(value: str | dict[str, str] | None) -> dict[str, Path]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError("Hy root aliases must be valid JSON") from error
+    if not isinstance(value, dict) or not value:
+        raise ValueError("Hy evaluation requires non-empty root aliases")
+    output = {}
+    for alias, raw_path in value.items():
+        if not isinstance(alias, str) or not alias or not isinstance(raw_path, str):
+            raise ValueError("Hy root aliases must map strings to absolute paths")
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(path)
+        output[alias] = path
+    return output
+
+
+def _read_hy_manifest_matches(
+    manifest_path: str | Path,
+    expected_sha256: str,
+    identities: set[tuple[str, int]],
+) -> tuple[dict[tuple[str, int], dict[str, Any]], dict[str, Any]]:
+    path = Path(manifest_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    actual = sha256_file(path)
+    if actual != expected_sha256:
+        raise ValueError(
+            f"Hy manifest SHA mismatch: requested={expected_sha256}, actual={actual}"
+        )
+    normalized_identities = {
+        (_normalise_hy_table_name(table), int(episode_index))
+        for table, episode_index in identities
+    }
+    matched = {}
+    open_text = gzip.open if path.suffix == ".gz" else open
+    with open_text(path, "rt", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{path}:{line_number}: invalid JSON") from error
+            if record.get("schema") != HY_SCHEMA:
+                raise ValueError(f"{path}:{line_number}: invalid Hy schema")
+            key = (
+                _normalise_hy_table_name(record.get("table_name")),
+                int(record.get("episode_index", -1)),
+            )
+            if key not in normalized_identities:
+                continue
+            if key in matched:
+                raise ValueError(f"Hy manifest contains duplicate identity {key}")
+            record = dict(record)
+            record["table_name"] = key[0]
+            matched[key] = record
+    return matched, {"path": str(path), "sha256": actual}
+
+
+def _hy_lance_handle(
+    record: dict[str, Any],
+    root_aliases: dict[str, Path],
+    handles: dict[tuple[str, str], Any],
+):
+    key = (str(record["root_alias"]), str(record["table_name"]))
+    if key not in handles:
+        try:
+            import lance
+        except ImportError as error:
+            raise ImportError("Hy Stage A loading requires pylance") from error
+        table_root = _resolve_alias_path(root_aliases, key[0], key[1])
+        lance_path = table_root / f"{key[1]}.lance"
+        if not lance_path.is_dir():
+            raise FileNotFoundError(lance_path)
+        handles[key] = lance.dataset(str(lance_path))
+    return handles[key]
+
+
+def _decode_hy_selection_record(
+    selection_record: dict[str, Any],
+    root_aliases: dict[str, Path],
+    handles: dict[tuple[str, str], Any],
+) -> dict[str, Any]:
+    record = selection_record["hy_manifest_record"]
+    camera_columns = record.get("camera_columns")
+    if not isinstance(camera_columns, dict) or set(camera_columns) != set(
+        HY_MONO_CAMERA_IDS
+    ):
+        raise ValueError("selected Hy record has an invalid camera contract")
+    frame_indices = np.asarray(
+        selection_record["expected_source_frame_indices"], dtype=np.int64
+    )
+    columns = [camera_columns[camera] for camera in HY_MONO_CAMERA_IDS]
+    rows = HyLanceMonoDataset._take_episode_frames(
+        _hy_lance_handle(record, root_aliases, handles),
+        int(record["episode_index"]),
+        frame_indices,
+        ["episode_index", "frame_index", "timestamp", *columns],
+    )
+    timestamps = np.asarray([float(row["timestamp"]) for row in rows], np.float64)
+    if not HyLanceMonoDataset._timestamps_match_frame_rate(
+        timestamps, frame_indices, float(record.get("fps", 30.0))
+    ):
+        raise ValueError("selected Hy timestamps disagree with frame identity")
+    stored_image = record.get("stored_image")
+    expected_hw = (256, 256) if stored_image is not None else (240, 424)
+    rgb = np.stack(
+        [
+            np.stack(
+                [HyLanceMonoDataset._decode_jpeg(row[column], expected_hw) for row in rows]
+            )
+            for column in columns
+        ]
+    )
+    source_hw_override = None
+    if stored_image is not None:
+        expected = {
+            "encoded_size_hw": [256, 256],
+            "source_size_hw": [240, 424],
+            "transform": "source_240x424_letterbox_256",
+            "content_bbox_yxyx": [55, 0, 200, 256],
+        }
+        if any(stored_image.get(key) != value for key, value in expected.items()):
+            raise ValueError("selected Hy stored-image contract changed")
+        mask_relative = Path(stored_image.get("pixel_mask_relative_path", ""))
+        mask_path = _resolve_alias_path(
+            root_aliases, record["root_alias"], str(mask_relative)
+        )
+        if (
+            not mask_path.is_file()
+            or sha256_file(mask_path) != stored_image.get("pixel_mask_sha256")
+        ):
+            raise ValueError("selected Hy pixel-mask asset changed")
+        top, left, bottom, right = stored_image["content_bbox_yxyx"]
+        rgb = rgb[:, :, :, top:bottom, left:right]
+        source_hw_override = tuple(stored_image["source_size_hw"])
+    sample = _mono_sample(
+        rgb,
+        sample_id=(
+            f"hy/{record['table_name']}/{record['episode_id']}/"
+            f"{int(frame_indices[0]):06d}"
+        ),
+        view_sample_ids=tuple(
+            f"hy/{record['table_name']}/{record['episode_id']}/{camera}/"
+            f"{int(frame_indices[0]):06d}"
+            for camera in HY_MONO_CAMERA_IDS
+        ),
+        camera_ids=HY_MONO_CAMERA_IDS,
+        episode_id=str(record["episode_id"]),
+        dataset_id="hy",
+        frame_indices=frame_indices,
+        timestamps=timestamps,
+        contract_sha256=str(record["source_contract_sha256"]),
+        temporal_mode="four_frame",
+        extra={"table_name": str(record["table_name"])},
+        source_hw_override=source_hw_override,
+    )
+    sample["rgb_valid_mask"] = sample["non_padding_mask"]
+    return sample
 
 
 def _git(root: Path, *args: str) -> str:
@@ -158,13 +340,16 @@ def build_canonical_selection(
     *,
     dataset_id: str,
     identity_contract_path: str | Path,
-    canonical_config_root: str | Path,
-    loader_root: str | Path,
+    canonical_config_root: str | Path | None,
+    loader_root: str | Path | None,
     split: str,
     sample_count: int,
     seed: int,
     output: str | Path,
     umi_publish_ledger: str | Path | None = None,
+    hy_manifest_path: str | Path | None = None,
+    hy_manifest_sha256: str | None = None,
+    hy_root_aliases: str | dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Map frozen checkpoint identities onto current canonical table windows."""
 
@@ -176,6 +361,123 @@ def build_canonical_selection(
     ]
     if not split_records:
         raise ValueError(f"identity contract has no {dataset_id}/{split} episodes")
+    if dataset_id == "hy":
+        if hy_manifest_path is None or hy_manifest_sha256 is None:
+            raise ValueError("Hy selection requires its production manifest and SHA256")
+        excluded = [
+            record
+            for record in split_records
+            if _normalise_hy_table_name(record.get("table_name"))
+            in HY_EXCLUDED_TABLES
+        ]
+        included = [
+            record
+            for record in split_records
+            if _normalise_hy_table_name(record.get("table_name"))
+            not in HY_EXCLUDED_TABLES
+        ]
+        requested = {
+            (
+                _normalise_hy_table_name(record["table_name"]),
+                int(record["episode_index"]),
+            )
+            for record in included
+        }
+        manifest_records, manifest_provenance = _read_hy_manifest_matches(
+            hy_manifest_path,
+            hy_manifest_sha256,
+            requested,
+        )
+        candidates = []
+        missing = []
+        for identity_record in included:
+            key = (
+                _normalise_hy_table_name(identity_record["table_name"]),
+                int(identity_record["episode_index"]),
+            )
+            source = manifest_records.get(key)
+            if source is None:
+                missing.append(str(identity_record["episode_id"]))
+                continue
+            candidates.append(
+                {
+                    "legacy_episode_id": str(identity_record["episode_id"]),
+                    "legacy_group": key[0],
+                    "canonical_episode_index": key[1],
+                    "canonical_rgb_target_length": int(source["length"]),
+                    "source_fps": float(source.get("fps", 30.0)),
+                    "window_count": int(source["window_count"]),
+                    "hy_manifest_record": source,
+                }
+            )
+        if missing:
+            raise ValueError(
+                "Hy post-exclusion identity join is incomplete: "
+                f"missing={len(missing)}, sha256={canonical_sha256(sorted(missing))}"
+            )
+        aliases = parse_root_aliases(hy_root_aliases)
+        handles: dict[tuple[str, str], Any] = {}
+
+        def validate_hy_decode(row: dict[str, Any]) -> None:
+            sample = _decode_hy_selection_record(row, aliases, handles)
+            if tuple(sample["video"].shape) != (3, 1, 3, 4, 256, 256):
+                raise ValueError("decoded Hy candidate has unexpected video shape")
+            if not torch.isfinite(sample["video"]).all():
+                raise ValueError("decoded Hy candidate contains NaN/Inf")
+
+        selection = select_episode_windows(
+            candidates,
+            dataset_id=dataset_id,
+            split=split,
+            sample_count=sample_count,
+            seed=seed,
+            identity_contract=identity,
+            candidate_validator=validate_hy_decode,
+        )
+        selection["data_backend"] = "hy_lance_manifest"
+        selection["hy_manifest"] = manifest_provenance
+        included_groups = sorted(
+            {_normalise_hy_table_name(record["table_name"]) for record in included}
+        )
+        selected_groups = sorted(
+            {str(record["legacy_group"]) for record in selection["records"]}
+        )
+        if selected_groups != included_groups:
+            raise ValueError(
+                "Hy selected windows do not cover every post-exclusion table: "
+                f"expected={included_groups}, actual={selected_groups}"
+            )
+        selection["included_source_groups"] = included_groups
+        selection["excluded_source_groups"] = {
+            "groups": list(HY_EXCLUDED_TABLES),
+            "episode_count": len(excluded),
+            "episode_ids_sha256": canonical_sha256(
+                sorted(str(record["episode_id"]) for record in excluded)
+            ),
+            "reason": "table_014 is explicitly unavailable for this evaluation",
+        }
+        selection["identity_mapping"] = {
+            "identity_schema": identity["schema"],
+            "identity_split_episode_count": len(split_records),
+            "post_exclusion_episode_count": len(included),
+            "mapped_complete_episode_count": len(candidates),
+            "missing_episode_count": len(missing),
+            "missing_episode_ids_sha256": canonical_sha256(sorted(missing)),
+            "policy": "exact_identity_join_then_explicit_table_exclusion",
+        }
+        repo_root = Path.cwd().resolve()
+        selection["generation"] = {
+            "cwd": str(repo_root),
+            "git_branch": _git(repo_root, "branch", "--show-current"),
+            "git_commit": _git(repo_root, "rev-parse", "HEAD"),
+            "git_status_porcelain": _git(repo_root, "status", "--porcelain"),
+        }
+        selection.pop("selection_sha256")
+        selection["selection_sha256"] = canonical_sha256(selection)
+        write_selection(output, selection)
+        return selection
+    if canonical_config_root is None or loader_root is None:
+        raise ValueError("canonical selection requires config and loader roots")
     config_root = Path(canonical_config_root).expanduser().resolve()
     umi_mapping = None
     ledger_provenance = None
@@ -327,13 +629,64 @@ class CanonicalStageADataset(Dataset):
         self,
         selection_path: str | Path,
         *,
-        loader_root: str | Path,
+        loader_root: str | Path | None,
         eye_mode: str,
         camera_key: str | None = None,
+        hy_root_aliases: str | dict[str, str] | None = None,
     ) -> None:
         self.selection = read_selection(selection_path)
         self.selection_path = Path(selection_path).expanduser().resolve()
         self.dataset_id = str(self.selection["dataset_id"])
+        self.eye_mode = str(eye_mode)
+        if self.selection.get("data_backend") == "hy_lance_manifest":
+            if self.dataset_id != "hy" or self.eye_mode != "mono":
+                raise ValueError("Hy Lance Stage A selection requires hy/mono")
+            if camera_key is not None:
+                raise ValueError("Hy Lance Stage A evaluates all three mono views together")
+            if self.selection.get("excluded_source_groups", {}).get("groups") != list(
+                HY_EXCLUDED_TABLES
+            ):
+                raise ValueError("Hy excluded-table contract changed")
+            selected_groups = sorted(
+                {str(record["legacy_group"]) for record in self.selection["records"]}
+            )
+            if selected_groups != self.selection.get("included_source_groups"):
+                raise ValueError("Hy selected-table coverage contract changed")
+            manifest = self.selection.get("hy_manifest", {})
+            if sha256_file(manifest.get("path", "")) != manifest.get("sha256"):
+                raise ValueError("Hy production manifest drifted after selection creation")
+            self.loader_root = None
+            self.camera_key = None
+            self.camera_index = None
+            self.view_names = HY_MONO_CAMERA_IDS
+            self._hy_root_aliases = parse_root_aliases(hy_root_aliases)
+            self._hy_handles: dict[tuple[str, str], Any] = {}
+            identity_meta = self.selection["identity_contract"]
+            identity = read_identity_contract(
+                identity_meta["path"], dataset_id=self.dataset_id
+            )
+            if (
+                identity["identity_contract_sha256"] != identity_meta["sha256"]
+                or identity["source_manifest_sha256"]
+                != identity_meta["source_manifest_sha256"]
+            ):
+                raise ValueError("Hy identity contract drifted after selection creation")
+            split_ids = {
+                str(record["episode_id"])
+                for record in identity["records"]
+                if record.get("split") == self.selection["split"]
+                and _normalise_hy_table_name(record.get("table_name"))
+                not in HY_EXCLUDED_TABLES
+            }
+            selected_ids = {
+                str(record["legacy_episode_id"])
+                for record in self.selection["records"]
+            }
+            if not selected_ids.issubset(split_ids):
+                raise ValueError("Hy selection escaped its frozen post-exclusion split")
+            return
+        if loader_root is None:
+            raise ValueError("canonical Stage A dataset requires a loader root")
         actual_loader = Path(loader_root).expanduser().resolve()
         if not actual_loader.is_dir():
             raise FileNotFoundError(f"canonical loader is missing: {actual_loader}")
@@ -380,7 +733,6 @@ class CanonicalStageADataset(Dataset):
         ledger = self.selection.get("umi_publish_ledger")
         if ledger is not None and sha256_file(ledger["path"]) != ledger["sha256"]:
             raise ValueError("UMI publish ledger drifted after selection creation")
-        self.eye_mode = str(eye_mode)
         if self.eye_mode not in {"mono", "stereo"}:
             raise ValueError("eye_mode must be mono or stereo")
         if self.eye_mode == "stereo":
@@ -455,6 +807,10 @@ class CanonicalStageADataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.selection["records"][index]
+        if self.selection.get("data_backend") == "hy_lance_manifest":
+            return _decode_hy_selection_record(
+                record, self._hy_root_aliases, self._hy_handles
+            )
         config = record["canonical_config"]
         start, _ = self._addresses[config][int(record["canonical_episode_index"])]
         source = self._datasets[config][start + int(record["anchor_rgb_index"])]
@@ -522,6 +878,24 @@ class CanonicalStageADataset(Dataset):
         }
 
     def provenance(self) -> dict[str, Any]:
+        if self.selection.get("data_backend") == "hy_lance_manifest":
+            return {
+                "dataset_id": self.dataset_id,
+                "selection_path": str(self.selection_path),
+                "selection_sha256": self.selection["selection_sha256"],
+                "identity_contract": self.selection["identity_contract"],
+                "sample_count": len(self),
+                "eye_mode": self.eye_mode,
+                "camera_key": None,
+                "video_contract": "[B,3,1,3,T,H,W]",
+                "data_backend": "hy_lance_manifest",
+                "hy_manifest": self.selection["hy_manifest"],
+                "excluded_source_groups": self.selection["excluded_source_groups"],
+                "included_source_groups": self.selection["included_source_groups"],
+                "root_aliases": {
+                    alias: str(path) for alias, path in sorted(self._hy_root_aliases.items())
+                },
+            }
         return {
             "dataset_id": self.dataset_id,
             "selection_path": str(self.selection_path),

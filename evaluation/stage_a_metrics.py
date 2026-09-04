@@ -19,6 +19,10 @@ from stereo_tokenizer.modules.relative_depth import (
 PERCENTILES = (0.50, 0.90, 0.99)
 RGB_MIN = -0.5
 RGB_MAX = 0.5
+STATIC_FLOW_MAX_PX = 0.5
+DYNAMIC_FLOW_MIN_PX = 1.0
+FLOW_FB_RELATIVE_THRESHOLD = 0.01
+FLOW_FB_ABSOLUTE_THRESHOLD_PX2 = 0.5
 
 
 def _summary(values: list[float]) -> dict[str, float | int]:
@@ -35,11 +39,7 @@ def _summary(values: list[float]) -> dict[str, float | int]:
     }
 
 
-def _content_crop(
-    target: torch.Tensor, prediction: torch.Tensor, mask: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Crop [C,T,H,W] tensors to one strict rectangular valid region."""
-
+def _content_bounds(mask: torch.Tensor) -> tuple[int, int, int, int]:
     if mask.dtype != torch.bool or mask.ndim != 3:
         raise TypeError("RGB mask must be bool [T,H,W]")
     if not torch.equal(mask, mask[0:1].expand_as(mask)):
@@ -54,9 +54,297 @@ def _content_crop(
     rectangle[y0:y1, x0:x1] = True
     if not torch.equal(spatial, rectangle):
         raise ValueError("Stage A SSIM/LPIPS requires a rectangular content mask")
+    return int(y0), int(x0), int(y1), int(x1)
+
+
+def _content_crop(
+    target: torch.Tensor, prediction: torch.Tensor, mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Crop [C,T,H,W] tensors to one strict rectangular valid region."""
+
+    y0, x0, y1, x1 = _content_bounds(mask)
     target_frames = target[:, :, y0:y1, x0:x1].permute(1, 0, 2, 3)
     prediction_frames = prediction[:, :, y0:y1, x0:x1].permute(1, 0, 2, 3)
     return target_frames, prediction_frames
+
+
+def _warp_with_flow(
+    source: torch.Tensor, flow_to_source: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample ``source`` at pixel coordinates displaced by ``flow_to_source``."""
+
+    if source.ndim != 4 or flow_to_source.ndim != 4:
+        raise ValueError("flow warp requires source [N,C,H,W] and flow [N,2,H,W]")
+    if source.shape[0] != flow_to_source.shape[0] or source.shape[-2:] != flow_to_source.shape[-2:]:
+        raise ValueError("flow warp source/flow shapes disagree")
+    if flow_to_source.shape[1] != 2:
+        raise ValueError("optical flow must have two channels")
+    count, _, height, width = source.shape
+    y, x = torch.meshgrid(
+        torch.arange(height, device=source.device, dtype=flow_to_source.dtype),
+        torch.arange(width, device=source.device, dtype=flow_to_source.dtype),
+        indexing="ij",
+    )
+    sample_x = x.unsqueeze(0) + flow_to_source[:, 0]
+    sample_y = y.unsqueeze(0) + flow_to_source[:, 1]
+    in_bounds = (
+        (sample_x >= 0)
+        & (sample_x <= width - 1)
+        & (sample_y >= 0)
+        & (sample_y <= height - 1)
+    )
+    if width == 1 or height == 1:
+        raise ValueError("flow warp requires spatial dimensions greater than one")
+    grid = torch.stack(
+        (
+            sample_x.mul(2.0 / (width - 1)).sub(1.0),
+            sample_y.mul(2.0 / (height - 1)).sub(1.0),
+        ),
+        dim=-1,
+    )
+    warped = torch.nn.functional.grid_sample(
+        source,
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
+    if tuple(warped.shape) != tuple(source.shape) or tuple(in_bounds.shape) != (
+        count,
+        height,
+        width,
+    ):
+        raise RuntimeError("flow warp produced an invalid shape")
+    return warped, in_bounds
+
+
+def _flow_consistency_mask(
+    flow: torch.Tensor, reverse_flow: torch.Tensor
+) -> torch.Tensor:
+    """Forward/backward consistency in the coordinate domain of ``flow``."""
+
+    sampled_reverse, in_bounds = _warp_with_flow(reverse_flow, flow)
+    residual_sq = (flow + sampled_reverse).square().sum(dim=1)
+    scale_sq = flow.square().sum(dim=1) + sampled_reverse.square().sum(dim=1)
+    threshold = (
+        FLOW_FB_RELATIVE_THRESHOLD * scale_sq + FLOW_FB_ABSOLUTE_THRESHOLD_PX2
+    )
+    return in_bounds & torch.isfinite(residual_sq) & (residual_sq <= threshold)
+
+
+def _flow_infer(flow_model: Any, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    flow = flow_model(first, second)
+    if not isinstance(flow, torch.Tensor) or tuple(flow.shape) != (
+        first.shape[0],
+        2,
+        first.shape[-2],
+        first.shape[-1],
+    ):
+        raise ValueError("frozen flow model returned an invalid tensor")
+    if not torch.isfinite(flow).all():
+        raise ValueError("frozen flow model returned NaN/Inf")
+    return flow.float()
+
+
+def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> float | None:
+    expanded = mask.unsqueeze(1).expand_as(value)
+    selected = value.masked_select(expanded)
+    return None if selected.numel() == 0 else float(selected.mean().item())
+
+
+def _temporal_flow_metrics(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    flow_model: Any,
+) -> tuple[dict[str, float | int], dict[str, torch.Tensor]]:
+    """Compute reference-flow temporal metrics on cropped [T,3,H,W] RGB."""
+
+    if target.shape != prediction.shape or target.ndim != 4 or target.shape[0] < 2:
+        raise ValueError("temporal flow metrics require matching [T,3,H,W] clips")
+    return _temporal_flow_metrics_batch(
+        target.unsqueeze(0), prediction.unsqueeze(0), flow_model
+    )[0]
+
+
+def _temporal_flow_metrics_batch(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    flow_model: Any,
+) -> list[tuple[dict[str, float | int], dict[str, torch.Tensor]]]:
+    """Vectorized flow inference for matching [N,T,3,H,W] content crops."""
+
+    if target.shape != prediction.shape or target.ndim != 5 or target.shape[1] < 2:
+        raise ValueError("batched temporal flow requires matching [N,T,3,H,W]")
+    count, frames, channels, height, width = target.shape
+    if channels != 3:
+        raise ValueError("batched temporal flow requires RGB clips")
+    pairs = frames - 1
+    reference = target.add(0.5).clamp(0, 1)
+    reconstruction = prediction.add(0.5).clamp(0, 1)
+
+    def flatten_pairs(first: torch.Tensor, second: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            first.reshape(count * pairs, channels, height, width),
+            second.reshape(count * pairs, channels, height, width),
+        )
+
+    reference_first, reference_second = flatten_pairs(
+        reference[:, :-1], reference[:, 1:]
+    )
+    reconstruction_first, reconstruction_second = flatten_pairs(
+        reconstruction[:, :-1], reconstruction[:, 1:]
+    )
+    forward = _flow_infer(flow_model, reference_first, reference_second)
+    backward = _flow_infer(flow_model, reference_second, reference_first)
+    reconstruction_forward = _flow_infer(
+        flow_model, reconstruction_first, reconstruction_second
+    )
+    forward_valid = _flow_consistency_mask(forward, backward)
+    backward_valid = _flow_consistency_mask(backward, forward)
+
+    target_first, target_second = flatten_pairs(target[:, :-1], target[:, 1:])
+    prediction_first, prediction_second = flatten_pairs(
+        prediction[:, :-1], prediction[:, 1:]
+    )
+    warped_target, target_in_bounds = _warp_with_flow(target_first, backward)
+    warped_prediction, prediction_in_bounds = _warp_with_flow(prediction_first, backward)
+    backward_valid &= target_in_bounds & prediction_in_bounds
+    warp_relation_error = (
+        (prediction_second - warped_prediction) - (target_second - warped_target)
+    ).abs()
+    direct_relation_error = (
+        (prediction_second - prediction_first) - (target_second - target_first)
+    ).abs()
+    backward_magnitude = backward.square().sum(dim=1).sqrt()
+    forward_magnitude = forward.square().sum(dim=1).sqrt()
+    static_mask = backward_valid & (backward_magnitude <= STATIC_FLOW_MAX_PX)
+    dynamic_mask = forward_valid & (forward_magnitude >= DYNAMIC_FLOW_MIN_PX)
+    flow_epe = (reconstruction_forward - forward).square().sum(dim=1).sqrt()
+
+    reshaped = {
+        "forward": forward.reshape(count, pairs, 2, height, width),
+        "backward": backward.reshape(count, pairs, 2, height, width),
+        "forward_valid": forward_valid.reshape(count, pairs, height, width),
+        "backward_valid": backward_valid.reshape(count, pairs, height, width),
+        "warp_relation_error": warp_relation_error.reshape(
+            count, pairs, channels, height, width
+        ),
+        "direct_relation_error": direct_relation_error.reshape(
+            count, pairs, channels, height, width
+        ),
+        "static_mask": static_mask.reshape(count, pairs, height, width),
+        "dynamic_mask": dynamic_mask.reshape(count, pairs, height, width),
+        "flow_epe": flow_epe.reshape(count, pairs, height, width),
+    }
+    results = []
+    for sample_index in range(count):
+        values: dict[str, float | int] = {
+            "optical_flow_valid_ratio": float(
+                reshaped["backward_valid"][sample_index].float().mean().item()
+            ),
+            "static_flow_valid_ratio": float(
+                reshaped["static_mask"][sample_index].float().mean().item()
+            ),
+            "dynamic_flow_valid_ratio": float(
+                reshaped["dynamic_mask"][sample_index].float().mean().item()
+            ),
+            "optical_flow_valid_pixels": int(
+                reshaped["backward_valid"][sample_index].sum().item()
+            ),
+            "static_flow_valid_pixels": int(
+                reshaped["static_mask"][sample_index].sum().item()
+            ),
+            "dynamic_flow_valid_pixels": int(
+                reshaped["dynamic_mask"][sample_index].sum().item()
+            ),
+        }
+        metric_masks = {
+            "clamped_optical_flow_warp_l1": (
+                reshaped["warp_relation_error"][sample_index],
+                reshaped["backward_valid"][sample_index],
+            ),
+            "clamped_static_flicker_l1": (
+                reshaped["direct_relation_error"][sample_index],
+                reshaped["static_mask"][sample_index],
+            ),
+            "clamped_motion_flow_epe_px": (
+                reshaped["flow_epe"][sample_index].unsqueeze(1),
+                reshaped["dynamic_mask"][sample_index],
+            ),
+        }
+        for name, (error, valid) in metric_masks.items():
+            mean = _masked_mean(error, valid)
+            if mean is not None:
+                values[name] = mean
+            for pair_index in range(pairs):
+                pair_mean = _masked_mean(
+                    error[pair_index : pair_index + 1],
+                    valid[pair_index : pair_index + 1],
+                )
+                if pair_mean is not None:
+                    values[f"{name}_pair_{pair_index}{pair_index + 1}"] = pair_mean
+        results.append(
+            (
+                values,
+                {
+                    name: reshaped[name][sample_index]
+                    for name in ("forward", "backward", "forward_valid", "backward_valid")
+                },
+            )
+        )
+    return results
+
+
+def _temporal_geometry_metrics(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    target_valid: torch.Tensor,
+    prediction_valid: torch.Tensor,
+    flow_context: dict[str, torch.Tensor],
+    metric_prefix: str,
+) -> dict[str, float | int]:
+    """Compare flow-aligned relative-log geometry changes across adjacent frames."""
+
+    if target.shape != prediction.shape or target.ndim != 4 or target.shape[1] != 1:
+        raise ValueError("temporal geometry requires matching [T,1,H,W] tensors")
+    if target_valid.shape != target.shape or prediction_valid.shape != target.shape:
+        raise ValueError("temporal geometry masks must match geometry tensors")
+    backward = flow_context["backward"]
+    warped_target, in_bounds = _warp_with_flow(target[:-1], backward)
+    warped_prediction, _ = _warp_with_flow(prediction[:-1], backward)
+    warped_target_valid, _ = _warp_with_flow(target_valid[:-1].float(), backward)
+    warped_prediction_valid, _ = _warp_with_flow(
+        prediction_valid[:-1].float(), backward
+    )
+    valid = (
+        flow_context["backward_valid"]
+        & in_bounds
+        & target_valid[1:, 0]
+        & prediction_valid[1:, 0]
+        & (warped_target_valid[:, 0] > 0.999)
+        & (warped_prediction_valid[:, 0] > 0.999)
+    )
+    error = (
+        (prediction[1:] - warped_prediction) - (target[1:] - warped_target)
+    ).abs()
+    name = f"{metric_prefix}_temporal_geometry_warp_l1"
+    values: dict[str, float | int] = {
+        f"{metric_prefix}_temporal_geometry_valid_ratio": float(
+            valid.float().mean().item()
+        ),
+        f"{metric_prefix}_temporal_geometry_valid_pixels": int(valid.sum().item()),
+    }
+    mean = _masked_mean(error, valid)
+    if mean is not None:
+        values[name] = mean
+    for pair_index in range(target.shape[0] - 1):
+        pair_mean = _masked_mean(
+            error[pair_index : pair_index + 1],
+            valid[pair_index : pair_index + 1],
+        )
+        if pair_mean is not None:
+            values[f"{name}_pair_{pair_index}{pair_index + 1}"] = pair_mean
+    return values
 
 
 def _lpips_mean(model, prediction: torch.Tensor, target: torch.Tensor) -> float:
@@ -177,6 +465,7 @@ class StageA1MetricSuite:
         output: Any,
         view_names: tuple[str, ...],
         perceptual_model: Any,
+        flow_model: Any | None = None,
     ) -> None:
         target = batch["video"][:, :, 0].float()
         prediction = output.rgb.float()
@@ -244,6 +533,37 @@ class StageA1MetricSuite:
                 output.raw_relative_log_depth, teacher_target.valid_mask
             )
 
+        flow_cache: dict[
+            tuple[int, int], tuple[dict[str, float | int], dict[str, torch.Tensor]]
+        ] = {}
+        if target.shape[3] > 1 and flow_model is not None:
+            flow_groups: dict[
+                tuple[int, int],
+                list[tuple[tuple[int, int], torch.Tensor, torch.Tensor]],
+            ] = defaultdict(list)
+            for batch_index in range(target.shape[0]):
+                for view_index in range(target.shape[1]):
+                    target_crop, prediction_crop = _content_crop(
+                        target[batch_index, view_index],
+                        prediction[batch_index, view_index].clamp(RGB_MIN, RGB_MAX),
+                        mask[batch_index, view_index, 0],
+                    )
+                    flow_groups[tuple(target_crop.shape[-2:])].append(
+                        (
+                            (batch_index, view_index),
+                            target_crop,
+                            prediction_crop,
+                        )
+                    )
+            for group in flow_groups.values():
+                group_results = _temporal_flow_metrics_batch(
+                    torch.stack([entry[1] for entry in group]),
+                    torch.stack([entry[2] for entry in group]),
+                    flow_model,
+                )
+                for entry, result in zip(group, group_results, strict=True):
+                    flow_cache[entry[0]] = result
+
         for batch_index, sample_id in enumerate(sample_ids):
             record = {"sample_id": str(sample_id), "views": {}}
             for view_index, view_name in enumerate(view_names):
@@ -287,6 +607,10 @@ class StageA1MetricSuite:
                     "rgb_valid_ratio": valid_count / expanded.numel(),
                     **_rgb_overshoot_stats(prediction_view, mask_view),
                 }
+                flow_context = None
+                if target_view.shape[1] > 1 and flow_model is not None:
+                    flow_values, flow_context = flow_cache[(batch_index, view_index)]
+                    values.update(flow_values)
                 if (
                     values["clamped_rgb_l1"] > values["raw_rgb_l1"] + 1e-8
                     or values["clamped_rgb_mse"] > values["raw_rgb_mse"] + 1e-8
@@ -347,13 +671,20 @@ class StageA1MetricSuite:
                         )
                 if teacher_target is not None:
                     if reconstruction_teacher is None:
-                        valid = teacher_target.valid_mask[batch_index, view_index]
+                        target_teacher_valid = teacher_target.valid_mask[
+                            batch_index, view_index
+                        ]
+                        prediction_teacher_valid = target_teacher_valid
+                        valid = target_teacher_valid
                         prediction_depth = teacher_prediction[batch_index, view_index]
                     else:
-                        valid = (
-                            teacher_target.valid_mask[batch_index, view_index]
-                            & reconstruction_teacher.valid_mask[batch_index, view_index]
-                        )
+                        target_teacher_valid = teacher_target.valid_mask[
+                            batch_index, view_index
+                        ]
+                        prediction_teacher_valid = reconstruction_teacher.valid_mask[
+                            batch_index, view_index
+                        ]
+                        valid = target_teacher_valid & prediction_teacher_valid
                         prediction_depth = reconstruction_teacher.relative_log_depth[
                             batch_index, view_index
                         ]
@@ -399,6 +730,23 @@ class StageA1MetricSuite:
                                 ),
                             }
                         )
+                    if flow_context is not None:
+                        y0, x0, y1, x1 = _content_bounds(mask_view)
+                        geometry_values = _temporal_geometry_metrics(
+                            teacher_target.relative_log_depth[
+                                batch_index, view_index, :, :, y0:y1, x0:x1
+                            ].permute(1, 0, 2, 3),
+                            prediction_depth[:, :, y0:y1, x0:x1].permute(1, 0, 2, 3),
+                            target_teacher_valid[
+                                :, :, y0:y1, x0:x1
+                            ].permute(1, 0, 2, 3),
+                            prediction_teacher_valid[
+                                :, :, y0:y1, x0:x1
+                            ].permute(1, 0, 2, 3),
+                            flow_context,
+                            teacher_kind,
+                        )
+                        values.update(geometry_values)
                 record["views"][view_name] = values
             self.samples[mode_id].append(record)
 

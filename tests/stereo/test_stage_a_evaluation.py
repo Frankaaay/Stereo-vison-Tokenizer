@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import json
 import tempfile
 import unittest
@@ -22,7 +23,10 @@ from evaluation.stage_a_metrics import (
     _content_crop,
     _rgb_overshoot_stats,
     _teacher_targets,
+    _temporal_flow_metrics,
+    _temporal_geometry_metrics,
 )
+from evaluation.stage_a_data import HY_SCHEMA, _read_hy_manifest_matches
 from evaluation.tokenizer_stage_a import (
     _checkpoint_provenance,
     _percentile_summary,
@@ -202,6 +206,8 @@ class StageASelectionTest(unittest.TestCase):
                 "--stage-a-selection", "selection.json",
                 "--canonical-loader-root", "loader",
                 "--checkpoint-sha256", "a" * 64,
+                "--raft-checkpoint", "raft.pth",
+                "--raft-checkpoint-sha256", "b" * 64,
                 "--single_frame_source_indices", "0", "1", "2", "3",
             ]
         )
@@ -214,7 +220,89 @@ class _DummyLPIPS(torch.nn.Module):
         return (prediction - target).abs().mean((1, 2, 3), keepdim=True)
 
 
+class _QueuedFlow:
+    def __init__(self, flows):
+        self.flows = list(flows)
+
+    def __call__(self, first, second):
+        if not self.flows:
+            raise AssertionError("unexpected flow inference")
+        flow = self.flows.pop(0).to(first)
+        return flow.expand(first.shape[0], -1, -1, -1).clone()
+
+
 class StageA1MetricTest(unittest.TestCase):
+    def test_hy_manifest_reader_supports_gzip_and_normalizes_table_names(self):
+        record = {
+            "schema": HY_SCHEMA,
+            "table_name": "Table014",
+            "episode_index": 7,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hy.jsonl.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as stream:
+                stream.write(json.dumps(record) + "\n")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            matched, provenance = _read_hy_manifest_matches(
+                path, digest, {("table_014", 7)}
+            )
+        self.assertEqual(matched[("table_014", 7)]["table_name"], "table_014")
+        self.assertEqual(provenance["sha256"], digest)
+
+    def test_temporal_flow_metrics_separate_static_and_dynamic_domains(self):
+        target = torch.zeros(4, 3, 4, 5)
+        prediction = target.clone()
+        for frame_index in range(4):
+            prediction[frame_index] = 0.1 * frame_index
+        zero = torch.zeros(1, 2, 4, 5)
+        static, _ = _temporal_flow_metrics(
+            target, prediction, _QueuedFlow([zero, zero, zero])
+        )
+        self.assertAlmostEqual(static["clamped_optical_flow_warp_l1"], 0.1)
+        self.assertAlmostEqual(static["clamped_static_flicker_l1"], 0.1)
+        self.assertNotIn("clamped_motion_flow_epe_px", static)
+        self.assertGreater(static["static_flow_valid_pixels"], 0)
+
+        forward = torch.zeros(1, 2, 4, 5)
+        forward[:, 0] = 1.0
+        backward = -forward
+        reconstruction_forward = forward.clone()
+        reconstruction_forward[:, 0] = 2.0
+        dynamic, _ = _temporal_flow_metrics(
+            target,
+            target,
+            _QueuedFlow([forward, backward, reconstruction_forward]),
+        )
+        self.assertAlmostEqual(dynamic["clamped_motion_flow_epe_px"], 1.0)
+        self.assertGreater(dynamic["dynamic_flow_valid_pixels"], 0)
+
+    def test_temporal_geometry_uses_flow_aligned_relative_change(self):
+        target = torch.arange(4.0).view(4, 1, 1, 1).expand(-1, -1, 4, 5)
+        prediction = target * 2.0
+        valid = torch.ones_like(target, dtype=torch.bool)
+        zero_flow = torch.zeros(3, 2, 4, 5)
+        values = _temporal_geometry_metrics(
+            target,
+            prediction,
+            valid,
+            valid,
+            {
+                "backward": zero_flow,
+                "backward_valid": torch.ones(3, 4, 5, dtype=torch.bool),
+            },
+            "reconstruction_teacher",
+        )
+        self.assertAlmostEqual(
+            values["reconstruction_teacher_temporal_geometry_warp_l1"], 1.0
+        )
+        for pair in ("pair_01", "pair_12", "pair_23"):
+            self.assertAlmostEqual(
+                values[
+                    f"reconstruction_teacher_temporal_geometry_warp_l1_{pair}"
+                ],
+                1.0,
+            )
+
     def test_checkpoint_provenance_accepts_declared_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "candidate.ckpt"
@@ -522,7 +610,7 @@ class StageA1MetricTest(unittest.TestCase):
             root = Path(directory)
             (root / "quality").mkdir()
             (root / "benchmark").mkdir()
-            with self.assertRaisesRegex(ValueError, "exactly 9 quality"):
+            with self.assertRaisesRegex(ValueError, "exactly 10 quality"):
                 _report_command(
                     [
                         "--artifact-root",
@@ -552,6 +640,7 @@ class StageA1MetricTest(unittest.TestCase):
                 "observation.images.cam_left_wrist_left",
             )
         )
+        cells.append(("hy", "mono", None))
 
         def digest(path):
             return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -595,6 +684,19 @@ class StageA1MetricTest(unittest.TestCase):
                 for pair in ("pair_01", "pair_12", "pair_23"):
                     metrics[f"clamped_temporal_delta_l1_{pair}"] = summary(0.05, count)
                     metrics[f"clamped_temporal_delta_lpips_{pair}"] = summary(0.06, count)
+                    metrics[f"clamped_optical_flow_warp_l1_{pair}"] = summary(0.04, count)
+                    metrics[f"clamped_static_flicker_l1_{pair}"] = summary(0.03, count)
+                    metrics[f"clamped_motion_flow_epe_px_{pair}"] = summary(0.7, count)
+                metrics["clamped_optical_flow_warp_l1"] = summary(0.04, count)
+                metrics["clamped_static_flicker_l1"] = summary(0.03, count)
+                metrics["clamped_motion_flow_epe_px"] = summary(0.7, count)
+                metrics["optical_flow_valid_ratio"] = summary(0.9, count)
+                metrics["static_flow_valid_ratio"] = summary(0.4, count)
+                metrics["dynamic_flow_valid_ratio"] = summary(0.3, count)
+                metrics[f"{geometry}_temporal_geometry_warp_l1"] = summary(0.08, count)
+                metrics[f"{geometry}_temporal_geometry_valid_ratio"] = summary(0.8, count)
+                for pair in ("pair_01", "pair_12", "pair_23"):
+                    metrics[f"{geometry}_temporal_geometry_warp_l1_{pair}"] = summary(0.08, count)
             return {
                 "sample_count": 1,
                 "per_view": {view_name: metrics},
@@ -644,6 +746,8 @@ class StageA1MetricTest(unittest.TestCase):
             source_patch.write_text("synthetic patch\n")
             metric_backbone = root / "vgg16-397923af.pth"
             metric_backbone.write_bytes(b"synthetic VGG16 fixture")
+            raft_checkpoint = root / "raft-large.pth"
+            raft_checkpoint.write_bytes(b"synthetic RAFT fixture")
             environment = {
                 "python": "3.12.11 test",
                 "gpu_name": "NVIDIA H100 80GB HBM3",
@@ -671,12 +775,12 @@ class StageA1MetricTest(unittest.TestCase):
             }
             selections = {}
             configs = {}
-            for dataset_id in ("umi", "libero"):
+            hy_manifest = root / "hy.jsonl.gz"
+            hy_manifest.write_bytes(b"synthetic compressed manifest fixture")
+            for dataset_id in ("umi", "libero", "hy"):
                 selection = root / f"{dataset_id}-selection.json"
-                count = 1024 if dataset_id == "umi" else 256
-                selection.write_text(
-                    json.dumps(
-                        {
+                count = 1024 if dataset_id in {"umi", "hy"} else 256
+                selection_payload = {
                             "sample_count": count,
                             "records": [{} for _ in range(count)],
                             "decode_validation": {
@@ -684,18 +788,36 @@ class StageA1MetricTest(unittest.TestCase):
                                 "checked_candidate_count": count + 2,
                                 "rejected_count": 2,
                                 "rejected_episode_ids_sha256": "3" * 64,
+                            }
+                }
+                if dataset_id == "hy":
+                    selection_payload.update(
+                        {
+                            "hy_manifest": {
+                                "path": str(hy_manifest),
+                                "sha256": digest(hy_manifest),
                             },
+                            "excluded_source_groups": {
+                                "groups": ["table_014"],
+                                "episode_count": 1,
+                                "episode_ids_sha256": "6" * 64,
+                                "reason": "fixture",
+                            },
+                            "included_source_groups": [
+                                "table_012", "table_016", "table_018", "table_020"
+                            ],
                         }
                     )
-                )
+                selection.write_text(json.dumps(selection_payload))
                 selections[dataset_id] = selection
-                config = root / f"{dataset_id}.yaml"
-                config.write_text(f"dataset: {dataset_id}\n")
-                configs[dataset_id] = config
+                if dataset_id != "hy":
+                    config = root / f"{dataset_id}.yaml"
+                    config.write_text(f"dataset: {dataset_id}\n")
+                    configs[dataset_id] = config
 
             artifacts = []
             for index, (dataset_id, eye_mode, camera) in enumerate(cells):
-                count = 1024 if dataset_id == "umi" else 256
+                count = 1024 if dataset_id in {"umi", "hy"} else 256
                 view_name = camera or "head_pair"
                 modes = {
                     f"{eye_mode}/single_frame/source_{source}": mode(
@@ -738,7 +860,7 @@ class StageA1MetricTest(unittest.TestCase):
                     )
                     resolved_args["visualization_dir"] = str(visual_dir)
                 payload = {
-                    "schema": "stereo-tokenizer-stage-a1-result-v2",
+                    "schema": "stereo-tokenizer-stage-a1-result-v3",
                     "status": "formal",
                     "posterior": "mean",
                     "quality_precision": "fp32",
@@ -757,18 +879,32 @@ class StageA1MetricTest(unittest.TestCase):
                         "camera_key": camera,
                         "sample_count": count,
                         "selection_path": str(selections[dataset_id]),
-                        "selection_sha256": ("e" if dataset_id == "umi" else "f") * 64,
+                        "selection_sha256": ({"umi": "e", "libero": "f", "hy": "7"}[dataset_id]) * 64,
                         "selection_file_sha256": digest(selections[dataset_id]),
                         "identity_contract": {
                             "sha256": "1" * 64,
                             "source_manifest_sha256": "2" * 64,
                         },
-                        "canonical_config_sha256": {
-                            str(configs[dataset_id]): digest(configs[dataset_id])
-                        },
-                        "canonical_loader": {
-                            "git_sha": "d51377ac450b0066bc0c8eb13939bcfae47275ff"
-                        },
+                        **(
+                            {
+                                "data_backend": "hy_lance_manifest",
+                                "hy_manifest": {
+                                    "path": str(hy_manifest),
+                                    "sha256": digest(hy_manifest),
+                                },
+                                "excluded_source_groups": selection_payload["excluded_source_groups"],
+                                "included_source_groups": selection_payload["included_source_groups"],
+                            }
+                            if dataset_id == "hy"
+                            else {
+                                "canonical_config_sha256": {
+                                    str(configs[dataset_id]): digest(configs[dataset_id])
+                                },
+                                "canonical_loader": {
+                                    "git_sha": "d51377ac450b0066bc0c8eb13939bcfae47275ff"
+                                },
+                            }
+                        ),
                     },
                     "teacher": (
                         {
@@ -782,6 +918,20 @@ class StageA1MetricTest(unittest.TestCase):
                             "checkpoint_sha256": "758585a25c3a332711f92a28ad1437e08080fb714ad1146de7cf2c01ce8479f4",
                         }
                     ),
+                    "flow_teacher": {
+                        "name": "torchvision.raft_large",
+                        "architecture": "RAFT-Large",
+                        "transform_contract": "Raft_Large_Weights.C_T_SKHT_V2.transforms",
+                        "checkpoint": str(raft_checkpoint),
+                        "checkpoint_sha256": digest(raft_checkpoint),
+                        "microbatch": 3,
+                        "precision": "fp32",
+                        "flow_unit": "content-crop pixels",
+                        "static_flow_max_px": 0.5,
+                        "dynamic_flow_min_px": 1.0,
+                        "forward_backward_relative_threshold": 0.01,
+                        "forward_backward_absolute_threshold_px2": 0.5,
+                    },
                     "tokenizer_parameters": {
                         "total": 100,
                         "architecturally_trainable": 100,
@@ -873,7 +1023,7 @@ class StageA1MetricTest(unittest.TestCase):
             rendered = output.read_text()
             self.assertIn("Stage A1 Baseline", rendered)
             self.assertIn("depth_head_teacher", rendered)
-            self.assertIn("HY：BLOCKED", rendered)
+            self.assertIn("显式排除 Table014", rendered)
             self.assertIn("置信度：80%", rendered)
             self.assertIn("Clamp-domain RGB 图像质量", rendered)
             self.assertNotIn("| abs(output)>1 |", rendered)
