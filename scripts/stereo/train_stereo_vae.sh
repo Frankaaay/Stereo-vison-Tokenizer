@@ -267,6 +267,7 @@ if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
     --torch_profile_wait "${TORCH_PROFILE_WAIT:-5}"
     --torch_profile_warmup "${TORCH_PROFILE_WARMUP:-2}"
     --torch_profile_active "${TORCH_PROFILE_ACTIVE:-4}"
+    --torch_profile_with_stack "${TORCH_PROFILE_WITH_STACK:-0}"
   )
 fi
 
@@ -362,6 +363,7 @@ fi
   --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
+  --accumulation_no_sync "${ACCUMULATION_NO_SYNC:-1}" \
   --image_gan_weight "${IMAGE_GAN_WEIGHT}" \
   --video_gan_weight "${VIDEO_GAN_WEIGHT}" \
   --gan_feat_weight "${GAN_FEAT_WEIGHT}" \

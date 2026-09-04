@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import argparse
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal, Optional
 import pytorch_lightning as pl
@@ -200,6 +201,9 @@ class StereoVAE(pl.LightningModule):
         self.kl_warmup_steps = args.kl_warmup_steps
         self.relative_depth_epsilon = args.relative_depth_epsilon
         self.perceptual_weight = args.perceptual_weight
+        self.accumulation_no_sync = bool(
+            getattr(args, "accumulation_no_sync", 1)
+        )
         self.gan_enabled = args.gan_enabled
         self.image_gan_weight = args.image_gan_weight
         self.video_gan_weight = args.video_gan_weight
@@ -1084,8 +1088,24 @@ class StereoVAE(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        with profile_region("stereo/step/training_step"):
-            return self._profiled_training_step(batch)
+        source_batch = self._unwrap_batch(batch)
+        mode_id, _, _ = self._mode_from_batch(source_batch)
+        accumulation_factor = (
+            self.mode_grad_accumulates[mode_id]
+            if bool(getattr(self.args, "four_mode_mixed_training", False))
+            else int(self.grad_accumulates)
+        )
+        block_backward_sync = self.accumulation_no_sync and (
+            self._micro_step + 1 < accumulation_factor
+        )
+        sync_context = (
+            self.trainer.strategy.block_backward_sync()
+            if block_backward_sync
+            else nullcontext()
+        )
+        with sync_context:
+            with profile_region("stereo/step/training_step"):
+                return self._profiled_training_step(batch)
 
     def _profiled_training_step(self, batch):
         source_batch = self._unwrap_batch(batch)
@@ -1523,6 +1543,9 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--video_gan_weight", type=float, required=True)
         parser.add_argument("--gan_feat_weight", type=float, required=True)
         parser.add_argument("--perceptual_weight", type=float, required=True)
+        parser.add_argument(
+            "--accumulation_no_sync", type=int, choices=(0, 1), default=1
+        )
         parser.add_argument(
             "--norm_type",
             choices=["batch", "group"],
