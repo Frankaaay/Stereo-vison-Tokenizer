@@ -874,14 +874,27 @@ class StereoVAE(pl.LightningModule):
             for view_index in range(prediction.shape[1]):
                 for frame_index in range(prediction.shape[3]):
                     frame_loss = checkpoint(
-                        self.perceptual_model,
-                        prediction[:, view_index, :, frame_index] * 2.0,
-                        target[:, view_index, :, frame_index] * 2.0,
+                        self._perceptual_frame_loss,
+                        prediction[:, view_index, :, frame_index],
+                        target[:, view_index, :, frame_index],
                         use_reentrant=False,
                     )
                     loss_sum = loss_sum + frame_loss.sum()
                     loss_count += frame_loss.numel()
             return loss_sum / loss_count * self.perceptual_weight
+
+    def _perceptual_frame_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.perceptual_model is None:
+            raise RuntimeError("perceptual model is not configured")
+        with torch.autocast(device_type=prediction.device.type, enabled=False):
+            return self.perceptual_model(
+                prediction.float() * 2.0,
+                target.float() * 2.0,
+            )
 
     @staticmethod
     def _feature_matching_loss(fake_features, real_features):

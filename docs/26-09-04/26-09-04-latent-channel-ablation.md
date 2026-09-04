@@ -74,3 +74,7 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 - 根因复现为 LPIPS channel normalization 在全零 VGG/ReLU feature 处反向经过
   `sqrt(0)`，FP32 与 BF16 均会产生 NaN gradient。将 epsilon 放入平方根内部，
   使零特征梯度有限；正常非零特征、batch、loss 权重和 reduction 合同保持不变。
+- 仅修复零点后，同合同重跑仍在首次 mono/four-frame update 后出现 non-finite
+  prediction，说明 BF16 LPIPS backward 还存在其他溢出路径。LPIPS 每个 frame 的
+  forward/recompute 和输入梯度改为 FP32；tokenizer 主干继续 BF16，activation
+  checkpoint、batch、loss 与 optimizer 合同不变。
