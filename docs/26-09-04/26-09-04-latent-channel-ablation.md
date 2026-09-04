@@ -90,3 +90,8 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   一阶与二阶矩的同倍率缩放相消，仅用于避免 BF16 中间 backward gradient 溢出。
 - 缩放版正式 schedule 仍在第 4 个真实 batch 后污染参数。临时在 clip 前、clip 后
   和 Adam step 后扫描第一个 non-finite gradient/parameter，输出精确参数名和阶段。
+- 状态探针确认 optimizer/clip 前 `encoder.enc_temporal_position` 的 2048 个梯度已
+  全部为 NaN，与 anomaly 的 encoder temporal GEGLU 栈一致。最终仅将四帧
+  encoder/decoder temporal Transformer 固定为 FP32；空间主干与其余训练仍 BF16。
+- 移除无效的整体 backward 缩放、状态探针、anomaly 和不必要的 FP32 LPIPS；保留
+  LPIPS activation checkpoint 与零特征稳定 normalization。

@@ -137,18 +137,22 @@ class StereoDecoder(nn.Module):
                 batch_views, height, width, self.stereo_num_frames, dim
             )
             expanded = rearrange(expanded, "n h w t d -> (n h w) t d")
-            expanded = expanded + self.dec_temporal_position
-            with profile_region("stereo/decoder/temporal_transformer"):
-                expanded = self.dec_temporal_transformer(
-                    expanded,
-                    video_shape=(
-                        batch_views * height * width,
-                        self.stereo_num_frames,
-                        1,
-                        1,
-                    ),
-                    is_spatial=False,
-                )
+            with torch.autocast(
+                device_type=expanded.device.type,
+                enabled=False,
+            ):
+                expanded = expanded.float() + self.dec_temporal_position
+                with profile_region("stereo/decoder/temporal_transformer"):
+                    expanded = self.dec_temporal_transformer(
+                        expanded,
+                        video_shape=(
+                            batch_views * height * width,
+                            self.stereo_num_frames,
+                            1,
+                            1,
+                        ),
+                        is_spatial=False,
+                    )
 
         # Spatial Decoder 把每帧视为独立样本，PEG 只能看到 T=1。
         frame_tokens = rearrange(

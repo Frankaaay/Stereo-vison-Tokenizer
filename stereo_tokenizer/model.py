@@ -41,9 +41,6 @@ from .modules.vae import (
 from .profiling import profile_region
 
 
-_GENERATOR_BACKWARD_SCALE = 1.0 / 1024.0
-
-
 def hinge_d_loss(logits_real, logits_fake):
     loss_real = torch.mean(F.relu(1. - logits_real))
     loss_fake = torch.mean(F.relu(1. + logits_fake))
@@ -877,27 +874,14 @@ class StereoVAE(pl.LightningModule):
             for view_index in range(prediction.shape[1]):
                 for frame_index in range(prediction.shape[3]):
                     frame_loss = checkpoint(
-                        self._perceptual_frame_loss,
-                        prediction[:, view_index, :, frame_index],
-                        target[:, view_index, :, frame_index],
+                        self.perceptual_model,
+                        prediction[:, view_index, :, frame_index] * 2.0,
+                        target[:, view_index, :, frame_index] * 2.0,
                         use_reentrant=False,
                     )
                     loss_sum = loss_sum + frame_loss.sum()
                     loss_count += frame_loss.numel()
             return loss_sum / loss_count * self.perceptual_weight
-
-    def _perceptual_frame_loss(
-        self,
-        prediction: torch.Tensor,
-        target: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.perceptual_model is None:
-            raise RuntimeError("perceptual model is not configured")
-        with torch.autocast(device_type=prediction.device.type, enabled=False):
-            return self.perceptual_model(
-                prediction.float() * 2.0,
-                target.float() * 2.0,
-            )
 
     @staticmethod
     def _feature_matching_loss(fake_features, real_features):
@@ -1084,19 +1068,6 @@ class StereoVAE(pl.LightningModule):
             getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
         )
 
-        def assert_finite_state(stage: str, *, gradients: bool) -> None:
-            for name, parameter in self.named_parameters():
-                tensor = parameter.grad if gradients else parameter
-                if tensor is None or torch.isfinite(tensor).all():
-                    continue
-                nan_count = int(torch.isnan(tensor).sum().item())
-                inf_count = int(torch.isinf(tensor).sum().item())
-                kind = "gradient" if gradients else "parameter"
-                raise RuntimeError(
-                    f"non-finite {kind} {stage}: {name}; "
-                    f"nan_count={nan_count}, inf_count={inf_count}"
-                )
-
         expected_mode = mode_for_update(
             int(self.args.mode_schedule_seed),
             self.generator_updates,
@@ -1184,11 +1155,7 @@ class StereoVAE(pl.LightningModule):
         schedulers = self._as_sequence(self.lr_schedulers())
         generator_optimizer = optimizers[0]
         with profile_region("stereo/update/backward"):
-            self.manual_backward(
-                generator_loss
-                / accumulation_factor
-                * _GENERATOR_BACKWARD_SCALE
-            )
+            self.manual_backward(generator_loss / accumulation_factor)
 
         self.batch_updates += 1
         self._micro_step += 1
@@ -1200,19 +1167,14 @@ class StereoVAE(pl.LightningModule):
         )
         should_step = self._micro_step == accumulation_factor
         if should_step:
-            assert_finite_state("before_clip", gradients=True)
             if self.grad_clip_val is not None:
                 with profile_region("stereo/update/gradient_clipping"):
                     self.clip_gradients(
                         generator_optimizer,
-                        gradient_clip_val=(
-                            self.grad_clip_val * _GENERATOR_BACKWARD_SCALE
-                        ),
+                        gradient_clip_val=self.grad_clip_val,
                     )
-            assert_finite_state("after_clip", gradients=True)
             with profile_region("stereo/update/adam_step"):
                 generator_optimizer.step()
-            assert_finite_state("after_step", gradients=False)
             with profile_region("stereo/update/zero_grad"):
                 generator_optimizer.zero_grad()
             if temporal_mode == "four_frame":

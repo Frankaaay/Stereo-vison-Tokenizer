@@ -254,18 +254,24 @@ class StereoEncoder(nn.Module):
                 fused,
                 "b v t h w d -> (b v h w) t d",
             )
-            temporal_tokens = temporal_tokens + self.enc_temporal_position
-            with profile_region("stereo/encoder/temporal_transformer"):
-                temporal_tokens = self.enc_temporal_transformer(
-                    temporal_tokens,
-                    video_shape=(
-                        batch * views * grid_height * grid_width,
-                        time,
-                        1,
-                        1,
-                    ),
-                    is_spatial=False,
+            with torch.autocast(
+                device_type=temporal_tokens.device.type,
+                enabled=False,
+            ):
+                temporal_tokens = (
+                    temporal_tokens.float() + self.enc_temporal_position
                 )
+                with profile_region("stereo/encoder/temporal_transformer"):
+                    temporal_tokens = self.enc_temporal_transformer(
+                        temporal_tokens,
+                        video_shape=(
+                            batch * views * grid_height * grid_width,
+                            time,
+                            1,
+                            1,
+                        ),
+                        is_spatial=False,
+                    )
             temporal_features = rearrange(
                 temporal_tokens,
                 "(b v h w) t d -> b v h w (t d)",

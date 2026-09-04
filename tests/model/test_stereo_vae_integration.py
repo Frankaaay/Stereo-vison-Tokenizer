@@ -278,11 +278,9 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.batch_shapes = []
-                self.input_dtypes = []
 
             def forward(self, prediction, target):
                 self.batch_shapes.append(tuple(prediction.shape))
-                self.input_dtypes.append((prediction.dtype, target.dtype))
                 return (prediction - target).square().mean(
                     dim=(1, 2, 3), keepdim=True
                 )
@@ -291,22 +289,14 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         perceptual_model = RecordingPerceptual()
         model.perceptual_model = perceptual_model
         model.perceptual_weight = 0.5
-        prediction = torch.randn(
-            2, 3, 3, 4, 8, 8, dtype=torch.bfloat16, requires_grad=True
-        )
+        prediction = torch.randn(2, 3, 3, 4, 8, 8, requires_grad=True)
         target = torch.randn_like(prediction)
 
         actual = model._perceptual_loss(prediction, target)
-        expected = (
-            ((prediction.float() - target.float()) * 2.0).square().mean() * 0.5
-        )
+        expected = ((prediction - target) * 2.0).square().mean() * 0.5
 
         torch.testing.assert_close(actual, expected)
         self.assertEqual(len(perceptual_model.batch_shapes), 12)
-        self.assertEqual(
-            set(perceptual_model.input_dtypes),
-            {(torch.float32, torch.float32)},
-        )
         actual.backward()
         self.assertIsNotNone(prediction.grad)
         self.assertTrue(torch.isfinite(prediction.grad).all())
@@ -632,10 +622,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             model._profiled_training_step(batch)
 
         self.assertEqual(backward.call_count, 2)
-        self.assertEqual(
-            backward.call_args_list[0].args[0].item(),
-            2.0 / 1024.0,
-        )
+        self.assertEqual(backward.call_args_list[0].args[0].item(), 2.0)
         optimizer.step.assert_called_once_with()
         optimizer.zero_grad.assert_called_once_with()
         scheduler.step_update.assert_called_once_with(1)
