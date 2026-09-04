@@ -57,3 +57,4 @@ stack trace 的 top operator 中，`aten::copy_` 为约 `85.81 ms/observed step`
 - 使用临时 `PERCEPTUAL_MODEL_BF16=0/1` 开关，在同一实验 SHA、同一节点上按 FP32 A → BF16 A → BF16 B → FP32 B 顺序运行。
 - 运行前先通过单元测试、shell 语法检查，以及固定输入下 LPIPS loss/输入梯度的 FP32-weight-autocast 与 BF16-weight-autocast 数值对照。
 - 端到端合同沿用 batch `24:24:24:12`、GA `1:1:1:2`、在线 DA3/LAS2-H；记录 pooled/per-mode samples/s、峰值显存、validation、checkpoint 和作业退出状态。
+- 实验代码 SHA `5fe957c815e0c94bd6383a0292e30a1edd7520fe`。H100 1 卡门禁 Job `3309` 当前因 `Resources` 排队；8 卡 A/B Job `3310` 已设置 `afterok:3309` 依赖，因此门禁失败时不会消耗 8 卡。提交时调度器对 Job 3309 的预计启动时间为 `2026-09-11T13:54:25`。
