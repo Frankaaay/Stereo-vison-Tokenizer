@@ -210,7 +210,9 @@ class StereoVAE(pl.LightningModule):
             self.perceptual_model = LPIPS().eval()
             self.perceptual_model.requires_grad_(False)
             if getattr(args, "perceptual_model_bf16", False):
-                self.perceptual_model.to(dtype=torch.bfloat16)
+                for parameter in self.perceptual_model.parameters():
+                    if parameter.is_floating_point():
+                        parameter.data = parameter.data.to(dtype=torch.bfloat16)
         else:
             self.perceptual_model = None
 

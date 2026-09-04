@@ -53,7 +53,7 @@ stack trace 的 top operator 中，`aten::copy_` 为约 `85.81 ms/observed step`
 
 ## LPIPS BF16 A/B（进行中）
 
-- 实验变量仅为冻结 LPIPS 参数及 buffer 在构造时从 FP32 一次性转为 BF16；baseline 继续由 autocast 在每次 forward 中转换冻结权重。
+- 实验变量仅为冻结 LPIPS 参数在构造时从 FP32 一次性转为 BF16；归一化 buffer 保持 FP32，baseline 继续由 autocast 在每次 forward 中转换冻结权重。
 - 使用临时 `PERCEPTUAL_MODEL_BF16=0/1` 开关，在同一实验 SHA、同一节点上按 FP32 A → BF16 A → BF16 B → FP32 B 顺序运行。
 - 运行前先通过单元测试、shell 语法检查，以及固定输入下 LPIPS loss/输入梯度的 FP32-weight-autocast 与 BF16-weight-autocast 数值对照。
 - 端到端合同沿用 batch `24:24:24:12`、GA `1:1:1:2`、在线 DA3/LAS2-H；记录 pooled/per-mode samples/s、峰值显存、validation、checkpoint 和作业退出状态。

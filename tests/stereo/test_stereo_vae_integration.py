@@ -253,7 +253,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             model = StereoVAE(args)
 
         self.assertEqual(model.perceptual_model.weight.dtype, torch.bfloat16)
-        self.assertEqual(model.perceptual_model.scale.dtype, torch.bfloat16)
+        self.assertEqual(model.perceptual_model.scale.dtype, torch.float32)
         self.assertFalse(model.perceptual_model.weight.requires_grad)
         self.assertFalse(model.perceptual_model.training)
 
