@@ -164,3 +164,26 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   后续正式训练预算必须按真实 per-mode sample counter 对齐。
 - 先在 Z96 上运行四模式短测试；每种模式分别记录显存、有限梯度和 samples/s，再决定
   是否继续向上搜索 batch 上限或启动正式训练。
+
+### 搜索结果与正式选择
+
+以下均为 Z96、BF16、LPIPS 保留 forward 激活、GA1；显存为 8 ranks 中最大的
+ CUDA allocated 峰值，单位 GiB：
+
+| run | per-mode BS | mono single | mono four | stereo single | stereo four | 结果 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| v13 | 48:32:48:32 | 33.42 | 99.74 | 38.63 | 113.82 | 400 train + 20 val 通过 |
+| v14 | 128:40:112:36 | 86.39 | 124.19 | 87.96 | 127.81 | 100 train + 20 val 通过 |
+| v15 | 192:40:160:36 | 128.97 | 124.19 | 124.95 | 127.81 | 100 train + 20 val 通过 |
+
+- v13/v14/v15 的 W&B offline run 分别为 `smo7o71r`、`85ruhlxp`、
+  `is2wnvsc`；launch artifact SHA256 分别为
+  `3369c9b53db6320871d5d65a04650438e4913f3cd2fce72ec1fad8b653217f95`、
+  `2dcffb12ec137ef2ffe530e97b2df06446c89eb6bd215d7fb6b789302650fcf4`、
+  `c8444448d7cff5f8936228885a556f5b30d5d1179dba5fe2d03e43531ce944ed`。
+- 选择 `192:40:160:36` 作为正式组合：v15 最大 allocated 128.97 GiB、最大
+  allocator reserved 129.30 GiB，nvidia-smi 最高约 134.36/143.77 GiB；保留约
+  9.4 GiB 设备余量且通过完整 validation，不继续逼近首次 OOM 边界。
+- 8 卡 effective global batch 依次为 1536/320/1280/288。40,000 updates 共处理
+  35,392,000 logical samples；mode update 权重仍为 35:35:15:15，质量比较必须读取
+  per-mode sample counter，不能再假设四种 mode 样本数相等。
