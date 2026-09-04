@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.scheduler.cosine_lr import CosineLRScheduler
-from torch.utils.checkpoint import checkpoint
 from .contracts import EyeMode, TemporalMode, temporal_mode_num_frames
 from .mode_sampling import (
     MODE_IDS,
@@ -873,11 +872,9 @@ class StereoVAE(pl.LightningModule):
             loss_count = 0
             for view_index in range(prediction.shape[1]):
                 for frame_index in range(prediction.shape[3]):
-                    frame_loss = checkpoint(
-                        self.perceptual_model,
+                    frame_loss = self.perceptual_model(
                         prediction[:, view_index, :, frame_index] * 2.0,
                         target[:, view_index, :, frame_index] * 2.0,
-                        use_reentrant=False,
                     )
                     loss_sum = loss_sum + frame_loss.sum()
                     loss_count += frame_loss.numel()

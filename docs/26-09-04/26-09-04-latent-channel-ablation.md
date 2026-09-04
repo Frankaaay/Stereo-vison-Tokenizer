@@ -120,3 +120,14 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   activation checkpoint 以及 temporal FP32 等多项差异，不能将 65.8% 全部归因
   于 LPIPS checkpoint。无 checkpoint 的当前同合同 Z96 在首个 optimizer update
   前 OOM，无法得到同合同吞吐基线。
+
+## BS24 保留 LPIPS 激活测速
+
+- 用户于 2026-09-04 18:26 CST 要求停止 v11；18:27:24 CST 已确认 tmux、
+  torchrun/rank 进程全部退出，8 张 GPU 均为 0 MiB、0% 利用率。
+- 新候选将四种 mode 固定为 per-device BS24、GA1，effective global batch 为 192；
+  temporal Transformer 全部恢复 BF16。
+- LPIPS 不再使用 activation checkpoint，保留 forward 激活供 backward 使用，
+  避免 backward 重算 LPIPS feature forward。
+- 先只运行 Z96 短测速，以稳定 `samples/s` 对比 v11；不同 batch 的 `step/s`
+  不作为结论。通过显存和有限梯度门禁后，再决定是否作为正式三组训练合同。
