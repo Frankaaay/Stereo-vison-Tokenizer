@@ -88,3 +88,5 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 - 正式修复对 generator backward 使用 1/1024 静态缩放，并将 gradient clip 阈值
   同比缩放。原始 loss 日志、batch、各 loss 相对权重和 clip 后梯度方向不变；Adam
   一阶与二阶矩的同倍率缩放相消，仅用于避免 BF16 中间 backward gradient 溢出。
+- 缩放版正式 schedule 仍在第 4 个真实 batch 后污染参数。临时在 clip 前、clip 后
+  和 Adam step 后扫描第一个 non-finite gradient/parameter，输出精确参数名和阶段。

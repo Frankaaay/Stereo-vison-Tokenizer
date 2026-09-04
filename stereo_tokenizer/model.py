@@ -1084,6 +1084,19 @@ class StereoVAE(pl.LightningModule):
             getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
         )
 
+        def assert_finite_state(stage: str, *, gradients: bool) -> None:
+            for name, parameter in self.named_parameters():
+                tensor = parameter.grad if gradients else parameter
+                if tensor is None or torch.isfinite(tensor).all():
+                    continue
+                nan_count = int(torch.isnan(tensor).sum().item())
+                inf_count = int(torch.isinf(tensor).sum().item())
+                kind = "gradient" if gradients else "parameter"
+                raise RuntimeError(
+                    f"non-finite {kind} {stage}: {name}; "
+                    f"nan_count={nan_count}, inf_count={inf_count}"
+                )
+
         expected_mode = mode_for_update(
             int(self.args.mode_schedule_seed),
             self.generator_updates,
@@ -1187,6 +1200,7 @@ class StereoVAE(pl.LightningModule):
         )
         should_step = self._micro_step == accumulation_factor
         if should_step:
+            assert_finite_state("before_clip", gradients=True)
             if self.grad_clip_val is not None:
                 with profile_region("stereo/update/gradient_clipping"):
                     self.clip_gradients(
@@ -1195,8 +1209,10 @@ class StereoVAE(pl.LightningModule):
                             self.grad_clip_val * _GENERATOR_BACKWARD_SCALE
                         ),
                     )
+            assert_finite_state("after_clip", gradients=True)
             with profile_region("stereo/update/adam_step"):
                 generator_optimizer.step()
+            assert_finite_state("after_step", gradients=False)
             with profile_region("stereo/update/zero_grad"):
                 generator_optimizer.zero_grad()
             if temporal_mode == "four_frame":
