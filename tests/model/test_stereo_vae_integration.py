@@ -13,7 +13,7 @@ from stereo_tokenizer.mode_sampling import (
     parse_weight_spec,
 )
 from stereo_tokenizer.modules.attention import PEG
-from train_stereo_vae import _load_continuation_checkpoint
+from stereo_tokenizer.training.checkpoints import _load_continuation_checkpoint
 
 
 class StereoVAEIntegrationTest(unittest.TestCase):

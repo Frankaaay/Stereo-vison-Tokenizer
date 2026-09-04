@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from stereo_tokenizer.model import StereoEncoder
+from stereo_tokenizer.modules.stereo_encoder import StereoEncoder
 from stereo_tokenizer.modules.attention import Attention
 
 

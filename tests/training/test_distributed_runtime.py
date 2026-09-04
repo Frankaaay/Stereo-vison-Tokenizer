@@ -3,7 +3,8 @@ from unittest import mock
 from types import SimpleNamespace
 
 from stereo_tokenizer.data import StereoDataModule
-from train_stereo_vae import _is_global_zero_process, validate_distributed_runtime_args
+from stereo_tokenizer.training.provenance import _is_global_zero_process
+from stereo_tokenizer.training.runtime import validate_distributed_runtime_args
 
 
 class DistributedRuntimeContractTest(unittest.TestCase):

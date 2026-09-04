@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 
-from evaluation.stage_a_runtime import batch_for_temporal_mode
+from evaluation.stage_a.runtime import batch_for_temporal_mode
 from stereo_tokenizer.pretrain_data import HyLanceMonoDataset
 from stereo_tokenizer.geometry import GeometryMapping
 from stereo_tokenizer.online_gt import (

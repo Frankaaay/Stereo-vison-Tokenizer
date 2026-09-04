@@ -38,9 +38,11 @@ teacher cache；它不是必须提前离线生成的数据集。缓存只能在 
 主要入口：
 
 - `scripts/stereo/train_stereo_vae.sh`：统一训练 launcher；
-- `train_stereo_vae.py`：参数校验、teacher provenance、Lightning Trainer；
+- `train_stereo_vae.py`：稳定训练 CLI 与 Lightning Trainer 组装；
+- `stereo_tokenizer/training/`：参数校验、checkpoint transition、provenance 和 callbacks；
+- `stereo_tokenizer/modules/stereo_encoder.py`、`stereo_decoder.py`：编码器与解码器实现；
 - `evaluation/tokenizer_stage_a.py`：统一 Stage A selection、preflight、质量、性能和报告入口；
-- `evaluation/stage_a_runtime.py`：Stage A 共享 checkpoint、teacher 与可视化运行时；
+- `evaluation/stage_a/`：Stage A selection、质量、性能、报告及共享运行时；
 - `scripts/data/audit_lerobot_stereo_rectification.py`：双目校正审计；
 - `scripts/data/build_lerobot_stereo_manifest.py`：episode 级 90/5/5 manifest；
 - `scripts/data/build_pretrain_manifest.py`：构建三源训练 manifest。
@@ -104,7 +106,9 @@ git rev-parse HEAD
 
 - `doc/`：冻结的设计规格、数据合同和长期架构决策；
 - `docs/YY-MM-DD/`：实际实验、调试、运行记录和阶段结论；
-- `environments/`：与根训练环境隔离的辅助 uv project；
+- `evaluation/stage_a/`：Stage A 数据、指标、质量评估、benchmark 与报告实现；
+- `stereo_tokenizer/training/`：训练运行时、checkpoint、callback 与 provenance；
+- `tests/{data,evaluation,model,teachers,training}/`：按生产职责镜像的测试；
 - 根目录 `pyproject.toml` 与 `uv.lock`：训练环境的直接依赖声明和完整锁定结果。
 
 Python environment、数据、teacher、checkpoint、cache 和 run output 都放在仓库外；
@@ -390,9 +394,7 @@ git rev-parse HEAD
 uv lock --check
 uv pip check --python "$RUNTIME_ROOT/train/bin/python"
 
-python -m py_compile \
-  train_stereo_vae.py evaluation/tokenizer_stage_a.py evaluation/stage_a_runtime.py \
-  stereo_tokenizer/data.py stereo_tokenizer/online_gt.py
+python -m compileall -q train_stereo_vae.py stereo_tokenizer evaluation tests
 bash -n scripts/stereo/train_stereo_vae.sh
 python -m pytest -q tests
 ```

@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from stereo_tokenizer.model import StereoDecoder
+from stereo_tokenizer.modules.stereo_decoder import StereoDecoder
 
 
 class StructuredStereoDecoderTest(unittest.TestCase):

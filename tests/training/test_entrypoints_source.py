@@ -3,11 +3,19 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+TRAINING_ROOT = ROOT / "stereo_tokenizer" / "training"
+
+
+def _training_source(*names: str) -> str:
+    paths = (ROOT / "train_stereo_vae.py",) + tuple(
+        TRAINING_ROOT / name for name in names
+    )
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 
 class StereoEntrypointSourceTest(unittest.TestCase):
     def test_training_entry_has_no_legacy_inflation_and_supports_explicit_resume(self):
-        source = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        source = _training_source("runtime.py", "checkpoints.py")
         self.assertNotIn("inflate_gen", source)
         self.assertNotIn("inflate_dis", source)
         self.assertNotIn("os.listdir", source)
@@ -31,18 +39,21 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         entry = (ROOT / "evaluation" / "tokenizer_stage_a.py").read_text(
             encoding="utf-8"
         )
-        runtime = (ROOT / "evaluation" / "stage_a_runtime.py").read_text(
+        runtime = (ROOT / "evaluation" / "stage_a" / "runtime.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("sample_posterior=False", entry)
+        quality = (ROOT / "evaluation" / "stage_a" / "quality.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sample_posterior=False", quality)
         self.assertIn("strict=True", runtime)
         self.assertIn("_checkpoint_model_args(checkpoint", runtime)
         self.assertIn("StereoVAE(checkpoint_args)", runtime)
         self.assertIn("--stereo_vae_ckpt", runtime)
         self.assertIn("_validate_checkpoint_semantics", runtime)
         self.assertIn("--eval_temporal_mode", runtime)
-        self.assertIn("args.single_frame_source_index", entry)
-        self.assertNotIn(".codebook", entry + runtime)
+        self.assertIn("args.single_frame_source_index", quality)
+        self.assertNotIn(".codebook", entry + runtime + quality)
         self.assertIn("FoundationStereoOnlineTeacher", runtime)
         self.assertIn("DepthAnything3OnlineTeacher", runtime)
         self.assertIn("relative_target_from_da3(", runtime)
@@ -95,8 +106,13 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("_ENABLED = False", helper)
-        model = (ROOT / "stereo_tokenizer" / "model.py").read_text(
-            encoding="utf-8"
+        model = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "stereo_tokenizer" / "model.py",
+                ROOT / "stereo_tokenizer" / "modules" / "stereo_encoder.py",
+                ROOT / "stereo_tokenizer" / "modules" / "stereo_decoder.py",
+            )
         )
         data = (ROOT / "stereo_tokenizer" / "data.py").read_text(
             encoding="utf-8"
@@ -156,7 +172,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             launcher,
         )
         self.assertIn("DISABLE_MEDIA_LOGGING:-0", launcher)
-        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        train = _training_source("profiling.py", "runtime.py")
         self.assertIn("peak_memory_bytes_by_rank", train)
         self.assertIn('"mode_id": pl_module.last_mode_id', train)
         self.assertIn("peak_memory_bytes_by_rank_and_mode", train)
@@ -207,7 +223,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("--foundation_stereo_valid_iters", launcher)
         self.assertNotIn("--lerobot_episode_manifest", launcher)
         self.assertNotIn("--lerobot_rectification_audit_sha256", launcher)
-        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        train = _training_source("runtime.py")
         self.assertIn("use_distributed_sampler=False", train)
         self.assertNotIn("max_time=", train)
 
@@ -215,7 +231,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
             encoding="utf-8"
         )
-        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        train = _training_source("runtime.py")
         probe = (ROOT / "scripts/stereo/check_ib_collective.py").read_text(
             encoding="utf-8"
         )
@@ -246,7 +262,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
             encoding="utf-8"
         )
-        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        train = _training_source("runtime.py", "callbacks.py", "checkpoints.py")
         model = (ROOT / "stereo_tokenizer/model.py").read_text(encoding="utf-8")
         online_gt = (ROOT / "stereo_tokenizer/online_gt.py").read_text(
             encoding="utf-8"
@@ -282,7 +298,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(
             encoding="utf-8"
         )
-        train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
+        train = _training_source("runtime.py")
         online_gt = (ROOT / "stereo_tokenizer/online_gt.py").read_text(
             encoding="utf-8"
         )

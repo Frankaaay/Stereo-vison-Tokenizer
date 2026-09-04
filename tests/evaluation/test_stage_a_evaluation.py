@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import torch
 
-from evaluation.stage_a_contract import (
+from evaluation.stage_a.contract import (
     CANONICAL_SPLIT_SCHEMA,
     canonical_sha256,
     read_identity_contract,
@@ -17,8 +17,8 @@ from evaluation.stage_a_contract import (
     select_episode_windows,
     write_selection,
 )
-from evaluation.stage_a_manifest import _apportion_counts, assign_splits
-from evaluation.stage_a_metrics import (
+from evaluation.stage_a.manifest import _apportion_counts, assign_splits
+from evaluation.stage_a.metrics import (
     StageA1MetricSuite,
     _content_crop,
     _rgb_overshoot_stats,
@@ -26,14 +26,11 @@ from evaluation.stage_a_metrics import (
     _temporal_flow_metrics,
     _temporal_geometry_metrics,
 )
-from evaluation.stage_a_data import HY_SCHEMA, _read_hy_manifest_matches
-from evaluation.tokenizer_stage_a import (
-    _checkpoint_provenance,
-    _percentile_summary,
-    _report_command,
-    _run_parser,
-    _stage_a_visualization_batch,
-)
+from evaluation.stage_a.data import HY_SCHEMA, _read_hy_manifest_matches
+from evaluation.stage_a.benchmark import _percentile_summary
+from evaluation.stage_a.common import _checkpoint_provenance
+from evaluation.stage_a.quality import _run_parser, _stage_a_visualization_batch
+from evaluation.stage_a.report import _report_command
 
 
 class StageASelectionTest(unittest.TestCase):
@@ -1014,7 +1011,7 @@ class StageA1MetricTest(unittest.TestCase):
             )
             output = root / "report.md"
             with mock.patch(
-                "evaluation.tokenizer_stage_a.VGG16_CHECKPOINT_SHA256",
+                "evaluation.stage_a.report.VGG16_CHECKPOINT_SHA256",
                 digest(metric_backbone),
             ):
                 _report_command(
@@ -1045,7 +1042,7 @@ class StageA1MetricTest(unittest.TestCase):
             )
             output.unlink()
             with mock.patch(
-                "evaluation.tokenizer_stage_a.VGG16_CHECKPOINT_SHA256",
+                "evaluation.stage_a.report.VGG16_CHECKPOINT_SHA256",
                 digest(metric_backbone),
             ):
                 with self.assertRaisesRegex(ValueError, "quality result schema mismatch"):

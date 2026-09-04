@@ -9,12 +9,16 @@ from stereo_tokenizer.mode_sampling import (
     mode_occurrences_before,
     parse_weight_spec,
 )
-from train_stereo_vae import (
-    DiscriminatorExpansionOptimizerCallback,
-    StepTimingCallback,
+from stereo_tokenizer.training.checkpoints import (
     _load_continuation_checkpoint,
     _load_discriminator_expansion_checkpoint,
     _load_stage_transition_checkpoint,
+)
+from stereo_tokenizer.training.profiling import (
+    DiscriminatorExpansionOptimizerCallback,
+    StepTimingCallback,
+)
+from stereo_tokenizer.training.runtime import (
     _resolve_val_check_interval,
     _validate_four_mode_batch_contract,
 )
@@ -355,10 +359,16 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
                 )
             )
 
-    @mock.patch("train_stereo_vae.torch.cuda.reset_peak_memory_stats")
-    @mock.patch("train_stereo_vae.torch.cuda.max_memory_reserved", return_value=20)
-    @mock.patch("train_stereo_vae.torch.cuda.max_memory_allocated", return_value=10)
-    @mock.patch("train_stereo_vae.torch.cuda.synchronize")
+    @mock.patch("stereo_tokenizer.training.profiling.torch.cuda.reset_peak_memory_stats")
+    @mock.patch(
+        "stereo_tokenizer.training.profiling.torch.cuda.max_memory_reserved",
+        return_value=20,
+    )
+    @mock.patch(
+        "stereo_tokenizer.training.profiling.torch.cuda.max_memory_allocated",
+        return_value=10,
+    )
+    @mock.patch("stereo_tokenizer.training.profiling.torch.cuda.synchronize")
     def test_step_timing_separates_micro_and_logical_updates(
         self,
         synchronize,

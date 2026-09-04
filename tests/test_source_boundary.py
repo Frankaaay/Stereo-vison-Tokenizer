@@ -3,16 +3,19 @@ import pathlib
 import unittest
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "stereo_tokenizer"
 MODEL_SOURCE = PACKAGE / "model.py"
+ENCODER_SOURCE = PACKAGE / "modules" / "stereo_encoder.py"
+DECODER_SOURCE = PACKAGE / "modules" / "stereo_decoder.py"
 DATA_SOURCE = PACKAGE / "data.py"
 CALLBACKS_SOURCE = PACKAGE / "modules" / "callbacks.py"
 TRAIN_SOURCE = ROOT / "train_stereo_vae.py"
 TRAIN_LAUNCHER_SOURCE = ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
-ACTIVE_SOURCES = tuple(PACKAGE.rglob("*.py")) + (
+ACTIVE_SOURCES = tuple(PACKAGE.rglob("*.py")) + tuple(
+    (ROOT / "evaluation" / "stage_a").rglob("*.py")
+) + (
     TRAIN_SOURCE,
-    ROOT / "evaluation" / "stage_a_runtime.py",
     ROOT / "evaluation" / "tokenizer_stage_a.py",
 )
 
@@ -76,10 +79,12 @@ class SourceBoundaryTest(unittest.TestCase):
             self.assertNotIn(token, combined_source)
 
     def test_model_declares_stereo_model_names(self) -> None:
-        tree = ast.parse(MODEL_SOURCE.read_text(encoding="utf-8"))
-        classes = {
-            node.name for node in tree.body if isinstance(node, ast.ClassDef)
-        }
+        classes = set()
+        for path in (MODEL_SOURCE, ENCODER_SOURCE, DECODER_SOURCE):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            classes.update(
+                node.name for node in tree.body if isinstance(node, ast.ClassDef)
+            )
         expected = {
             "StereoVAE",
             "StereoEncoder",
@@ -107,9 +112,12 @@ class SourceBoundaryTest(unittest.TestCase):
 
     def test_training_entrypoint_uses_lightning_2_trainer_api(self) -> None:
         source = TRAIN_SOURCE.read_text(encoding="utf-8")
+        runtime = (PACKAGE / "training" / "runtime.py").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("Trainer.add_argparse_args", source)
         self.assertNotIn("Trainer.from_argparse_args", source)
-        self.assertIn('parser.add_argument("--devices"', source)
+        self.assertIn('parser.add_argument("--devices"', runtime)
         self.assertIn('precision = "bf16-mixed"', source)
 
         launcher = TRAIN_LAUNCHER_SOURCE.read_text(encoding="utf-8")
@@ -161,7 +169,7 @@ class SourceBoundaryTest(unittest.TestCase):
             )
 
     def test_encoder_owns_fusion_and_not_decoder_heads(self) -> None:
-        tree = ast.parse(MODEL_SOURCE.read_text(encoding="utf-8"))
+        tree = ast.parse(ENCODER_SOURCE.read_text(encoding="utf-8"))
         encoder = next(
             node
             for node in tree.body

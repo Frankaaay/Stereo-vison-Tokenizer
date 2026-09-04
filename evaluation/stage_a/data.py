@@ -24,7 +24,7 @@ from stereo_tokenizer.pretrain_data import (
     _resolve_alias_path,
 )
 
-from .stage_a_contract import (
+from .contract import (
     CANONICAL_SPLIT_SCHEMA,
     canonical_sha256,
     read_identity_contract,

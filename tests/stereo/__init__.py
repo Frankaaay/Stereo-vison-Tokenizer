@@ -1,1 +1,0 @@
-"""StereoTokenizer contract tests."""

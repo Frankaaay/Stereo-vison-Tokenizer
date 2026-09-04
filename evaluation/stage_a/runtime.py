@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 from argparse import Namespace
 from collections.abc import Mapping
 from pathlib import Path

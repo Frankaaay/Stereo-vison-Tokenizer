@@ -13,13 +13,13 @@ from typing import Any
 
 import yaml
 
-from .stage_a_contract import (
+from .contract import (
     CANONICAL_SPLIT_SCHEMA,
     canonical_sha256,
     hash_order,
     sha256_file,
 )
-from .stage_a_data import (
+from .data import (
     CANONICAL_LOADER_SHA,
     _build_four_frame_dataset,
 )
