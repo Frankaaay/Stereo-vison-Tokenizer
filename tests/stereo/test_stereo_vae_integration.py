@@ -57,6 +57,9 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             smooth_l1_beta=1.0,
             recon_loss_type="l1",
             perceptual_weight=0.0,
+            perceptual_frame_microbatch=2,
+            perceptual_channels_last=0,
+            perceptual_compile=0,
             gan_enabled=False,
             image_gan_weight=0.0,
             video_gan_weight=0.0,
@@ -271,6 +274,45 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             set(perceptual_model.batch_shapes),
             {(2, 3, 8, 8)},
         )
+
+    def test_perceptual_loss_supports_channels_last_and_compile(self) -> None:
+        class RecordingPerceptual(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.channels_last = []
+
+            def forward(self, prediction, target):
+                self.channels_last.append(
+                    prediction.is_contiguous(memory_format=torch.channels_last)
+                    and target.is_contiguous(memory_format=torch.channels_last)
+                )
+                return (prediction - target).square().mean(
+                    dim=(1, 2, 3), keepdim=True
+                )
+
+        args = self._args()
+        args.perceptual_frame_microbatch = 5
+        args.perceptual_channels_last = 1
+        args.perceptual_compile = 1
+        model = StereoVAE(args)
+        perceptual_model = RecordingPerceptual()
+        model.perceptual_model = perceptual_model
+        model.perceptual_weight = 1.0
+        prediction = torch.randn(2, 3, 3, 4, 8, 8)
+        target = torch.randn_like(prediction)
+
+        with mock.patch(
+            "torch.compile", side_effect=lambda module, **_: module
+        ) as compile_mock:
+            actual = model._perceptual_loss(prediction, target)
+            second = model._perceptual_loss(prediction, target)
+
+        expected = ((prediction - target) * 2.0).square().mean()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(second, expected)
+        compile_mock.assert_called_once_with(perceptual_model, dynamic=False)
+        self.assertEqual(len(perceptual_model.channels_last), 10)
+        self.assertTrue(all(perceptual_model.channels_last))
 
     def test_gan_builds_only_weighted_discriminators(self) -> None:
         image_args = self._args()

@@ -100,6 +100,14 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             'PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True', source
         )
         self.assertIn(
+            '--perceptual_frame_microbatch "${PERCEPTUAL_FRAME_MICROBATCH:-24}"',
+            source,
+        )
+        self.assertIn(
+            '--perceptual_channels_last "${PERCEPTUAL_CHANNELS_LAST:-0}"', source
+        )
+        self.assertIn('--perceptual_compile "${PERCEPTUAL_COMPILE:-0}"', source)
+        self.assertIn(
             'DISTRIBUTED_MODE}" == "single" && "${GPU_COUNT}" -gt 1', source
         )
         self.assertIn("--standalone", source)
