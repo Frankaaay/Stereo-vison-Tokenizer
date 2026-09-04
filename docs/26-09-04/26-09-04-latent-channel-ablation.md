@@ -83,3 +83,8 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 - anomaly 首个 NaN 位于 encoder temporal Transformer 的 GEGLU backward；关闭
   LPIPS 后仍复现，排除 LPIPS loss 分支。临时增加 RGB、raw depth、latent 和
   posterior 边界梯度探针，继续定位首个 Inf 的来源区间。
+- 梯度探针初版插入位置错误，导致 diagnostic v7/v8 未执行真实 training step；
+  其进度条不作为稳定性证据，任务已停止且探针和 anomaly 均从正式代码移除。
+- 正式修复对 generator backward 使用 1/1024 静态缩放，并将 gradient clip 阈值
+  同比缩放。原始 loss 日志、batch、各 loss 相对权重和 clip 后梯度方向不变；Adam
+  一阶与二阶矩的同倍率缩放相消，仅用于避免 BF16 中间 backward gradient 溢出。

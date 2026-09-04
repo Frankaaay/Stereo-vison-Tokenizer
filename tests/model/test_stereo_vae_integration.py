@@ -632,7 +632,10 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             model._profiled_training_step(batch)
 
         self.assertEqual(backward.call_count, 2)
-        self.assertEqual(backward.call_args_list[0].args[0].item(), 2.0)
+        self.assertEqual(
+            backward.call_args_list[0].args[0].item(),
+            2.0 / 1024.0,
+        )
         optimizer.step.assert_called_once_with()
         optimizer.zero_grad.assert_called_once_with()
         scheduler.step_update.assert_called_once_with(1)

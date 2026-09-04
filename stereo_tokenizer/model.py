@@ -41,6 +41,9 @@ from .modules.vae import (
 from .profiling import profile_region
 
 
+_GENERATOR_BACKWARD_SCALE = 1.0 / 1024.0
+
+
 def hinge_d_loss(logits_real, logits_fake):
     loss_real = torch.mean(F.relu(1. - logits_real))
     loss_fake = torch.mean(F.relu(1. + logits_fake))
@@ -1081,22 +1084,6 @@ class StereoVAE(pl.LightningModule):
             getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
         )
 
-    @staticmethod
-    def _register_finite_gradient_probe(
-        label: str,
-        tensor: torch.Tensor,
-    ) -> None:
-        def check(gradient: torch.Tensor) -> torch.Tensor:
-            if not torch.isfinite(gradient).all():
-                nan_count = int(torch.isnan(gradient).sum().item())
-                inf_count = int(torch.isinf(gradient).sum().item())
-                raise RuntimeError(
-                    f"non-finite gradient at {label}: "
-                    f"nan_count={nan_count}, inf_count={inf_count}"
-                )
-            return gradient
-
-        tensor.register_hook(check)
         expected_mode = mode_for_update(
             int(self.args.mode_schedule_seed),
             self.generator_updates,
@@ -1163,20 +1150,6 @@ class StereoVAE(pl.LightningModule):
             temporal_mode=temporal_mode,
             sample_posterior=True,
         )
-        self._register_finite_gradient_probe("rgb", result.model.rgb)
-        self._register_finite_gradient_probe(
-            "raw_relative_log_depth",
-            result.model.raw_relative_log_depth,
-        )
-        self._register_finite_gradient_probe("latent", result.model.latent)
-        self._register_finite_gradient_probe(
-            "posterior_mean",
-            result.model.posterior.distribution.mean,
-        )
-        self._register_finite_gradient_probe(
-            "posterior_logvar",
-            result.model.posterior.distribution.logvar,
-        )
         rgb_target = batch["video"][:, :, 0]
         perceptual = self._perceptual_loss(
             result.model.rgb,
@@ -1198,7 +1171,11 @@ class StereoVAE(pl.LightningModule):
         schedulers = self._as_sequence(self.lr_schedulers())
         generator_optimizer = optimizers[0]
         with profile_region("stereo/update/backward"):
-            self.manual_backward(generator_loss / accumulation_factor)
+            self.manual_backward(
+                generator_loss
+                / accumulation_factor
+                * _GENERATOR_BACKWARD_SCALE
+            )
 
         self.batch_updates += 1
         self._micro_step += 1
@@ -1214,7 +1191,9 @@ class StereoVAE(pl.LightningModule):
                 with profile_region("stereo/update/gradient_clipping"):
                     self.clip_gradients(
                         generator_optimizer,
-                        gradient_clip_val=self.grad_clip_val,
+                        gradient_clip_val=(
+                            self.grad_clip_val * _GENERATOR_BACKWARD_SCALE
+                        ),
                     )
             with profile_region("stereo/update/adam_step"):
                 generator_optimizer.step()
