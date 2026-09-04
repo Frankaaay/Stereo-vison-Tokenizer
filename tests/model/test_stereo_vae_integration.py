@@ -287,10 +287,11 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         expected = ((prediction - target) * 2.0).square().mean() * 0.5
 
         torch.testing.assert_close(actual, expected)
+        self.assertEqual(len(perceptual_model.batch_shapes), 12)
         actual.backward()
         self.assertIsNotNone(prediction.grad)
         self.assertTrue(torch.isfinite(prediction.grad).all())
-        self.assertEqual(len(perceptual_model.batch_shapes), 12)
+        self.assertGreaterEqual(len(perceptual_model.batch_shapes), 12)
         self.assertEqual(
             set(perceptual_model.batch_shapes),
             {(2, 3, 8, 8)},

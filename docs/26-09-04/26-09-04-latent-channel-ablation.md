@@ -48,3 +48,16 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 
 当前为本地实现阶段，尚未启动远端训练。启动后的 commit、run ID、tmux、输出、
 实时计数和健康检查结果将在本文件追加。
+
+## Z96 首次启动与显存修复
+
+- 首次启动 commit：`25a58c3b8184c10a553b0d6f7964e00c257541ab`。
+- 首次输出：
+  `/data/home/frank/experiments/stereo-latent-ablation-bs384-h2002-20260904-v1`。
+- W&B offline run `2uo5ifis` 已创建，但在第一个 optimizer update 完成前失败。
+- 第一根因是 mode-aware BS48 的 LPIPS forward OOM：每卡约 139.42/139.80 GiB
+  已用，再申请 384 MiB 失败。8 张 GPU 随后释放，Z24/Z48 未启动。
+- 保持 batch、GA、loss、精度和 optimizer 合同不变，对冻结 LPIPS forward 使用
+  non-reentrant activation checkpoint；只在 backward 重算 LPIPS 特征，不改变 loss
+  reduction 或 effective global batch。该修复对 Z96/Z24/Z48 三组统一生效。
+- 失败输出保留，不复用、不删除；修复后使用新的唯一输出根重新启动。
