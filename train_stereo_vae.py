@@ -81,6 +81,7 @@ def main():
                     "mode_batch_sizes",
                     "mode_grad_accumulates",
                     "mode_effective_global_batch_sizes",
+                    "stereo_training_input",
                     "world_size_contract",
                 )
             }

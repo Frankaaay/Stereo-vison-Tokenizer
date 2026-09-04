@@ -293,6 +293,7 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             "MODE_BATCH_SIZES",
             "MODE_GRAD_ACCUMULATES",
             "MONO_DATASET_WEIGHTS",
+            "STEREO_TRAINING_INPUT",
         ):
             self.assertIn(token, launcher)
         self.assertNotIn("UMI_ROOT_ALIASES", launcher)
@@ -314,6 +315,19 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("da3_images", online_gt)
         self.assertIn("DepthAnything3OnlineTeacher", online_gt)
         self.assertIn("finite_positive_non_padding", launcher)
+        self.assertIn(
+            '--stereo_training_input "${STEREO_TRAINING_INPUT}"',
+            launcher,
+        )
+
+    def test_stereo_input_ablation_wrapper_is_serial_and_fail_closed(self) -> None:
+        wrapper = (
+            ROOT / "scripts/stereo/run_stereo_input_ablation_serial.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("for condition in left_only same_left", wrapper)
+        self.assertIn("export LATENT_CHANNELS=48", wrapper)
+        self.assertIn('if [[ -e "${ABLATION_OUTPUT_ROOT}" ]]', wrapper)
+        self.assertIn('exit "${train_status}"', wrapper)
 
     def test_tensorrt_backend_is_explicit_and_frozen_to_32_iterations(self):
         launcher = (ROOT / "scripts/stereo/train_stereo_vae.sh").read_text(

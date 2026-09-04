@@ -24,6 +24,11 @@ if [[ "${LATENT_CHANNELS}" != "24" && "${LATENT_CHANNELS}" != "48" && "${LATENT_
   echo "LATENT_CHANNELS must be 24, 48, or 96" >&2
   exit 2
 fi
+STEREO_TRAINING_INPUT="${STEREO_TRAINING_INPUT:-correct}"
+if [[ "${STEREO_TRAINING_INPUT}" != "correct" && "${STEREO_TRAINING_INPUT}" != "left_only" && "${STEREO_TRAINING_INPUT}" != "same_left" ]]; then
+  echo "STEREO_TRAINING_INPUT must be correct, left_only, or same_left" >&2
+  exit 2
+fi
 
 DISTRIBUTED_MODE="${DISTRIBUTED_MODE:-single}"
 NUM_NODES="${NUM_NODES:-1}"
@@ -300,6 +305,7 @@ fi
   --temporal_depth 4 \
   --embedding_dim 512 \
   --latent_channels "${LATENT_CHANNELS}" \
+  --stereo_training_input "${STEREO_TRAINING_INPUT}" \
   --enc_block ttww \
   --dec_block tttt \
   --twod_window_size 8 \

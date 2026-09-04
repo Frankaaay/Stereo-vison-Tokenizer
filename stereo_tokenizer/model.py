@@ -98,6 +98,9 @@ class StereoVAE(pl.LightningModule):
         self.stereo_num_frames = args.stereo_num_frames
         self.resolution = args.resolution
         self.patch_size = args.patch_size
+        self.stereo_training_input = getattr(
+            args, "stereo_training_input", "correct"
+        )
 
         self.encoder = StereoEncoder(
             image_size=args.resolution,
@@ -271,6 +274,14 @@ class StereoVAE(pl.LightningModule):
             )
         if args.latent_channels not in (24, 48, 96):
             raise ValueError("StereoVAE latent_channels must be one of 24, 48, or 96")
+        if getattr(args, "stereo_training_input", "correct") not in (
+            "correct",
+            "left_only",
+            "same_left",
+        ):
+            raise ValueError(
+                "stereo_training_input must be correct, left_only, or same_left"
+            )
         if len(args.enc_block) != args.spatial_depth:
             raise ValueError("enc_block length must equal spatial_depth")
         if len(args.dec_block) != args.spatial_depth:
@@ -349,6 +360,7 @@ class StereoVAE(pl.LightningModule):
                 * world_size_contract
                 for mode_id in MODE_IDS
             },
+            "stereo_training_input": self.stereo_training_input,
             "logical_update_contract_version": (
                 2 if counter_transition is not None else 1
             ),
@@ -427,6 +439,11 @@ class StereoVAE(pl.LightningModule):
             != expected_effective_global_batches
         ):
             raise ValueError("checkpoint effective global batch contract mismatch")
+        checkpoint_stereo_input = counters.get(
+            "stereo_training_input", "correct"
+        )
+        if checkpoint_stereo_input != self.stereo_training_input:
+            raise ValueError("checkpoint stereo training input mismatch")
         mode_updates = counters.get("mode_updates")
         mode_samples = counters.get("mode_samples")
         if not isinstance(mode_updates, Mapping) or set(mode_updates) != set(MODE_IDS):
@@ -694,6 +711,40 @@ class StereoVAE(pl.LightningModule):
                 f"{temporal_mode} batch must already be decoded with T={expected_time}"
             )
         return batch
+
+    def _prepare_student_batch(
+        self,
+        batch,
+        *,
+        source_eye_mode: EyeMode,
+    ) -> tuple[dict, EyeMode]:
+        """Apply the frozen student-only stereo input intervention.
+
+        Online teachers run before ``training_step``/``validation_step`` and
+        therefore always observe the original calibrated UMI ``(L, R)`` pair.
+        This method changes only the tensor consumed by the student model.
+        """
+
+        batch = self._unwrap_batch(batch)
+        if source_eye_mode == "mono" or self.stereo_training_input == "correct":
+            return batch, source_eye_mode
+        if source_eye_mode != "stereo":
+            raise ValueError(f"unsupported source eye mode {source_eye_mode!r}")
+
+        source_video = batch["video"]
+        if source_video.ndim != 7 or source_video.shape[2] != 2:
+            raise ValueError(
+                "stereo input ablation requires source video [B,V,E=2,C,T,H,W]"
+            )
+        student_batch = dict(batch)
+        left = source_video[:, :, :1]
+        if self.stereo_training_input == "left_only":
+            student_batch["video"] = left
+            return student_batch, "mono"
+        if self.stereo_training_input == "same_left":
+            student_batch["video"] = torch.cat((left, left), dim=2)
+            return student_batch, "stereo"
+        raise RuntimeError("unreachable stereo training input")
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         with profile_region("stereo/transfer/cpu_to_gpu"):
@@ -1121,13 +1172,17 @@ class StereoVAE(pl.LightningModule):
         self.last_mode_id = mode_id
         self.last_micro_step_index = self._micro_step + 1
         self.last_accumulation_factor = accumulation_factor
-        batch = self._prepare_temporal_batch(
+        student_batch, student_eye_mode = self._prepare_student_batch(
             source_batch,
+            source_eye_mode=eye_mode,
+        )
+        batch = self._prepare_temporal_batch(
+            student_batch,
             temporal_mode=temporal_mode,
         )
         result = self.compute_core_loss(
             batch,
-            eye_mode=eye_mode,
+            eye_mode=student_eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=True,
         )
@@ -1285,13 +1340,17 @@ class StereoVAE(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
-        mode_batch = self._prepare_temporal_batch(
+        student_batch, student_eye_mode = self._prepare_student_batch(
             source_batch,
+            source_eye_mode=eye_mode,
+        )
+        mode_batch = self._prepare_temporal_batch(
+            student_batch,
             temporal_mode=temporal_mode,
         )
         result = self.compute_core_loss(
             mode_batch,
-            eye_mode=eye_mode,
+            eye_mode=student_eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=False,
         )
@@ -1440,9 +1499,13 @@ class StereoVAE(pl.LightningModule):
     def log_images(self, batch, **kwargs):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        student_batch, student_eye_mode = self._prepare_student_batch(
+            source_batch,
+            source_eye_mode=eye_mode,
+        )
         output = self(
-            source_batch["video"],
-            eye_mode=eye_mode,
+            student_batch["video"],
+            eye_mode=student_eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=False,
         )
@@ -1457,11 +1520,15 @@ class StereoVAE(pl.LightningModule):
         }
 
     def log_videos(self, batch, **kwargs):
-        batch = self._unwrap_batch(batch)
-        _, eye_mode, temporal_mode = self._mode_from_batch(batch)
+        source_batch = self._unwrap_batch(batch)
+        _, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
+        batch, student_eye_mode = self._prepare_student_batch(
+            source_batch,
+            source_eye_mode=eye_mode,
+        )
         output = self(
             batch["video"],
-            eye_mode=eye_mode,
+            eye_mode=student_eye_mode,
             temporal_mode=temporal_mode,
             sample_posterior=False,
         )
@@ -1548,6 +1615,11 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--ff_dropout", type=float, default=0.0)
         parser.add_argument("--ff_mult", type=float, default=4.0)
         parser.add_argument("--latent_channels", type=int, default=48)
+        parser.add_argument(
+            "--stereo_training_input",
+            choices=("correct", "left_only", "same_left"),
+            default="correct",
+        )
 
         parser.add_argument("--stereo_num_views", type=int, default=3)
         parser.add_argument("--stereo_num_frames", type=int, default=4)

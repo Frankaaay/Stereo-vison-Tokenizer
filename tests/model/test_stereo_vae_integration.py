@@ -24,6 +24,7 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             norm_type="group",
             embedding_dim=32,
             latent_channels=48,
+            stereo_training_input="correct",
             patch_size=8,
             enc_block="tt",
             dec_block="tt",
@@ -155,6 +156,54 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         args.latent_channels = 32
         with self.assertRaisesRegex(ValueError, "one of 24, 48, or 96"):
             StereoVAE(args)
+
+    def test_left_only_training_input_keeps_teacher_batch_and_skips_fusion(self) -> None:
+        args = self._args()
+        args.stereo_training_input = "left_only"
+        model = StereoVAE(args).eval()
+        source = self._batch()
+        student, eye_mode = model._prepare_student_batch(
+            source,
+            source_eye_mode="stereo",
+        )
+        self.assertEqual(source["video"].shape[2], 2)
+        self.assertEqual(student["video"].shape[2], 1)
+        self.assertEqual(eye_mode, "mono")
+        self.assertIs(student["disparity"], source["disparity"])
+        self.assertIs(student["valid_mask"], source["valid_mask"])
+        self.assertTrue(torch.equal(student["video"], source["video"][:, :, :1]))
+        output = model(
+            student["video"],
+            eye_mode=eye_mode,
+            temporal_mode="four_frame",
+            sample_posterior=False,
+        )
+        self.assertIsNone(output.fusion)
+
+    def test_same_left_training_input_preserves_stereo_path(self) -> None:
+        args = self._args()
+        args.stereo_training_input = "same_left"
+        model = StereoVAE(args).eval()
+        source = self._batch()
+        student, eye_mode = model._prepare_student_batch(
+            source,
+            source_eye_mode="stereo",
+        )
+        self.assertEqual(source["video"].shape[2], 2)
+        self.assertEqual(student["video"].shape[2], 2)
+        self.assertEqual(eye_mode, "stereo")
+        self.assertIs(student["disparity"], source["disparity"])
+        self.assertIs(student["valid_mask"], source["valid_mask"])
+        self.assertTrue(
+            torch.equal(student["video"][:, :, 0], student["video"][:, :, 1])
+        )
+        output = model(
+            student["video"],
+            eye_mode=eye_mode,
+            temporal_mode="four_frame",
+            sample_posterior=False,
+        )
+        self.assertIsNotNone(output.fusion)
 
     def test_mono_two_views_use_one_four_frame_forward(self) -> None:
         model = StereoVAE(self._args()).eval()
