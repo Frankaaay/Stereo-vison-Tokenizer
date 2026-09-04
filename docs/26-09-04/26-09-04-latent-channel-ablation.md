@@ -187,3 +187,23 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
 - 8 卡 effective global batch 依次为 1536/320/1280/288。40,000 updates 共处理
   35,392,000 logical samples；mode update 权重仍为 35:35:15:15，质量比较必须读取
   per-mode sample counter，不能再假设四种 mode 样本数相等。
+
+### 正式串行训练 v16
+
+- 运行位置：H200-2，8×H200；代码 commit
+  `f3fba13f5e0585885209dc27539dcf2b3f6600a2`。
+- 顺序与预算：Z96 → Z24 → Z48，每个模型 40,000 generator updates；per-mode BS
+  `192:40:160:36`、GA `1:1:1:1`、更新权重 `35:35:15:15`。
+- tmux：`stereo-latent-ablation-permode-20260904-v16`；output root：
+  `/data/home/frank/experiments/stereo-latent-ablation-permode-h2002-20260904-v16`。
+- launch artifact：
+  `/data/home/frank/experiments/stereo-latent-ablation-permode-h2002-20260904-v16.launch.sh`，
+  SHA256 `6735574a2a64c6e2ed74a7b14f417bf5e270362c03d73da02d29ce49bd22ad4b`。
+- Z96 W&B offline run：`wts892on`。2026-09-04 20:27 的 5 分钟健康检查到
+  step 104（训练计时 5:18）：8 卡持续工作，nvidia-smi 最高约 134.37 GiB/卡，
+  未见 OOM、NaN、Traceback 或 CUDA error。
+- 随后的直接 W&B counter 快照为 generator/batch updates 116；四模式 updates 为
+  41/40/17/18，samples 为 62,976/12,800/21,760/5,184；对应最近 total loss
+  为 0.923/1.057/1.288/1.268，均有限。
+- 按首个模型稳定段约 2.7--2.8 秒/update 估算，每个 40k 模型约 31 小时，三个模型
+  串行约 93 小时；checkpoint/validation 和模式分布会使实际完成时间小幅波动。
