@@ -5,8 +5,8 @@ cd /data/home/frank/projects/Stereo-vison-Tokenizer
 source /data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260828/venv/bin/activate
 export PYTHONUNBUFFERED=1
 
-export ABLATION_OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v2
-export OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v2/placeholder
+export ABLATION_OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v3
+export OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v3/placeholder
 export GPU_COUNT=8
 export PER_DEVICE_BATCH_SIZE=24
 export GRAD_ACCUMULATES=1
@@ -33,14 +33,14 @@ export PREFETCH_FACTOR=2
 export DISABLE_MEDIA_LOGGING=1
 export WANDB_MODE=offline
 
-export HY_MANIFEST=/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260829/manifests/hy_formal_90_5_5_v1.jsonl
+export HY_MANIFEST=/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260902-threeview-v4/manifests/hy_formal_90_5_5_threeview_validated_v3.jsonl
 export HY_ROOT_ALIASES='{"hy_primary":"/data/shared/hy_embodied/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data","hy_rest":"/data/shared/hy_embodied_rest/Hy-Embodied/huggingface_tencent_Hy-Embodied-0.5-VLA-Data"}'
 export LIBERO_MANIFEST=/data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260829/manifests/libero_formal_90_5_5_v1.jsonl
 export LIBERO_ROOT_ALIASES='{"libero":"/data/shared/offline/datasets/libero_mujoco3.3.2"}'
 export UMI_MANIFEST=/data/home/frank/runtime/umi-lerobot-decode-audit-h2001-20260829-v1/umi_lerobot_decode_verified_v1.jsonl
 export UMI_DATASET_ROOT=/data/shared/datasets/umi_lerobot_v3_260714
 export UMI_RECTIFICATION_AUDIT_SHA256=41d2bfecaae85dd18f7cfd1a2a3a2177e8fd4aa8897be1cb411d85c3092a7d25
-export NODE_MANIFEST_CONTRACTS='{"0":{"hy":"b25efc945ccd7e7afd2f1a76393ea19adde8fa072e1e9a2ca6348e0e5c1a45f9","libero":"0299354a7225e979f6b9ff5fb3e26a975c811d2d41af44e042a6eade3f24bbf4","umi":"5e8f58c769549372af070a6132ad826bd7172aaeabcebebff84426e66bc2120f"}}'
+export NODE_MANIFEST_CONTRACTS='{"0":{"hy":"821fb1d2610bc9113471cd8150b9cd791488cf52fcb81f36091a89d7d099907a","libero":"0299354a7225e979f6b9ff5fb3e26a975c811d2d41af44e042a6eade3f24bbf4","umi":"5e8f58c769549372af070a6132ad826bd7172aaeabcebebff84426e66bc2120f"}}'
 
 export DA3_REPO=/data/home/frank/runtime/depth-anything-3/3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
 export DA3_SOURCE_SHA=3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
