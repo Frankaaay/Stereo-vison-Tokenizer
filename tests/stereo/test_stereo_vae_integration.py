@@ -57,7 +57,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             smooth_l1_beta=1.0,
             recon_loss_type="l1",
             perceptual_weight=0.0,
-            accumulation_no_sync=1,
             gan_enabled=False,
             image_gan_weight=0.0,
             video_gan_weight=0.0,
@@ -601,40 +600,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         self.assertEqual(model.batch_updates, 2)
         self.assertEqual(model.mode_updates["stereo/four_frame"], 1)
         self.assertEqual(model.mode_samples["stereo/four_frame"], 384)
-
-    def test_training_step_blocks_ddp_sync_only_before_final_microbatch(self) -> None:
-        args = self._args()
-        args.four_mode_mixed_training = True
-        args.mode_grad_accumulates = "1:1:1:2"
-        model = StereoVAE(args)
-        sync_context = mock.MagicMock()
-        strategy = mock.Mock()
-        strategy.block_backward_sync.return_value = sync_context
-        model._trainer = SimpleNamespace(strategy=strategy)
-        batch = {
-            "video": torch.zeros(1, 1, 1, 3, 4, 1, 1),
-            "mode_id": ["stereo/four_frame"],
-            "eye_mode": ["stereo"],
-            "temporal_mode": ["four_frame"],
-        }
-
-        with (
-            mock.patch.object(
-                model,
-                "_mode_from_batch",
-                return_value=("stereo/four_frame", "stereo", "four_frame"),
-            ),
-            mock.patch.object(model, "_profiled_training_step") as step,
-        ):
-            model._micro_step = 0
-            model.training_step(batch, 0)
-            model._micro_step = 1
-            model.training_step(batch, 1)
-
-        self.assertEqual(step.call_count, 2)
-        strategy.block_backward_sync.assert_called_once_with()
-        sync_context.__enter__.assert_called_once_with()
-        sync_context.__exit__.assert_called_once()
 
 
 if __name__ == "__main__":

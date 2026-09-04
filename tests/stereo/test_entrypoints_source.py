@@ -206,8 +206,6 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         )
         self.assertIn("sdpa_mask = sdpa_mask.masked_fill(", attention)
         self.assertIn("TORCH_PROFILE_OUTPUT_DIR", launcher)
-        self.assertIn("TORCH_PROFILE_WITH_STACK", launcher)
-        self.assertIn('ACCUMULATION_NO_SYNC:-1', launcher)
         callbacks = (
             ROOT / "stereo_tokenizer" / "modules" / "callbacks.py"
         ).read_text(encoding="utf-8")

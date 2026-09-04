@@ -474,9 +474,6 @@ def build_parser():
     parser.add_argument("--torch_profile_wait", type=int, default=5)
     parser.add_argument("--torch_profile_warmup", type=int, default=2)
     parser.add_argument("--torch_profile_active", type=int, default=4)
-    parser.add_argument(
-        "--torch_profile_with_stack", type=int, choices=(0, 1), default=0
-    )
     parser.add_argument("--online_gt_enabled", type=int, choices=(0, 1), default=0)
     parser.add_argument(
         "--foundation_stereo_backend",
@@ -1484,7 +1481,7 @@ def main():
             on_trace_ready=trace_writer,
             record_shapes=True,
             profile_memory=True,
-            with_stack=bool(args.torch_profile_with_stack),
+            with_stack=False,
         )
         callbacks.append(TrainingProfilerStepCallback(profiler))
 
