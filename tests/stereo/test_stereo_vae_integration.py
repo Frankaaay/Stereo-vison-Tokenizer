@@ -618,7 +618,14 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             "temporal_mode": ["four_frame"],
         }
 
-        with mock.patch.object(model, "_profiled_training_step") as step:
+        with (
+            mock.patch.object(
+                model,
+                "_mode_from_batch",
+                return_value=("stereo/four_frame", "stereo", "four_frame"),
+            ),
+            mock.patch.object(model, "_profiled_training_step") as step,
+        ):
             model._micro_step = 0
             model.training_step(batch, 0)
             model._micro_step = 1
