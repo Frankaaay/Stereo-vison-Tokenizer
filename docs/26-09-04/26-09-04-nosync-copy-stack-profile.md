@@ -47,14 +47,6 @@ stack trace 的 top operator 中，`aten::copy_` 为约 `85.81 ms/observed step`
 - `window_partition/window_reverse` 的显式 contiguous/clone copy 合计仅约 3.44 ms/10 microsteps，优先级低。
 - 能映射到训练 Python forward 的显式 `cat` 只有 8 次、GPU 约 0.02 ms；top-level `cat` 大头来自 autograd/native 或其他上下文，不能直接删除 attention 中的 `torch.cat`。
 
-## 下一步
+## 处置
 
-不修改 attention layout 或 `cat`。只对冻结 LPIPS 权重一次性转 BF16 做同节点 A/B，保持输入、loss reduction、batch、GA 和在线 teacher 不变，同时比较吞吐、峰值显存、LPIPS 数值和 checkpoint 健康度。
-
-## LPIPS BF16 A/B（进行中）
-
-- 实验变量仅为冻结 LPIPS 参数在构造时从 FP32 一次性转为 BF16；归一化 buffer 保持 FP32，baseline 继续由 autocast 在每次 forward 中转换冻结权重。
-- 使用临时 `PERCEPTUAL_MODEL_BF16=0/1` 开关，在同一实验 SHA、同一节点上按 FP32 A → BF16 A → BF16 B → FP32 B 顺序运行。
-- 运行前先通过单元测试、shell 语法检查，以及固定输入下 LPIPS loss/输入梯度的 FP32-weight-autocast 与 BF16-weight-autocast 数值对照。
-- 端到端合同沿用 batch `24:24:24:12`、GA `1:1:1:2`、在线 DA3/LAS2-H；记录 pooled/per-mode samples/s、峰值显存、validation、checkpoint 和作业退出状态。
-- 实验代码 SHA `5fe957c815e0c94bd6383a0292e30a1edd7520fe`。H100 1 卡门禁 Job `3309` 当前因 `Resources` 排队；8 卡 A/B Job `3310` 已设置 `afterok:3309` 依赖，因此门禁失败时不会消耗 8 卡。提交时调度器对 Job 3309 的预计启动时间为 `2026-09-11T13:54:25`。
+LPIPS BF16 A/B 因 H100 排队时间过长取消，未运行、未产生结果；实验开关已撤销。后续不继续这条 profiling 优化路线。

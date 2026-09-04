@@ -57,7 +57,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             smooth_l1_beta=1.0,
             recon_loss_type="l1",
             perceptual_weight=0.0,
-            perceptual_model_bf16=False,
             gan_enabled=False,
             image_gan_weight=0.0,
             video_gan_weight=0.0,
@@ -237,24 +236,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         model.train()
 
         self.assertTrue(model.training)
-        self.assertFalse(model.perceptual_model.training)
-
-    def test_perceptual_model_can_be_precast_to_bfloat16(self) -> None:
-        class TinyPerceptual(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.ones(1))
-                self.register_buffer("scale", torch.ones(1))
-
-        args = self._args()
-        args.perceptual_weight = 1.0
-        args.perceptual_model_bf16 = True
-        with mock.patch("stereo_tokenizer.model.LPIPS", TinyPerceptual):
-            model = StereoVAE(args)
-
-        self.assertEqual(model.perceptual_model.weight.dtype, torch.bfloat16)
-        self.assertEqual(model.perceptual_model.scale.dtype, torch.float32)
-        self.assertFalse(model.perceptual_model.weight.requires_grad)
         self.assertFalse(model.perceptual_model.training)
 
     def test_perceptual_loss_chunks_views_and_frames_without_changing_mean(

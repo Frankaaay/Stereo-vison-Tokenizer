@@ -65,15 +65,6 @@ elif [[ "${GAN_ENABLED}" != "0" ]]; then
   exit 2
 fi
 
-PERCEPTUAL_MODEL_BF16="${PERCEPTUAL_MODEL_BF16:-0}"
-PERCEPTUAL_MODEL_ARGS=()
-if [[ "${PERCEPTUAL_MODEL_BF16}" == "1" ]]; then
-  PERCEPTUAL_MODEL_ARGS+=(--perceptual_model_bf16)
-elif [[ "${PERCEPTUAL_MODEL_BF16}" != "0" ]]; then
-  echo "PERCEPTUAL_MODEL_BF16 must be 0 or 1" >&2
-  exit 2
-fi
-
 MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
 MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
 FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
@@ -371,7 +362,6 @@ fi
   --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
-  "${PERCEPTUAL_MODEL_ARGS[@]}" \
   --image_gan_weight "${IMAGE_GAN_WEIGHT}" \
   --video_gan_weight "${VIDEO_GAN_WEIGHT}" \
   --gan_feat_weight "${GAN_FEAT_WEIGHT}" \
