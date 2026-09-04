@@ -2,6 +2,8 @@
 set -euo pipefail
 
 cd /data/home/frank/projects/Stereo-vison-Tokenizer
+source /data/home/frank/runtime/stereo-tokenizer-pretrain-h2001-20260828/venv/bin/activate
+export PYTHONUNBUFFERED=1
 
 export ABLATION_OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v1
 export OUTPUT_ROOT=/data/home/frank/experiments/stereo-input-ablation-permode-h2001-20260904-v1/placeholder
