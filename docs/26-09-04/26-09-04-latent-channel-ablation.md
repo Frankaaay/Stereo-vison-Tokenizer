@@ -80,3 +80,6 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   checkpoint、batch、loss 与 optimizer 合同不变。
 - FP32 LPIPS 同合同重跑仍复现相同失败；下一次仅运行短诊断，临时启用 autograd
   anomaly detection 定位首个 non-finite backward 算子，不计入正式 ablation。
+- anomaly 首个 NaN 位于 encoder temporal Transformer 的 GEGLU backward；关闭
+  LPIPS 后仍复现，排除 LPIPS loss 分支。临时增加 RGB、raw depth、latent 和
+  posterior 边界梯度探针，继续定位首个 Inf 的来源区间。
