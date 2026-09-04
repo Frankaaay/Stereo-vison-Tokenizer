@@ -362,9 +362,6 @@ fi
   --relative_depth_epsilon 1e-6 \
   --kl_weight "${KL_WEIGHT}" \
   --perceptual_weight "${PERCEPTUAL_WEIGHT}" \
-  --perceptual_frame_microbatch "${PERCEPTUAL_FRAME_MICROBATCH:-24}" \
-  --perceptual_channels_last "${PERCEPTUAL_CHANNELS_LAST:-0}" \
-  --perceptual_compile "${PERCEPTUAL_COMPILE:-0}" \
   --image_gan_weight "${IMAGE_GAN_WEIGHT}" \
   --video_gan_weight "${VIDEO_GAN_WEIGHT}" \
   --gan_feat_weight "${GAN_FEAT_WEIGHT}" \

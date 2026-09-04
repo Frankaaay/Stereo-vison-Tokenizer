@@ -200,14 +200,6 @@ class StereoVAE(pl.LightningModule):
         self.kl_warmup_steps = args.kl_warmup_steps
         self.relative_depth_epsilon = args.relative_depth_epsilon
         self.perceptual_weight = args.perceptual_weight
-        self.perceptual_frame_microbatch = int(
-            getattr(args, "perceptual_frame_microbatch", 24)
-        )
-        self.perceptual_channels_last = bool(
-            getattr(args, "perceptual_channels_last", 0)
-        )
-        self.perceptual_compile = bool(getattr(args, "perceptual_compile", 0))
-        self._compiled_perceptual_model = None
         self.gan_enabled = args.gan_enabled
         self.image_gan_weight = args.image_gan_weight
         self.video_gan_weight = args.video_gan_weight
@@ -217,8 +209,6 @@ class StereoVAE(pl.LightningModule):
         if self.perceptual_weight > 0:
             self.perceptual_model = LPIPS().eval()
             self.perceptual_model.requires_grad_(False)
-            if self.perceptual_channels_last:
-                self.perceptual_model.to(memory_format=torch.channels_last)
         else:
             self.perceptual_model = None
 
@@ -330,8 +320,6 @@ class StereoVAE(pl.LightningModule):
                 raise ValueError(f"{name} must be explicitly set and non-negative")
         if args.relative_depth_epsilon <= 0:
             raise ValueError("relative_depth_epsilon must be positive")
-        if int(getattr(args, "perceptual_frame_microbatch", 24)) < 1:
-            raise ValueError("perceptual_frame_microbatch must be positive")
         if args.grad_accumulates <= 0:
             raise ValueError("grad_accumulates must be positive")
         if args.discriminator_iter_start < 0:
@@ -908,39 +896,17 @@ class StereoVAE(pl.LightningModule):
     ) -> torch.Tensor:
         if self.perceptual_model is None:
             return prediction.new_zeros(())
-        prediction_frames = self._flatten_view_frames(prediction)
-        target_frames = self._flatten_view_frames(target)
-        perceptual_model = self.perceptual_model
-        if self.perceptual_compile:
-            if self._compiled_perceptual_model is None:
-                object.__setattr__(
-                    self,
-                    "_compiled_perceptual_model",
-                    torch.compile(perceptual_model, dynamic=False),
-                )
-            perceptual_model = self._compiled_perceptual_model
         with profile_region("stereo/loss/lpips_vgg"):
             loss_sum = prediction.new_zeros(())
             loss_count = 0
-            for start in range(
-                0, prediction_frames.shape[0], self.perceptual_frame_microbatch
-            ):
-                stop = start + self.perceptual_frame_microbatch
-                prediction_chunk = prediction_frames[start:stop]
-                target_chunk = target_frames[start:stop]
-                if self.perceptual_channels_last:
-                    prediction_chunk = prediction_chunk.contiguous(
-                        memory_format=torch.channels_last
+            for view_index in range(prediction.shape[1]):
+                for frame_index in range(prediction.shape[3]):
+                    frame_loss = self.perceptual_model(
+                        prediction[:, view_index, :, frame_index] * 2.0,
+                        target[:, view_index, :, frame_index] * 2.0,
                     )
-                    target_chunk = target_chunk.contiguous(
-                        memory_format=torch.channels_last
-                    )
-                frame_loss = perceptual_model(
-                    prediction_chunk * 2.0,
-                    target_chunk * 2.0,
-                )
-                loss_sum = loss_sum + frame_loss.sum()
-                loss_count += frame_loss.numel()
+                    loss_sum = loss_sum + frame_loss.sum()
+                    loss_count += frame_loss.numel()
             return loss_sum / loss_count * self.perceptual_weight
 
     @staticmethod
@@ -1557,13 +1523,6 @@ class StereoVAE(pl.LightningModule):
         parser.add_argument("--video_gan_weight", type=float, required=True)
         parser.add_argument("--gan_feat_weight", type=float, required=True)
         parser.add_argument("--perceptual_weight", type=float, required=True)
-        parser.add_argument("--perceptual_frame_microbatch", type=int, default=24)
-        parser.add_argument(
-            "--perceptual_channels_last", type=int, choices=(0, 1), default=0
-        )
-        parser.add_argument(
-            "--perceptual_compile", type=int, choices=(0, 1), default=0
-        )
         parser.add_argument(
             "--norm_type",
             choices=["batch", "group"],
