@@ -10,13 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import default_collate
 
-from eval_stereo_vae import (
-    _exact_mono_rank_indices,
-    batch_for_temporal_mode,
-    empty_accumulator,
-    finalize_metrics,
-    update_metrics,
-)
+from evaluation.stage_a_runtime import batch_for_temporal_mode
 from stereo_tokenizer.pretrain_data import HyLanceMonoDataset
 from stereo_tokenizer.geometry import GeometryMapping
 from stereo_tokenizer.online_gt import (
@@ -243,7 +237,7 @@ class GeometryMappingTest(unittest.TestCase):
         self.assertNotIn("depth_anything_3", geometry_source)
         self.assertNotIn(".forward(", geometry_source)
 
-    def test_formal_mono_contract_maps_da3_and_computes_one_view_metrics(self):
+    def test_formal_mono_contract_maps_da3_and_slices_one_view(self):
         mapping = GeometryMapping.create((240, 424))
         raw = torch.zeros(4, 3, 240, 424, dtype=torch.uint8)
         student, non_padding = mapping.student_letterbox(raw)
@@ -282,16 +276,6 @@ class GeometryMappingTest(unittest.TestCase):
         self.assertEqual(single["video"].shape, (1, 1, 1, 3, 1, 256, 256))
         self.assertEqual(single["da3_relative_depth"].shape[3], 1)
         self.assertEqual(single["mode_id"], ["mono/single_frame"])
-        output = SimpleNamespace(
-            rgb=batch["video"][:, :, 0].clone(),
-            raw_relative_log_depth=torch.zeros_like(batch["da3_relative_depth"]),
-        )
-        accumulator = empty_accumulator(torch.device("cpu"), 1)
-        update_metrics(accumulator, batch, output, 1e-6)
-        metrics = finalize_metrics(accumulator, ("cam_high",))
-        self.assertEqual(metrics["sample_count"], 1)
-        self.assertEqual(metrics["rgb_l1"], 0.0)
-        self.assertEqual(metrics["views"]["cam_high"]["relative_log_l1"], 0.0)
 
     def test_joint_mono_views_share_one_da3_call_and_restore_view_axis(self):
         mapping = GeometryMapping.create((240, 424))
@@ -334,21 +318,6 @@ class GeometryMappingTest(unittest.TestCase):
             (1, views, 1, 4, 256, 256),
         )
         self.assertEqual(batch["valid_mask"].shape, batch["da3_relative_depth"].shape)
-
-    def test_mono_ddp_indices_are_exact_and_non_overlapping(self):
-        dataset = list(range(7))
-        rank_indices = [
-            _exact_mono_rank_indices(dataset, rank, 3) for rank in range(3)
-        ]
-        self.assertEqual(
-            sorted(index for indices in rank_indices for index in indices),
-            list(range(7)),
-        )
-        self.assertEqual(
-            sum(len(indices) for indices in rank_indices),
-            len({index for indices in rank_indices for index in indices}),
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -67,39 +67,30 @@ fi
 
 MODE_UPDATE_WEIGHTS="${MODE_UPDATE_WEIGHTS:-35:35:15:15}"
 MONO_DATASET_WEIGHTS="${MONO_DATASET_WEIGHTS:-9:1}"
-FOUR_MODE_MIXED_TRAINING="${FOUR_MODE_MIXED_TRAINING:-0}"
 MODE_BATCH_SIZES="${MODE_BATCH_SIZES:-${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}:${PER_DEVICE_BATCH_SIZE}}"
 MODE_GRAD_ACCUMULATES="${MODE_GRAD_ACCUMULATES:-${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}:${GRAD_ACCUMULATES}}"
-if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
-    echo "four-mode training keeps GRAD_ACCUMULATES=1; use MODE_GRAD_ACCUMULATES" >&2
+if [[ "${GRAD_ACCUMULATES}" != "1" ]]; then
+  echo "four-mode training keeps GRAD_ACCUMULATES=1; use MODE_GRAD_ACCUMULATES" >&2
+  exit 2
+fi
+IFS=: read -r -a MODE_BATCH_SIZE_VALUES <<< "${MODE_BATCH_SIZES}"
+IFS=: read -r -a MODE_GRAD_ACCUMULATE_VALUES <<< "${MODE_GRAD_ACCUMULATES}"
+if [[ "${#MODE_BATCH_SIZE_VALUES[@]}" -ne 4 || "${#MODE_GRAD_ACCUMULATE_VALUES[@]}" -ne 4 ]]; then
+  echo "MODE_BATCH_SIZES and MODE_GRAD_ACCUMULATES require four colon-separated values" >&2
+  exit 2
+fi
+for value in "${MODE_BATCH_SIZE_VALUES[@]}" "${MODE_GRAD_ACCUMULATE_VALUES[@]}"; do
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "per-mode batch and accumulation values must be positive integers" >&2
     exit 2
   fi
-  IFS=: read -r -a MODE_BATCH_SIZE_VALUES <<< "${MODE_BATCH_SIZES}"
-  IFS=: read -r -a MODE_GRAD_ACCUMULATE_VALUES <<< "${MODE_GRAD_ACCUMULATES}"
-  if [[ "${#MODE_BATCH_SIZE_VALUES[@]}" -ne 4 || "${#MODE_GRAD_ACCUMULATE_VALUES[@]}" -ne 4 ]]; then
-    echo "MODE_BATCH_SIZES and MODE_GRAD_ACCUMULATES require four colon-separated values" >&2
-    exit 2
-  fi
-  for value in "${MODE_BATCH_SIZE_VALUES[@]}" "${MODE_GRAD_ACCUMULATE_VALUES[@]}"; do
-    if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
-      echo "per-mode batch and accumulation values must be positive integers" >&2
-      exit 2
-    fi
-  done
-  if [[ "${MODE_GRAD_ACCUMULATE_VALUES[0]}" != "1" || "${MODE_GRAD_ACCUMULATE_VALUES[1]}" != "1" ]]; then
-    echo "mono modes currently require accumulation factor 1" >&2
-    exit 2
-  fi
+done
+if [[ "${MODE_GRAD_ACCUMULATE_VALUES[0]}" != "1" || "${MODE_GRAD_ACCUMULATE_VALUES[1]}" != "1" ]]; then
+  echo "mono modes currently require accumulation factor 1" >&2
+  exit 2
 fi
 
-DATA_ARGS=()
 ONLINE_GT_ARGS=()
-if [[ "${FOUR_MODE_MIXED_TRAINING}" != "1" ]]; then
-  : "${LEROBOT_EPISODE_MANIFEST:?set the episode-level LeRobot manifest}"
-  : "${LEROBOT_DATASET_ROOT:?set the H1-local LeRobot root}"
-  : "${LEROBOT_RECTIFICATION_AUDIT_SHA256:?set the rectification audit SHA256}"
-fi
 FOUNDATION_STEREO_BACKEND="${FOUNDATION_STEREO_BACKEND:-pytorch}"
 FOUNDATION_BACKEND_ARGS=()
 if [[ "${FOUNDATION_STEREO_BACKEND}" == "las2_h" ]]; then
@@ -151,16 +142,6 @@ else
   echo "unsupported FOUNDATION_STEREO_BACKEND=${FOUNDATION_STEREO_BACKEND}" >&2
   exit 2
 fi
-if [[ "${FOUR_MODE_MIXED_TRAINING}" != "1" ]]; then
-  DATA_ARGS+=(
-    --lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"
-    --lerobot_dataset_root "${LEROBOT_DATASET_ROOT}"
-    --lerobot_rectification_audit_sha256 "${LEROBOT_RECTIFICATION_AUDIT_SHA256}"
-    --lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"
-    --lerobot_maximum_timestamp_error_s "${LEROBOT_MAXIMUM_TIMESTAMP_ERROR_S:-0.05}"
-    --lerobot_val_sample_limit "${LEROBOT_VAL_SAMPLE_LIMIT:-512}"
-  )
-fi
 ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"
 if [[ "${ONLINE_GT_CACHE_ENABLED}" == "1" ]]; then
   : "${ONLINE_GT_CACHE_ROOT:?set a repository-external online GT cache root}"
@@ -175,21 +156,13 @@ ONLINE_GT_ARGS+=(
   --online_val_check_interval_steps "${ONLINE_VAL_CHECK_INTERVAL_STEPS:-500}"
 )
 WORLD_SIZE=$((NUM_NODES * GPU_COUNT))
-if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  for index in 0 1 2 3; do
-    EXPECTED_MODE_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * MODE_BATCH_SIZE_VALUES[index] * MODE_GRAD_ACCUMULATE_VALUES[index]))
-    if [[ "${EXPECTED_MODE_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
-      echo "mode ${index} global batch mismatch: expected ${EXPECTED_MODE_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
-      exit 2
-    fi
-  done
-else
-  EXPECTED_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * PER_DEVICE_BATCH_SIZE * GRAD_ACCUMULATES))
-  if [[ "${EXPECTED_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
-    echo "global batch mismatch: expected ${EXPECTED_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
+for index in 0 1 2 3; do
+  EXPECTED_MODE_GLOBAL_BATCH_SIZE=$((WORLD_SIZE * MODE_BATCH_SIZE_VALUES[index] * MODE_GRAD_ACCUMULATE_VALUES[index]))
+  if [[ "${EXPECTED_MODE_GLOBAL_BATCH_SIZE}" -ne "${GLOBAL_BATCH_SIZE}" ]]; then
+    echo "mode ${index} global batch mismatch: expected ${EXPECTED_MODE_GLOBAL_BATCH_SIZE}, configured ${GLOBAL_BATCH_SIZE}" >&2
     exit 2
   fi
-fi
+done
 
 WANDB_ARGS=()
 if [[ "${DISABLE_WANDB:-0}" == "1" ]]; then
@@ -210,29 +183,27 @@ if [[ -n "${STEP_TIMING_OUTPUT:-}" ]]; then
 fi
 
 MIXED_MODE_ARGS=()
-if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
-  : "${HY_MANIFEST:?set the node-local Hy manifest}"
-  : "${HY_ROOT_ALIASES:?set the node-local Hy root-alias JSON}"
-  : "${LIBERO_MANIFEST:?set the node-local LIBERO manifest}"
-  : "${LIBERO_ROOT_ALIASES:?set the node-local LIBERO root-alias JSON}"
-  : "${UMI_MANIFEST:?set the node-local UMI manifest}"
-  : "${UMI_DATASET_ROOT:?set the node-local UMI LeRobot dataset root}"
-  : "${UMI_RECTIFICATION_AUDIT_SHA256:?set the UMI rectification audit SHA256}"
-  : "${DA3_REPO:?set the pinned Depth Anything 3 source repository}"
-  : "${DA3_SOURCE_SHA:?set the full Depth Anything 3 source SHA}"
-  : "${DA3_CHECKPOINT:?set the pinned DA3-BASE checkpoint directory}"
-  : "${DA3_CHECKPOINT_SHA256:?set the DA3-BASE model.safetensors SHA256}"
-  MODE_UPDATES_PER_EPOCH="${MODE_UPDATES_PER_EPOCH:-${MAX_STEPS}}"
-  if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS )); then
-    echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS" >&2
-    exit 2
-  fi
-  if [[ "${NUM_NODES}" == "2" && -z "${NODE_MANIFEST_CONTRACTS:-}" ]]; then
-    echo "dual-node training requires NODE_MANIFEST_CONTRACTS" >&2
-    exit 2
-  fi
-  MIXED_MODE_ARGS+=(
-    --four_mode_mixed_training 1
+: "${HY_MANIFEST:?set the node-local Hy manifest}"
+: "${HY_ROOT_ALIASES:?set the node-local Hy root-alias JSON}"
+: "${LIBERO_MANIFEST:?set the node-local LIBERO manifest}"
+: "${LIBERO_ROOT_ALIASES:?set the node-local LIBERO root-alias JSON}"
+: "${UMI_MANIFEST:?set the node-local UMI manifest}"
+: "${UMI_DATASET_ROOT:?set the node-local UMI LeRobot dataset root}"
+: "${UMI_RECTIFICATION_AUDIT_SHA256:?set the UMI rectification audit SHA256}"
+: "${DA3_REPO:?set the pinned Depth Anything 3 source repository}"
+: "${DA3_SOURCE_SHA:?set the full Depth Anything 3 source SHA}"
+: "${DA3_CHECKPOINT:?set the pinned DA3-BASE checkpoint directory}"
+: "${DA3_CHECKPOINT_SHA256:?set the DA3-BASE model.safetensors SHA256}"
+MODE_UPDATES_PER_EPOCH="${MODE_UPDATES_PER_EPOCH:-${MAX_STEPS}}"
+if (( MODE_UPDATES_PER_EPOCH < MAX_STEPS )); then
+  echo "MODE_UPDATES_PER_EPOCH must cover MAX_STEPS" >&2
+  exit 2
+fi
+if [[ "${NUM_NODES}" == "2" && -z "${NODE_MANIFEST_CONTRACTS:-}" ]]; then
+  echo "dual-node training requires NODE_MANIFEST_CONTRACTS" >&2
+  exit 2
+fi
+MIXED_MODE_ARGS+=(
     --hy_manifest "${HY_MANIFEST}"
     --hy_root_aliases "${HY_ROOT_ALIASES}"
     --libero_manifest "${LIBERO_MANIFEST}"
@@ -254,11 +225,7 @@ if [[ "${FOUR_MODE_MIXED_TRAINING}" == "1" ]]; then
     --da3_process_res 504
     --da3_process_res_method upper_bound_resize
     --da3_confidence_mask_mode finite_positive_non_padding
-  )
-elif [[ "${FOUR_MODE_MIXED_TRAINING}" != "0" ]]; then
-  echo "FOUR_MODE_MIXED_TRAINING must be 0 or 1" >&2
-  exit 2
-fi
+)
 
 PROFILE_ARGS=()
 if [[ -n "${TORCH_PROFILE_OUTPUT_DIR:-}" ]]; then
@@ -326,13 +293,11 @@ elif [[ "${DISTRIBUTED_MODE}" == "ib" ]]; then
 fi
 
 "${TRAIN_LAUNCHER[@]}" train_stereo_vae.py \
-  "${DATA_ARGS[@]}" \
   "${ONLINE_GT_ARGS[@]}" \
   "${MIXED_MODE_ARGS[@]}" \
   --resolution 256 \
   --sequence_length 4 \
   --image_channels 3 \
-  --patch_embed linear \
   --patch_size 16 \
   --spatial_depth 4 \
   --temporal_depth 4 \
@@ -373,7 +338,6 @@ fi
   --prefetch_factor "${PREFETCH_FACTOR:-2}" \
   --pin_memory 1 \
   --persistent_workers 1 \
-  --train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}" \
   --grad_accumulates "${GRAD_ACCUMULATES}" \
   --grad_clip_val 1.0 \
   --lr "${LEARNING_RATE}" \

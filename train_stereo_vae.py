@@ -633,9 +633,6 @@ def _resolve_val_check_interval(args):
     """Translate logical validation cadence to Lightning physical batches."""
 
     logical_interval = int(args.online_val_check_interval_steps)
-    if not args.four_mode_mixed_training:
-        return logical_interval
-
     remaining_updates = int(args.max_steps) - int(args.mode_schedule_start_update)
     logical_interval = min(logical_interval, remaining_updates)
     mode_weights = parse_weight_spec(args.mode_update_weights, MODE_IDS)
@@ -672,8 +669,6 @@ def _resolve_val_check_interval(args):
 
 def _bind_node_manifest_contracts(args):
     """Bind each physical node rank to immutable manifest content hashes."""
-    if not args.four_mode_mixed_training:
-        return
     local = {}
     for dataset_id in ("hy", "libero", "umi"):
         manifest = getattr(args, f"{dataset_id}_manifest")
@@ -755,72 +750,71 @@ def validate_runtime_args(args):
         raise ValueError("--single_frame_source_index must be in [0, 3]")
     if args.resolution != 256:
         raise ValueError("the frozen pilot recipe requires resolution=256")
-    if args.four_mode_mixed_training:
-        if args.single_frame_source_index != 0:
-            raise ValueError(
-                "four-mode training currently requires "
-                "--single_frame_source_index=0"
-            )
-        _validate_four_mode_batch_contract(args)
-        if args.mode_updates_per_epoch < 1:
-            raise ValueError("mode_updates_per_epoch must be positive")
-        if args.mode_schedule_start_update < 0:
-            raise ValueError("mode_schedule_start_update must be non-negative")
-        if (
-            getattr(args, "resume_from_checkpoint", None) is None
-            and getattr(args, "continuation_checkpoint", None) is None
-            and getattr(args, "stage_transition_checkpoint", None) is None
-            and getattr(args, "discriminator_expansion_checkpoint", None) is None
-            and args.mode_schedule_start_update != 0
-        ):
-            raise ValueError("mode_schedule_start_update requires a checkpoint")
-        remaining_updates = args.max_steps - args.mode_schedule_start_update
-        if remaining_updates < 1:
-            raise ValueError("resume checkpoint has already reached max_steps")
-        if args.mode_updates_per_epoch < remaining_updates:
-            raise ValueError(
-                "mode_updates_per_epoch must cover all remaining updates so the "
-                "stateless resume schedule stays in one data epoch"
-            )
-        required_sources = {
-            "hy_manifest": args.hy_manifest,
-            "hy_root_aliases": args.hy_root_aliases,
-            "libero_manifest": args.libero_manifest,
-            "libero_root_aliases": args.libero_root_aliases,
-            "umi_manifest": args.umi_manifest,
-            "umi_dataset_root": args.umi_dataset_root,
-            "umi_rectification_audit_sha256": (
-                args.umi_rectification_audit_sha256
-            ),
-            "da3_repo": args.da3_repo,
-            "da3_source_sha": args.da3_source_sha,
-            "da3_checkpoint": args.da3_checkpoint,
-            "da3_checkpoint_sha256": args.da3_checkpoint_sha256,
-        }
-        missing = [name for name, value in required_sources.items() if not value]
-        if missing:
-            raise ValueError("three-source training requires " + ", ".join(missing))
-        if not args.online_gt_enabled:
-            raise ValueError("four-mode online-teacher smoke requires online GT")
-        if args.da3_process_res != 504:
-            raise ValueError("DA3-BASE smoke process resolution is frozen to 504")
-        if args.da3_confidence_mask_mode != "finite_positive_non_padding":
-            raise ValueError("formal DA3 confidence threshold is not frozen")
-        for name, value, length in (
-            ("da3_source_sha", args.da3_source_sha, 40),
-            ("da3_checkpoint_sha256", args.da3_checkpoint_sha256, 64),
-            (
-                "umi_rectification_audit_sha256",
-                args.umi_rectification_audit_sha256,
-                64,
-            ),
-        ):
-            if len(value) != length:
-                raise ValueError(f"{name} must be a full hexadecimal digest")
-            try:
-                int(value, 16)
-            except ValueError as error:
-                raise ValueError(f"{name} must be hexadecimal") from error
+    if args.single_frame_source_index != 0:
+        raise ValueError(
+            "four-mode training currently requires "
+            "--single_frame_source_index=0"
+        )
+    _validate_four_mode_batch_contract(args)
+    if args.mode_updates_per_epoch < 1:
+        raise ValueError("mode_updates_per_epoch must be positive")
+    if args.mode_schedule_start_update < 0:
+        raise ValueError("mode_schedule_start_update must be non-negative")
+    if (
+        getattr(args, "resume_from_checkpoint", None) is None
+        and getattr(args, "continuation_checkpoint", None) is None
+        and getattr(args, "stage_transition_checkpoint", None) is None
+        and getattr(args, "discriminator_expansion_checkpoint", None) is None
+        and args.mode_schedule_start_update != 0
+    ):
+        raise ValueError("mode_schedule_start_update requires a checkpoint")
+    remaining_updates = args.max_steps - args.mode_schedule_start_update
+    if remaining_updates < 1:
+        raise ValueError("resume checkpoint has already reached max_steps")
+    if args.mode_updates_per_epoch < remaining_updates:
+        raise ValueError(
+            "mode_updates_per_epoch must cover all remaining updates so the "
+            "stateless resume schedule stays in one data epoch"
+        )
+    required_sources = {
+        "hy_manifest": args.hy_manifest,
+        "hy_root_aliases": args.hy_root_aliases,
+        "libero_manifest": args.libero_manifest,
+        "libero_root_aliases": args.libero_root_aliases,
+        "umi_manifest": args.umi_manifest,
+        "umi_dataset_root": args.umi_dataset_root,
+        "umi_rectification_audit_sha256": (
+            args.umi_rectification_audit_sha256
+        ),
+        "da3_repo": args.da3_repo,
+        "da3_source_sha": args.da3_source_sha,
+        "da3_checkpoint": args.da3_checkpoint,
+        "da3_checkpoint_sha256": args.da3_checkpoint_sha256,
+    }
+    missing = [name for name, value in required_sources.items() if not value]
+    if missing:
+        raise ValueError("three-source training requires " + ", ".join(missing))
+    if not args.online_gt_enabled:
+        raise ValueError("four-mode online-teacher smoke requires online GT")
+    if args.da3_process_res != 504:
+        raise ValueError("DA3-BASE smoke process resolution is frozen to 504")
+    if args.da3_confidence_mask_mode != "finite_positive_non_padding":
+        raise ValueError("formal DA3 confidence threshold is not frozen")
+    for name, value, length in (
+        ("da3_source_sha", args.da3_source_sha, 40),
+        ("da3_checkpoint_sha256", args.da3_checkpoint_sha256, 64),
+        (
+            "umi_rectification_audit_sha256",
+            args.umi_rectification_audit_sha256,
+            64,
+        ),
+    ):
+        if len(value) != length:
+            raise ValueError(f"{name} must be a full hexadecimal digest")
+        try:
+            int(value, 16)
+        except ValueError as error:
+            raise ValueError(f"{name} must be hexadecimal") from error
     geometry_values = {
         "stereo_disparity_min_px": args.stereo_disparity_min_px,
         "stereo_disparity_max_px": args.stereo_disparity_max_px,
@@ -850,16 +844,6 @@ def validate_runtime_args(args):
         else args.foundation_stereo_checkpoint_sha256
     )
     required = {"teacher_checkpoint_sha256": teacher_sha256}
-    if not args.four_mode_mixed_training:
-        required.update(
-            {
-                "lerobot_episode_manifest": args.lerobot_episode_manifest,
-                "lerobot_dataset_root": args.lerobot_dataset_root,
-                "lerobot_rectification_audit_sha256": (
-                    args.lerobot_rectification_audit_sha256
-                ),
-            }
-        )
     if args.foundation_stereo_backend == "las2_h":
         required.update(
             {
@@ -896,14 +880,10 @@ def validate_runtime_args(args):
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ValueError(
-            "LeRobot online training requires " + ", ".join(missing)
+            "online stereo teacher requires " + ", ".join(missing)
         )
     if not args.online_gt_enabled:
-        raise ValueError("LeRobot online training requires --online_gt_enabled=1")
-    if not args.four_mode_mixed_training and len(
-        args.lerobot_rectification_audit_sha256
-    ) != 64:
-        raise ValueError("a full rectification audit SHA256 is required")
+        raise ValueError("training requires --online_gt_enabled=1")
     if len(teacher_sha256) != 64:
         raise ValueError("a full online teacher checkpoint SHA256 is required")
     if args.online_gt_cache_enabled and not args.online_gt_cache_root:
@@ -950,8 +930,6 @@ def validate_runtime_args(args):
         )
     if args.online_val_check_interval_steps < 1:
         raise ValueError("online validation interval must be positive")
-    if args.lerobot_val_sample_limit != 512:
-        raise ValueError("online validation sample count is frozen to 512")
     if args.lerobot_video_cache_capacity < 1:
         raise ValueError("LeRobot video cache capacity must be positive")
     if args.prefetch_factor < 1:
@@ -992,8 +970,6 @@ def validate_runtime_args(args):
             raise ValueError(
                 "torch profiler schedule must leave a post-profile update"
             )
-    if args.train_epoch_repeats != 1:
-        raise ValueError("LeRobot online training requires train_epoch_repeats=1")
 
 
 def _jsonable(value):
@@ -1119,35 +1095,34 @@ def write_online_gt_run_metadata(args):
             "optimizer_restored": False,
             "scheduler_aligned_to_source_update": True,
         }
-    if args.four_mode_mixed_training:
-        mode_batch_sizes = resolve_mode_int_spec(
-            args.mode_batch_sizes,
-            fallback=int(args.batch_size),
-        )
-        mode_grad_accumulates = resolve_mode_int_spec(
-            args.mode_grad_accumulates,
-            fallback=int(args.grad_accumulates),
-        )
-        run_manifest["logical_update_batch_contract"] = {
-            mode_id: {
-                "per_device_batch_size": mode_batch_sizes[mode_id],
-                "micro_batches_per_logical_update": mode_grad_accumulates[mode_id],
-                "effective_global_batch_size": mode_batch_sizes[mode_id]
-                * mode_grad_accumulates[mode_id]
-                * args.devices
-                * args.num_nodes,
-            }
-            for mode_id in MODE_IDS
+    mode_batch_sizes = resolve_mode_int_spec(
+        args.mode_batch_sizes,
+        fallback=int(args.batch_size),
+    )
+    mode_grad_accumulates = resolve_mode_int_spec(
+        args.mode_grad_accumulates,
+        fallback=int(args.grad_accumulates),
+    )
+    run_manifest["logical_update_batch_contract"] = {
+        mode_id: {
+            "per_device_batch_size": mode_batch_sizes[mode_id],
+            "micro_batches_per_logical_update": mode_grad_accumulates[mode_id],
+            "effective_global_batch_size": mode_batch_sizes[mode_id]
+            * mode_grad_accumulates[mode_id]
+            * args.devices
+            * args.num_nodes,
         }
-        run_manifest["online_gt"]["da3"] = {
-            "repo": str(Path(args.da3_repo).resolve()),
-            "source_sha": args.da3_source_sha,
-            "checkpoint": str(Path(args.da3_checkpoint).resolve()),
-            "checkpoint_sha256": args.da3_checkpoint_sha256,
-            "process_res": args.da3_process_res,
-            "process_res_method": args.da3_process_res_method,
-            "confidence_mask_mode": args.da3_confidence_mask_mode,
-        }
+        for mode_id in MODE_IDS
+    }
+    run_manifest["online_gt"]["da3"] = {
+        "repo": str(Path(args.da3_repo).resolve()),
+        "source_sha": args.da3_source_sha,
+        "checkpoint": str(Path(args.da3_checkpoint).resolve()),
+        "checkpoint_sha256": args.da3_checkpoint_sha256,
+        "process_res": args.da3_process_res,
+        "process_res_method": args.da3_process_res_method,
+        "confidence_mask_mode": args.da3_confidence_mask_mode,
+    }
     _write_immutable_json(output_root / "run_manifest.json", run_manifest)
     print(json.dumps({"online_gt_provenance": online_gt}, sort_keys=True))
 
@@ -1162,8 +1137,7 @@ def build_callbacks(args):
         )
     if args.online_gt_enabled:
         callbacks.append(OnlineFoundationGTCallback(args))
-        if args.four_mode_mixed_training:
-            callbacks.append(OnlineDepthAnything3GTCallback(args))
+        callbacks.append(OnlineDepthAnything3GTCallback(args))
     callbacks.extend([
         ModelCheckpoint(
             every_n_train_steps=args.checkpoint_every_n_steps,
@@ -1191,11 +1165,7 @@ def build_callbacks(args):
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     callbacks.append(
         ModelCheckpoint(
-            monitor=(
-                "val/mixed/total_loss"
-                if args.four_mode_mixed_training
-                else "val/four/total_loss"
-            ),
+            monitor="val/mixed/total_loss",
             every_n_epochs=1,
             save_top_k=3,
             mode="min",
@@ -1426,7 +1396,7 @@ def main():
             }
     _bind_node_manifest_contracts(args)
     validate_runtime_args(args)
-    if checkpoint_path is not None and args.four_mode_mixed_training:
+    if checkpoint_path is not None:
         if counters.get("mode_schedule_seed") != args.mode_schedule_seed:
             raise ValueError("resume checkpoint mode schedule seed mismatch")
         if counters.get("mode_updates") != mode_occurrences_before(

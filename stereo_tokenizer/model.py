@@ -122,10 +122,7 @@ class StereoVAE(pl.LightningModule):
             block=args.enc_block,
             window_size=args.twod_window_size,
             spatial_pos=args.spatial_pos,
-            patch_embed=args.patch_embed,
             patch_size=args.patch_size,
-            defer_temporal_pool=args.defer_temporal_pool,
-            defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
             temporal_depth=args.temporal_depth,
             causal_in_peg=args.causal_in_peg,
@@ -149,10 +146,7 @@ class StereoVAE(pl.LightningModule):
             block=args.dec_block,
             window_size=args.twod_window_size,
             spatial_pos=args.spatial_pos,
-            patch_embed=args.patch_embed,
             patch_size=args.patch_size,
-            defer_temporal_pool=args.defer_temporal_pool,
-            defer_spatial_pool=args.defer_spatial_pool,
             spatial_depth=args.spatial_depth,
             temporal_depth=args.temporal_depth,
             causal_in_peg=args.causal_in_peg,
@@ -294,10 +288,6 @@ class StereoVAE(pl.LightningModule):
             )
         if args.latent_channels != 48:
             raise ValueError("StereoVAE latent_channels must be 48")
-        if args.patch_embed != "linear":
-            raise ValueError("StereoVAE requires linear patch embedding")
-        if args.defer_temporal_pool or args.defer_spatial_pool:
-            raise ValueError("StereoVAE does not use deferred pooling")
         if len(args.enc_block) != args.spatial_depth:
             raise ValueError("enc_block length must equal spatial_depth")
         if len(args.dec_block) != args.spatial_depth:
@@ -520,17 +510,14 @@ class StereoVAE(pl.LightningModule):
             source_batch_updates = 0
             source_mode_samples = {mode_id: 0 for mode_id in MODE_IDS}
             mode_update_deltas = dict(mode_updates)
-        if bool(getattr(self.args, "four_mode_mixed_training", False)):
-            expected_batch_updates = source_batch_updates + sum(
-                mode_update_deltas[mode_id] * self.mode_grad_accumulates[mode_id]
-                for mode_id in MODE_IDS
+        expected_batch_updates = source_batch_updates + sum(
+            mode_update_deltas[mode_id] * self.mode_grad_accumulates[mode_id]
+            for mode_id in MODE_IDS
+        )
+        if batch_updates != expected_batch_updates:
+            raise ValueError(
+                "batch updates disagree with per-mode accumulation contract"
             )
-            if batch_updates != expected_batch_updates:
-                raise ValueError(
-                    "batch updates disagree with per-mode accumulation contract"
-                )
-        elif batch_updates < generator_updates * self.grad_accumulates:
-            raise ValueError("batch updates are inconsistent with generator updates")
         if generator_updates != sum(mode_updates.values()):
             raise ValueError("generator updates must equal the four mode counters")
         if generator_updates != four_frame_updates + single_frame_updates:
@@ -547,26 +534,25 @@ class StereoVAE(pl.LightningModule):
             + mode_updates["stereo/single_frame"]
         ):
             raise ValueError("single-frame counter disagrees with mode counters")
-        if bool(getattr(self.args, "four_mode_mixed_training", False)):
-            expected_mode_updates = mode_occurrences_before(
-                schedule_seed, generator_updates, mode_weights
+        expected_mode_updates = mode_occurrences_before(
+            schedule_seed, generator_updates, mode_weights
+        )
+        if mode_updates != expected_mode_updates:
+            raise ValueError(
+                "checkpoint mode counters disagree with seeded schedule"
             )
-            if mode_updates != expected_mode_updates:
-                raise ValueError(
-                    "checkpoint mode counters disagree with seeded schedule"
-                )
-            expected_mode_samples = {
-                mode_id: source_mode_samples[mode_id]
-                + mode_update_deltas[mode_id]
-                * self.mode_batch_sizes[mode_id]
-                * self.mode_grad_accumulates[mode_id]
-                * expected_world_size
-                for mode_id in MODE_IDS
-            }
-            if mode_samples != expected_mode_samples:
-                raise ValueError(
-                    "checkpoint sample counters disagree with update/BS/DDP contract"
-                )
+        expected_mode_samples = {
+            mode_id: source_mode_samples[mode_id]
+            + mode_update_deltas[mode_id]
+            * self.mode_batch_sizes[mode_id]
+            * self.mode_grad_accumulates[mode_id]
+            * expected_world_size
+            for mode_id in MODE_IDS
+        }
+        if mode_samples != expected_mode_samples:
+            raise ValueError(
+                "checkpoint sample counters disagree with update/BS/DDP contract"
+            )
 
         self.generator_updates = generator_updates
         self.discriminator_updates = discriminator_updates
@@ -1090,54 +1076,48 @@ class StereoVAE(pl.LightningModule):
     def _profiled_training_step(self, batch):
         source_batch = self._unwrap_batch(batch)
         mode_id, eye_mode, temporal_mode = self._mode_from_batch(source_batch)
-        dataset_id = None
-        if bool(getattr(self.args, "four_mode_mixed_training", False)):
-            mode_weights = parse_weight_spec(
-                getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
+        mode_weights = parse_weight_spec(
+            getattr(self.args, "mode_update_weights", "1:1:1:1"), MODE_IDS
+        )
+        expected_mode = mode_for_update(
+            int(self.args.mode_schedule_seed),
+            self.generator_updates,
+            mode_weights,
+        )
+        if mode_id != expected_mode:
+            raise RuntimeError(
+                f"seeded mode schedule expected {expected_mode}, got {mode_id}"
             )
-            expected_mode = mode_for_update(
-                int(self.args.mode_schedule_seed),
-                self.generator_updates,
-                mode_weights,
+        dataset_id = self._uniform_batch_metadata(source_batch, "dataset_id")
+        prior_modes = mode_occurrences_before(
+            int(self.args.mode_schedule_seed), self.generator_updates, mode_weights
+        )
+        occurrence = (
+            sum(
+                count
+                for prior_mode, count in prior_modes.items()
+                if prior_mode.startswith("mono/")
             )
-            if mode_id != expected_mode:
-                raise RuntimeError(
-                    f"seeded mode schedule expected {expected_mode}, got {mode_id}"
-                )
-            dataset_id = self._uniform_batch_metadata(source_batch, "dataset_id")
-            prior_modes = mode_occurrences_before(
-                int(self.args.mode_schedule_seed), self.generator_updates, mode_weights
+            if mode_id.startswith("mono/")
+            else prior_modes[mode_id]
+        )
+        expected_dataset = dataset_for_mode_occurrence(
+            int(self.args.mode_schedule_seed),
+            mode_id,
+            occurrence,
+            parse_weight_spec(
+                getattr(self.args, "mono_dataset_weights", "9:1"),
+                ("hy", "libero"),
+            ),
+        )
+        if dataset_id != expected_dataset:
+            raise RuntimeError(
+                f"seeded dataset schedule expected {expected_dataset}, got {dataset_id}"
             )
-            occurrence = (
-                sum(
-                    count
-                    for prior_mode, count in prior_modes.items()
-                    if prior_mode.startswith("mono/")
-                )
-                if mode_id.startswith("mono/")
-                else prior_modes[mode_id]
-            )
-            expected_dataset = dataset_for_mode_occurrence(
-                int(self.args.mode_schedule_seed),
-                mode_id,
-                occurrence,
-                parse_weight_spec(
-                    getattr(self.args, "mono_dataset_weights", "9:1"),
-                    ("hy", "libero"),
-                ),
-            )
-            if dataset_id != expected_dataset:
-                raise RuntimeError(
-                    f"seeded dataset schedule expected {expected_dataset}, got {dataset_id}"
-                )
-            self.last_dataset_id = dataset_id
-            accumulation_factor = self.mode_grad_accumulates[mode_id]
-        else:
-            accumulation_factor = int(self.grad_accumulates)
+        self.last_dataset_id = dataset_id
+        accumulation_factor = self.mode_grad_accumulates[mode_id]
         actual_batch_size = int(source_batch["video"].shape[0])
-        if bool(getattr(self.args, "four_mode_mixed_training", False)) and (
-            actual_batch_size != self.mode_batch_sizes[mode_id]
-        ):
+        if actual_batch_size != self.mode_batch_sizes[mode_id]:
             raise RuntimeError(
                 f"{mode_id} expected per-device batch "
                 f"{self.mode_batch_sizes[mode_id]}, got {actual_batch_size}"
@@ -1307,15 +1287,14 @@ class StereoVAE(pl.LightningModule):
         return {"loss": generator_loss.detach()}
 
     def on_validation_epoch_start(self):
-        if bool(getattr(self.args, "four_mode_mixed_training", False)):
-            self._validation_mode_sums = {
-                mode_id: torch.zeros((), device=self.device, dtype=torch.float64)
-                for mode_id in MODE_IDS
-            }
-            self._validation_mode_counts = {
-                mode_id: torch.zeros((), device=self.device, dtype=torch.long)
-                for mode_id in MODE_IDS
-            }
+        self._validation_mode_sums = {
+            mode_id: torch.zeros((), device=self.device, dtype=torch.float64)
+            for mode_id in MODE_IDS
+        }
+        self._validation_mode_counts = {
+            mode_id: torch.zeros((), device=self.device, dtype=torch.long)
+            for mode_id in MODE_IDS
+        }
 
     def validation_step(self, batch, batch_idx):
         source_batch = self._unwrap_batch(batch)
@@ -1558,17 +1537,9 @@ class StereoVAE(pl.LightningModule):
             choices=["l1", "l2"],
         )
         parser.add_argument("--patch_size", type=int, default=16)
-        parser.add_argument(
-            "--patch_embed",
-            type=str,
-            default="linear",
-            choices=["linear"],
-        )
         parser.add_argument("--enc_block", type=str, default="tttt")
         parser.add_argument("--dec_block", type=str, default="tttt")
         parser.add_argument("--twod_window_size", type=int, default=4)
-        parser.add_argument("--defer_temporal_pool", action="store_true")
-        parser.add_argument("--defer_spatial_pool", action="store_true")
         parser.add_argument(
             "--spatial_pos",
             type=str,
@@ -1630,8 +1601,8 @@ class _StereoEncoderOutput:
 
 
 class StereoEncoder(nn.Module):
-    def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
-                    image_channel=3, patch_size=16, defer_temporal_pool=False, defer_spatial_pool=False,
+    def __init__(self, image_size, block='tttt', window_size=4, spatial_pos="rel",
+                    image_channel=3, patch_size=16,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
                     dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., initialize=False,
@@ -1643,10 +1614,6 @@ class StereoEncoder(nn.Module):
         image_height, image_width = self.image_size
         if image_height % patch_height or image_width % patch_width:
             raise ValueError("image dimensions must be divisible by patch size")
-        if patch_embed != "linear":
-            raise ValueError("Stereo Encoder requires linear patch embedding")
-        if defer_temporal_pool or defer_spatial_pool:
-            raise ValueError("Stereo Encoder does not use deferred pooling")
         if stereo_num_frames != 4:
             raise ValueError("Stereo Encoder requires exactly 4 frames")
 
@@ -1898,8 +1865,8 @@ class StereoDecodeOutput:
 
 
 class StereoDecoder(nn.Module):
-    def __init__(self, image_size, patch_embed, block='tttt', window_size=4, spatial_pos="rel",
-                    image_channel=3, patch_size=16, defer_temporal_pool=False, defer_spatial_pool=False,
+    def __init__(self, image_size, block='tttt', window_size=4, spatial_pos="rel",
+                    image_channel=3, patch_size=16,
                     spatial_depth=4, temporal_depth=4, dim=512,
                     causal_in_peg=True, causal_in_temporal_transformer=False,
                     dim_head=64, heads=8, attn_dropout=0., ff_dropout=0., ff_mult=4., gen_upscale=None, initialize=False,
@@ -1907,10 +1874,6 @@ class StereoDecoder(nn.Module):
         super().__init__()
         if gen_upscale is not None:
             raise ValueError("Stereo Decoder does not use gen_upscale")
-        if patch_embed != "linear":
-            raise ValueError("Stereo Decoder requires linear pixel projection")
-        if defer_temporal_pool or defer_spatial_pool:
-            raise ValueError("Stereo Decoder does not use deferred pooling")
         if stereo_num_frames != 4:
             raise ValueError("Stereo Decoder requires exactly 4 frames")
 

@@ -7,13 +7,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "stereo_tokenizer"
 MODEL_SOURCE = PACKAGE / "model.py"
 DATA_SOURCE = PACKAGE / "data.py"
-LPIPS_SOURCE = PACKAGE / "modules" / "lpips.py"
 CALLBACKS_SOURCE = PACKAGE / "modules" / "callbacks.py"
 TRAIN_SOURCE = ROOT / "train_stereo_vae.py"
 TRAIN_LAUNCHER_SOURCE = ROOT / "scripts" / "stereo" / "train_stereo_vae.sh"
 ACTIVE_SOURCES = tuple(PACKAGE.rglob("*.py")) + (
     TRAIN_SOURCE,
-    ROOT / "eval_stereo_vae.py",
+    ROOT / "evaluation" / "stage_a_runtime.py",
+    ROOT / "evaluation" / "tokenizer_stage_a.py",
 )
 
 
@@ -98,38 +98,12 @@ class SourceBoundaryTest(unittest.TestCase):
         self.assertEqual(
             classes,
             {
-                "ModeSubset",
                 "StereoDataModule",
             },
         )
         source = DATA_SOURCE.read_text(encoding="utf-8")
         self.assertNotIn("StereoManifestDataset", source)
         self.assertNotIn("manifest_v3", source)
-
-    def test_lpips_pretrained_name_uses_value_comparison(self) -> None:
-        tree = ast.parse(LPIPS_SOURCE.read_text(encoding="utf-8"))
-        lpips = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name == "LPIPS"
-        )
-        from_pretrained = next(
-            node
-            for node in lpips.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "from_pretrained"
-        )
-        comparisons = [
-            node for node in ast.walk(from_pretrained) if isinstance(node, ast.Compare)
-        ]
-        self.assertTrue(
-            any(
-                isinstance(node.ops[0], ast.NotEq)
-                and isinstance(node.comparators[0], ast.Constant)
-                and node.comparators[0].value == "vgg_lpips"
-                for node in comparisons
-            )
-        )
 
     def test_training_entrypoint_uses_lightning_2_trainer_api(self) -> None:
         source = TRAIN_SOURCE.read_text(encoding="utf-8")

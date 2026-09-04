@@ -27,58 +27,29 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("_load_discriminator_expansion_checkpoint(", source)
         self.assertIn("ckpt_path=args.resume_from_checkpoint", source)
 
-    def test_evaluation_is_deterministic_and_strict(self):
-        source = (ROOT / "eval_stereo_vae.py").read_text(encoding="utf-8")
-        self.assertIn("sample_posterior=False", source)
-        self.assertIn("strict=True", source)
-        self.assertIn("_checkpoint_model_args(checkpoint", source)
-        self.assertIn("StereoVAE(checkpoint_args)", source)
-        self.assertIn("--stereo_vae_ckpt", source)
-        self.assertIn("_validate_checkpoint_semantics", source)
-        self.assertIn("--eval_temporal_mode", source)
-        self.assertNotIn("--eval_single_frame_index", source)
-        self.assertIn("args.single_frame_source_index", source)
-        self.assertNotIn(".codebook", source)
-        self.assertIn("relative_log_l1", source)
-        self.assertIn("relative_log_rmse", source)
-        self.assertIn("relative_target_from_foundation_stereo(", source)
-        self.assertNotIn("metric_depth", source)
-        self.assertIn('choices=["train", "val", "test"]', source)
-        self.assertIn('choices=["single_frame", "four_frame", "both"]', source)
-        self.assertIn('choices=["mono", "stereo", "both"]', source)
-        self.assertIn("from stereo_tokenizer.mode_sampling import MODE_IDS", source)
-        self.assertIn("FoundationStereoOnlineTeacher", source)
-        self.assertIn("DepthAnything3OnlineTeacher", source)
-        self.assertIn("HyLanceMonoDataset", source)
-        self.assertIn("args.hy_manifest", source)
-        self.assertIn("relative_target_from_da3(", source)
-        self.assertIn("_exact_mono_rank_indices", source)
-        self.assertIn('choices=("las2_h", "pytorch", "tensorrt")', source)
-        self.assertNotIn("stereo_data_backend", source)
-        self.assertNotIn("stereo_train_manifest", source)
-        self.assertNotIn("stereo_val_manifest", source)
-        self.assertIn("_exact_lerobot_rank_indices", source)
-        self.assertIn("dist.all_reduce", source)
-        self.assertIn("metrics[\"sample_count\"] != len(dataset)", source)
-        self.assertIn("save_case_visualization", source)
-        self.assertIn("save_depth_case_visualization", source)
-        self.assertIn('depth_filename = f"depth-case-{slot:02d}.png"', source)
-        self.assertIn('"depth_file": f"{eye_mode}/{depth_filename}"', source)
-        self.assertIn("def evaluate_eye_mode(", source)
-        main_source = source[source.index("def main():") :]
-        self.assertLess(
-            main_source.index("preflight_teacher_assets(args, eye_modes)"),
-            main_source.index("initialize_distributed(args)"),
+    def test_stage_a_evaluation_is_deterministic_and_strict(self):
+        entry = (ROOT / "evaluation" / "tokenizer_stage_a.py").read_text(
+            encoding="utf-8"
         )
-        self.assertLess(
-            main_source.index("build_eval_dataset(args, eye_mode)"),
-            main_source.index("initialize_distributed(args)"),
+        runtime = (ROOT / "evaluation" / "stage_a_runtime.py").read_text(
+            encoding="utf-8"
         )
-        self.assertNotIn(
-            "visualizations require --eval_temporal_mode=both", source
-        )
-        self.assertIn("fixed_episode_subset_indices", source)
-        self.assertIn("fixed_eval_case_indices", source)
+        self.assertIn("sample_posterior=False", entry)
+        self.assertIn("strict=True", runtime)
+        self.assertIn("_checkpoint_model_args(checkpoint", runtime)
+        self.assertIn("StereoVAE(checkpoint_args)", runtime)
+        self.assertIn("--stereo_vae_ckpt", runtime)
+        self.assertIn("_validate_checkpoint_semantics", runtime)
+        self.assertIn("--eval_temporal_mode", runtime)
+        self.assertIn("args.single_frame_source_index", entry)
+        self.assertNotIn(".codebook", entry + runtime)
+        self.assertIn("FoundationStereoOnlineTeacher", runtime)
+        self.assertIn("DepthAnything3OnlineTeacher", runtime)
+        self.assertIn("relative_target_from_da3(", runtime)
+        self.assertIn("save_case_visualization", runtime)
+        self.assertIn("save_depth_case_visualization", runtime)
+        self.assertNotIn("def evaluate_eye_mode(", runtime)
+        self.assertNotIn("def update_metrics(", runtime)
 
     def test_recipe_requires_unfrozen_experiment_parameters(self):
         source = (
@@ -172,12 +143,13 @@ class StereoEntrypointSourceTest(unittest.TestCase):
         self.assertIn("--pin_memory 1", launcher)
         self.assertIn("--persistent_workers 1", launcher)
         self.assertIn('--prefetch_factor "${PREFETCH_FACTOR:-2}"', launcher)
-        self.assertIn(
-            '--lerobot_video_cache_capacity "${LEROBOT_VIDEO_CACHE_CAPACITY:-12}"',
-            launcher,
+        data = (ROOT / "stereo_tokenizer" / "data.py").read_text(
+            encoding="utf-8"
         )
         self.assertIn(
-            '--train_epoch_repeats "${TRAIN_EPOCH_REPEATS:-1}"', launcher
+            'parser.add_argument('
+            '"--lerobot_video_cache_capacity", type=int, default=12)',
+            data,
         )
         self.assertIn(
             '--checkpoint_every_n_steps "${CHECKPOINT_EVERY_N_STEPS:-500}"',
@@ -224,17 +196,17 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("STEREO_DATA_BACKEND", launcher)
-        self.assertIn(
-            '--lerobot_episode_manifest "${LEROBOT_EPISODE_MANIFEST}"',
-            launcher,
-        )
+        self.assertIn('--hy_manifest "${HY_MANIFEST}"', launcher)
+        self.assertIn('--libero_manifest "${LIBERO_MANIFEST}"', launcher)
+        self.assertIn('--umi_manifest "${UMI_MANIFEST}"', launcher)
         self.assertIn("--online_gt_enabled 1", launcher)
         self.assertIn(
             'ONLINE_GT_CACHE_ENABLED="${ONLINE_GT_CACHE_ENABLED:-0}"',
             launcher,
         )
         self.assertIn("--foundation_stereo_valid_iters", launcher)
-        self.assertIn("--lerobot_rectification_audit_sha256", launcher)
+        self.assertNotIn("--lerobot_episode_manifest", launcher)
+        self.assertNotIn("--lerobot_rectification_audit_sha256", launcher)
         train = (ROOT / "train_stereo_vae.py").read_text(encoding="utf-8")
         self.assertIn("use_distributed_sampler=False", train)
         self.assertNotIn("max_time=", train)
@@ -280,7 +252,6 @@ class StereoEntrypointSourceTest(unittest.TestCase):
             encoding="utf-8"
         )
         for token in (
-            "FOUR_MODE_MIXED_TRAINING",
             "HY_MANIFEST",
             "LIBERO_MANIFEST",
             "UMI_MANIFEST",

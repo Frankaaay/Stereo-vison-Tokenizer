@@ -25,12 +25,9 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             embedding_dim=32,
             latent_channels=48,
             patch_size=8,
-            patch_embed="linear",
             enc_block="tt",
             dec_block="tt",
             twod_window_size=2,
-            defer_temporal_pool=False,
-            defer_spatial_pool=False,
             spatial_pos="rope",
             spatial_depth=2,
             temporal_depth=1,
@@ -73,7 +70,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
             batch_size=24,
             mode_batch_sizes=None,
             mode_grad_accumulates=None,
-            four_mode_mixed_training=False,
             mode_update_weights="35:35:15:15",
             mono_dataset_weights="9:1",
             node_manifest_contracts=None,
@@ -435,7 +431,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
     def test_checkpoint_resume_preserves_four_mode_counters(self) -> None:
         args = self._args()
-        args.four_mode_mixed_training = True
         args.mode_batch_sizes = "48:48:48:24"
         args.mode_grad_accumulates = "1:1:1:2"
         args.devices = 8
@@ -470,7 +465,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
     def test_continuation_checkpoint_preserves_historical_samples_across_new_batch(self):
         source_args = self._args()
-        source_args.four_mode_mixed_training = True
         source_args.mode_batch_sizes = "24:24:24:24"
         source_args.mode_grad_accumulates = "1:1:1:1"
         source_args.devices = 8
@@ -499,7 +493,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
         source.on_save_checkpoint(checkpoint)
 
         target_args = self._args()
-        target_args.four_mode_mixed_training = True
         target_args.mode_batch_sizes = "48:48:48:24"
         target_args.mode_grad_accumulates = "1:1:1:2"
         target_args.devices = 8
@@ -533,7 +526,6 @@ class StereoVAEIntegrationTest(unittest.TestCase):
 
     def test_stereo_four_ga2_steps_once_and_counts_384_samples(self) -> None:
         args = self._args()
-        args.four_mode_mixed_training = True
         args.mode_batch_sizes = "48:48:48:24"
         args.mode_grad_accumulates = "1:1:1:2"
         args.devices = 8

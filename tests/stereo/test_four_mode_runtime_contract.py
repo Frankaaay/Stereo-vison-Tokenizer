@@ -276,7 +276,6 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
             mode_update_weights="35:35:15:15",
             mono_dataset_weights="9:1",
             node_manifest_contracts=None,
-            four_mode_mixed_training=True,
             online_val_check_interval_steps=340,
             max_steps=340,
             mode_schedule_start_update=0,
@@ -355,10 +354,6 @@ class ThreeSourceRuntimeContractTest(unittest.TestCase):
                     online_val_check_interval_steps=500,
                 )
             )
-
-    def test_non_mixed_validation_interval_is_unchanged(self):
-        args = self._args(four_mode_mixed_training=False)
-        self.assertEqual(_resolve_val_check_interval(args), 340)
 
     @mock.patch("train_stereo_vae.torch.cuda.reset_peak_memory_stats")
     @mock.patch("train_stereo_vae.torch.cuda.max_memory_reserved", return_value=20)

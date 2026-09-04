@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset, default_collate
 from tqdm import tqdm
 
-import eval_stereo_vae as legacy
+from . import stage_a_runtime as runtime
 
 from .stage_a_contract import sha256_file
 from .stage_a_data import CanonicalStageADataset, build_canonical_selection
@@ -341,7 +341,7 @@ def _preflight_command(argv: list[str]) -> None:
 
 
 def _run_parser() -> argparse.ArgumentParser:
-    parser = legacy.build_parser()
+    parser = runtime.build_parser()
     parser.prog = "tokenizer_stage_a run"
     parser.add_argument("--stage-a-dataset-id", choices=("umi", "hy", "libero"), required=True)
     parser.add_argument("--stage-a-selection", type=Path, required=True)
@@ -369,10 +369,10 @@ def _hydrate_checkpoint_semantics(args) -> None:
     checkpoint = torch.load(
         args.stereo_vae_ckpt, map_location="cpu", weights_only=False
     )
-    checkpoint_args = legacy._checkpoint_model_args(
+    checkpoint_args = runtime._checkpoint_model_args(
         checkpoint, args.stereo_vae_ckpt
     )
-    for name in legacy.CHECKPOINT_SEMANTIC_FIELDS:
+    for name in runtime.CHECKPOINT_SEMANTIC_FIELDS:
         setattr(args, name, getattr(checkpoint_args, name))
     if args.single_frame_source_index is None:
         args.single_frame_source_index = int(
@@ -387,7 +387,7 @@ def _validate_run(args) -> None:
         raise ValueError("one Stage A invocation evaluates one eye mode")
     if args.eval_temporal_mode != "both":
         raise ValueError("Stage A requires single_frame and four_frame together")
-    source_indices = legacy.requested_single_frame_source_indices(args)
+    source_indices = runtime.requested_single_frame_source_indices(args)
     if source_indices != (0, 1, 2, 3):
         raise ValueError("Stage A requires --single_frame_source_indices 0 1 2 3")
     if args.max_batches is not None and args.max_batches < 1:
@@ -429,7 +429,7 @@ def _validate_run(args) -> None:
 def _mode_batch(batch: dict, temporal_mode: str, source_index: int | None):
     if temporal_mode == "four_frame":
         return batch
-    result = legacy.batch_for_temporal_mode(batch, temporal_mode, source_index)
+    result = runtime.batch_for_temporal_mode(batch, temporal_mode, source_index)
     result["rgb_valid_mask"] = batch["rgb_valid_mask"][
         ..., source_index : source_index + 1, :, :
     ]
@@ -551,7 +551,7 @@ def _save_visualizations(args, dataset, teacher, model, specs, device):
                 key: value.to(device) if isinstance(value, torch.Tensor) else value
                 for key, value in batch.items()
             }
-            legacy.attach_online_targets(args, args.eval_eye_mode, teacher, batch)
+            runtime.attach_online_targets(args, args.eval_eye_mode, teacher, batch)
             batch["valid_mask"] &= batch["rgb_valid_mask"]
             visualization_batch = _stage_a_visualization_batch(batch)
             outputs = {}
@@ -573,7 +573,7 @@ def _save_visualizations(args, dataset, teacher, model, specs, device):
                 }
                 rgb_name = f"case-{slot:02d}-source-{source_index}.png"
                 depth_name = f"depth-case-{slot:02d}-source-{source_index}.png"
-                legacy.save_case_visualization(
+                runtime.save_case_visualization(
                     args.visualization_dir / rgb_name,
                     batch["sample_id"][0],
                     batch["episode_id"][0],
@@ -582,7 +582,7 @@ def _save_visualizations(args, dataset, teacher, model, specs, device):
                     dataset.view_names,
                     source_index,
                 )
-                legacy.save_depth_case_visualization(
+                runtime.save_depth_case_visualization(
                     args.visualization_dir / depth_name,
                     visualization_batch,
                     display,
@@ -635,7 +635,7 @@ def _run_command(argv: list[str]) -> None:
         drop_last=False,
     )
     device = torch.device("cuda")
-    model = legacy.load_model(args, device)
+    model = runtime.load_model(args, device)
     architecturally_trainable = sum(
         parameter.numel()
         for parameter in model.parameters()
@@ -652,12 +652,12 @@ def _run_command(argv: list[str]) -> None:
     )
     teacher = None
     if not args.rgb_only:
-        legacy.preflight_teacher_assets(args, (args.eval_eye_mode,))
-        teacher = legacy.build_online_teacher(args, args.eval_eye_mode, device)
+        runtime.preflight_teacher_assets(args, (args.eval_eye_mode,))
+        teacher = runtime.build_online_teacher(args, args.eval_eye_mode, device)
     suite = StageA1MetricSuite(
         relative_depth_epsilon=args.relative_depth_epsilon
     )
-    specs = legacy.evaluation_specs(args, args.eval_eye_mode)
+    specs = runtime.evaluation_specs(args, args.eval_eye_mode)
     current_sample_ids = []
     try:
         with torch.inference_mode():
@@ -672,7 +672,7 @@ def _run_command(argv: list[str]) -> None:
                     for key, value in batch.items()
                 }
                 if teacher is not None:
-                    legacy.attach_online_targets(
+                    runtime.attach_online_targets(
                         args, args.eval_eye_mode, teacher, tensor_batch
                     )
                     tensor_batch["valid_mask"] &= tensor_batch["rgb_valid_mask"]
@@ -746,7 +746,7 @@ def _run_command(argv: list[str]) -> None:
         "teacher": (
             None
             if teacher is None
-            else legacy.teacher_provenance(args, args.eval_eye_mode)
+            else runtime.teacher_provenance(args, args.eval_eye_mode)
         ),
         "flow_teacher": flow_model.provenance(),
         "requested_modes": [mode_id for mode_id, _, _ in specs],
@@ -854,7 +854,7 @@ def _benchmark_command(argv: list[str]) -> None:
     batch = default_collate([dataset[0]])
     device = torch.device("cuda")
     video = batch["video"].to(device)
-    model = legacy.load_model(args, device)
+    model = runtime.load_model(args, device)
     model.requires_grad_(False)
     modes = {}
     with torch.inference_mode(), torch.autocast(

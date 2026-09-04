@@ -17,20 +17,19 @@ VAE 预训练权重。
 
 1. 系统与 Python 环境；
 2. LAS2-H 与 DA3-BASE 两套在线 GT teacher；
-3. LeRobot 双目数据的 rectification audit 与 manifest；
-4. Hy `cam_high` 单目 smoke cache；
+3. Hy、LIBERO、UMI 三源 manifest 与 UMI rectification 合同；
+4. 四模式统一采样与逻辑更新调度；
 5. 环境检查、单元测试、四模式 smoke、恢复训练和评估。
 
-> 当前四模式数据链路固定为 **48 条 Hy mono + 48 条 LeRobot stereo**，只支持
-> 1、2 或 8 个 DDP rank，且固定 `BS=24/GPU, GA=1`。它适用于接口 smoke、显存验证、
-> checkpoint/resume 和小数据过拟合，不应当被描述为正式全量四模式训练。
+> 当前生产训练链路固定为 Hy/LIBERO/UMI 三数据源四模式采样。各模式必须具有相同
+> effective global batch，且 mono 模式固定 `GA=1`；启动时会 fail closed 校验完整合同。
 
 ## 1. 当前执行链路
 
 | 数据 | 输入 | 在线 GT | 训练目标 |
 | --- | --- | --- | --- |
-| LeRobot stereo | 三组同步且校正后的左右目 MP4 | LAS2-H，双向推理与 LR consistency | pixel disparity → centered relative log-depth |
-| Hy mono | `cam_high` 的 1/4 帧 RGB cache | DA3-BASE | native relative depth → centered relative log-depth |
+| UMI stereo | 三组同步且校正后的左右目 MP4 | LAS2-H，双向推理与 LR consistency | pixel disparity → centered relative log-depth |
+| Hy/LIBERO mono | manifest 选定的相机帧 | DA3-BASE | native relative depth → centered relative log-depth |
 
 两套 GT 都在训练 callback 中在线生成。`ONLINE_GT_CACHE_ENABLED=1` 只开启增量
 teacher cache；它不是必须提前离线生成的数据集。缓存只能在 teacher、权重、预处理、
@@ -40,10 +39,11 @@ teacher cache；它不是必须提前离线生成的数据集。缓存只能在 
 
 - `scripts/stereo/train_stereo_vae.sh`：统一训练 launcher；
 - `train_stereo_vae.py`：参数校验、teacher provenance、Lightning Trainer；
-- `eval_stereo_vae.py`：严格 checkpoint 加载与 stereo 评估；
+- `evaluation/tokenizer_stage_a.py`：统一 Stage A selection、preflight、质量、性能和报告入口；
+- `evaluation/stage_a_runtime.py`：Stage A 共享 checkpoint、teacher 与可视化运行时；
 - `scripts/data/audit_lerobot_stereo_rectification.py`：双目校正审计；
 - `scripts/data/build_lerobot_stereo_manifest.py`：episode 级 90/5/5 manifest；
-- `scripts/data/build_hy_mono_smoke_cache.py`：Hy Lance → 48 条 immutable RGB cache。
+- `scripts/data/build_pretrain_manifest.py`：构建三源训练 manifest。
 
 ## 2. 已验证的软件/硬件基线
 
@@ -391,7 +391,7 @@ uv lock --check
 uv pip check --python "$RUNTIME_ROOT/train/bin/python"
 
 python -m py_compile \
-  train_stereo_vae.py eval_stereo_vae.py \
+  train_stereo_vae.py evaluation/tokenizer_stage_a.py evaluation/stage_a_runtime.py \
   stereo_tokenizer/data.py stereo_tokenizer/online_gt.py
 bash -n scripts/stereo/train_stereo_vae.sh
 python -m pytest -q tests
@@ -493,7 +493,6 @@ export KL_WEIGHT=1e-6
 export PERCEPTUAL_WEIGHT=1.0
 export SINGLE_FRAME_SOURCE_INDEX=0
 
-export FOUR_MODE_MIXED_TRAINING=1
 export MODE_UPDATE_WEIGHTS=35:35:15:15
 export MONO_DATASET_WEIGHTS=9:1
 export MODE_SCHEDULE_SEED=1234
@@ -579,216 +578,29 @@ bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
 程序会严格读取 `stereo_update_counters`，校验 schedule seed、已完成的 mode prefix 和
 下一 mode；缺少这些字段的旧 checkpoint 不允许推断式恢复。
 
-## 12. Stereo-only LAS2-H 训练
+## 12. 统一 Stage A 评估
 
-若只训练 LeRobot stereo 的 single/four-frame 路径，不需要 Hy cache 或 DA3：
+旧的通用 evaluator 已移除。正式评估统一使用
+`evaluation/tokenizer_stage_a.py` 的五个子命令：
 
-```bash
-export FOUR_MODE_MIXED_TRAINING=0
-export FOUNDATION_STEREO_BACKEND=las2_h
-export GPU_COUNT=8
-export PER_DEVICE_BATCH_SIZE=24
-export GRAD_ACCUMULATES=1
-export GLOBAL_BATCH_SIZE=192
-export MAX_STEPS=<TOTAL_UPDATES>
-export OUTPUT_ROOT=$RUN_ROOT/stereo-only-$(date +%Y%m%d-%H%M%S)
+- `selection`：冻结 UMI、Hy、LIBERO 的评估样本与 provenance；
+- `preflight`：少量解码并核验 canonical batch ABI；
+- `run`：一次模型调用编码完整视图，输出 RGB、teacher-relative 几何与时序指标；
+- `benchmark`：报告 encode、posterior mean、decode 和端到端性能；
+- `report`：核验完整 artifact 集并生成 Stage A scorecard。
 
-# 其余 LeRobot、LAS2-H、loss、LR、checkpoint 和 logging 变量沿用第 9 节。
-bash scripts/stereo/train_stereo_vae.sh 2>&1 | tee "$OUTPUT_ROOT.console.log"
-```
-
-正式长任务启动前应单独冻结 `MAX_STEPS`、LR/warmup、验证频率、checkpoint cadence、
-WandB 模式和 output path；不要把四步 smoke 参数直接当作正式训练计划。
-
-## 13. 严格评估
-
-评估只接受与 checkpoint architecture 完全一致的 CLI 参数（数据选择参数
-`single_frame_source_index` 除外），并使用 posterior mean 与在线 teacher。以下示例在单
-GPU 上对 val split 跑两个 batch，同时评估
-single/four-frame：
+每个子命令的当前参数以 `--help` 为准：
 
 ```bash
-export STEREO_VAE_CKPT=/absolute/path/to/checkpoints/last.ckpt
-export EVAL_ROOT=$RUN_ROOT/eval-$(date +%Y%m%d-%H%M%S)
-mkdir -p "$EVAL_ROOT"
-
-python eval_stereo_vae.py \
-  --stereo_vae_ckpt "$STEREO_VAE_CKPT" \
-  --eval_split val \
-  --eval_eye_mode stereo \
-  --eval_temporal_mode both \
-  --device cuda \
-  --bf16 \
-  --max_batches 2 \
-  --output_json "$EVAL_ROOT/metrics.json" \
-  --visualization_dir "$EVAL_ROOT/cases" \
-  --num_visualizations 2 \
-  --lerobot_episode_manifest "$LEROBOT_EPISODE_MANIFEST" \
-  --lerobot_dataset_root "$LEROBOT_DATASET_ROOT" \
-  --lerobot_rectification_audit_sha256 "$LEROBOT_RECTIFICATION_AUDIT_SHA256" \
-  --foundation_stereo_backend las2_h \
-  --las2_h_repo "$LAS2_H_REPO" \
-  --las2_h_source_sha "$LAS2_H_SOURCE_SHA" \
-  --las2_h_checkpoint "$LAS2_H_CHECKPOINT" \
-  --las2_h_checkpoint_sha256 "$LAS2_H_CHECKPOINT_SHA256" \
-  --las2_h_valid_iters 4 \
-  --las2_h_max_disp 192 \
-  --foundation_stereo_pair_microbatch 48 \
-  --resolution 256 \
-  --sequence_length 4 \
-  --image_channels 3 \
-  --patch_embed linear \
-  --patch_size 16 \
-  --spatial_depth 4 \
-  --temporal_depth 4 \
-  --embedding_dim 512 \
-  --latent_channels 48 \
-  --enc_block ttww \
-  --dec_block tttt \
-  --twod_window_size 8 \
-  --spatial_pos rope \
-  --causal_in_peg \
-  --peg_backend conv2d_t1_slice \
-  --dim_head 64 \
-  --heads 8 \
-  --initialize_vit \
-  --stereo_num_views 3 \
-  --stereo_num_frames 4 \
-  --single_frame_source_index 0 \
-  --stereo_search_radii 7 7 7 \
-  --stereo_search_direction left \
-  --stereo_disparity_min_px 0.5 \
-  --stereo_disparity_max_px 112.0 \
-  --stereo_lr_error_abs_threshold_px 1.0 \
-  --stereo_lr_error_relative_threshold 0.05 \
-  --rgb_weight 1.0 \
-  --relative_depth_weight 1.0 \
-  --relative_gradient_weight 0.1 \
-  --relative_depth_epsilon 1e-6 \
-  --kl_weight 1e-6 \
-  --perceptual_weight 1.0 \
-  --image_gan_weight 0 \
-  --video_gan_weight 0 \
-  --gan_feat_weight 0 \
-  --recon_loss_type l1 \
-  --smooth_l1_beta 1.0 \
-  --batch_size 8 \
-  --num_workers 4 \
-  --pin_memory 1 \
-  --persistent_workers 1
+python -m evaluation.tokenizer_stage_a selection --help
+python -m evaluation.tokenizer_stage_a preflight --help
+python -m evaluation.tokenizer_stage_a run --help
+python -m evaluation.tokenizer_stage_a benchmark --help
+python -m evaluation.tokenizer_stage_a report --help
 ```
 
-### 13.1 正式 mono + DA3 评估
-
-Mono evaluation 直接读取 Hy cam_high Lance manifest；不会从 stereo batch 截取眼睛。
-Dataset 输出严格为 `[B,1,1,3,T,256,256]`，DA3 接收未带 Student padding 的原始比例
-预处理，输出映射回 Student geometry。Hy manifest 的唯一视觉字段是 cam_high：
-
-```bash
-export MONO_EVAL_ROOT=$RUN_ROOT/mono-eval-$(date +%Y%m%d-%H%M%S)
-mkdir -p "$MONO_EVAL_ROOT"
-
-python eval_stereo_vae.py \
-  --stereo_vae_ckpt "$STEREO_VAE_CKPT" \
-  --eval_eye_mode mono \
-  --eval_temporal_mode both \
-  --device cuda \
-  --bf16 \
-  --output_json "$MONO_EVAL_ROOT/metrics.json" \
-  --visualization_dir "$MONO_EVAL_ROOT/cases" \
-  --num_visualizations 2 \
-  --hy_manifest "$HY_MANIFEST" \
-  --hy_root_aliases "$HY_ROOT_ALIASES" \
-  --da3_repo "$DA3_REPO" \
-  --da3_source_sha "$DA3_SOURCE_SHA" \
-  --da3_checkpoint "$DA3_CHECKPOINT" \
-  --da3_checkpoint_sha256 "$DA3_CHECKPOINT_SHA256" \
-  --da3_process_res 504 \
-  --da3_process_res_method upper_bound_resize \
-  --da3_confidence_mask_mode finite_positive_non_padding \
-  --resolution 256 \
-  --sequence_length 4 \
-  --image_channels 3 \
-  --patch_embed linear \
-  --patch_size 16 \
-  --spatial_depth 4 \
-  --temporal_depth 4 \
-  --embedding_dim 512 \
-  --latent_channels 48 \
-  --enc_block ttww \
-  --dec_block tttt \
-  --twod_window_size 8 \
-  --spatial_pos rope \
-  --causal_in_peg \
-  --peg_backend conv2d_t1_slice \
-  --dim_head 64 \
-  --heads 8 \
-  --initialize_vit \
-  --stereo_num_views 3 \
-  --stereo_num_frames 4 \
-  --single_frame_source_index 0 \
-  --stereo_search_radii 7 7 7 \
-  --stereo_search_direction left \
-  --stereo_disparity_min_px 0.5 \
-  --stereo_disparity_max_px 112.0 \
-  --stereo_lr_error_abs_threshold_px 1.0 \
-  --stereo_lr_error_relative_threshold 0.05 \
-  --rgb_weight 1.0 \
-  --relative_depth_weight 1.0 \
-  --relative_gradient_weight 0.1 \
-  --relative_depth_epsilon 1e-6 \
-  --kl_weight 1e-6 \
-  --perceptual_weight 1.0 \
-  --image_gan_weight 0 \
-  --video_gan_weight 0 \
-  --gan_feat_weight 0 \
-  --recon_loss_type l1 \
-  --smooth_l1_beta 1.0 \
-  --batch_size 8 \
-  --num_workers 4 \
-  --pin_memory 1 \
-  --persistent_workers 1
-```
-
-Mono `metrics.json` 对 `cam_high` 报告 RGB L1、有效 depth pixels、centered
-relative-log-depth L1/RMSE，并记录 DA3 source/checkpoint/process provenance。可视化支持
-`single_frame`、`four_frame` 或 `both`，只渲染实际请求的输出。
-
-### 13.2 一次运行全部四种模式
-
-`--eval_eye_mode` 接受 `mono|stereo|both`，`--eval_temporal_mode` 接受
-`single_frame|four_frame|both`，二者按笛卡尔积展开，并复用训练侧 `MODE_IDS`。例如：
-
-```bash
-python eval_stereo_vae.py \
-  ... \
-  --eval_eye_mode both \
-  --eval_temporal_mode both \
-  --hy_manifest "$HY_MANIFEST" \
-  --hy_root_aliases "$HY_ROOT_ALIASES" \
-  --da3_repo "$DA3_REPO" \
-  --da3_source_sha "$DA3_SOURCE_SHA" \
-  --da3_checkpoint "$DA3_CHECKPOINT" \
-  --da3_checkpoint_sha256 "$DA3_CHECKPOINT_SHA256" \
-  --lerobot_episode_manifest "$LEROBOT_EPISODE_MANIFEST" \
-  --lerobot_dataset_root "$LEROBOT_DATASET_ROOT" \
-  --lerobot_rectification_audit_sha256 "$LEROBOT_RECTIFICATION_AUDIT_SHA256" \
-  --foundation_stereo_backend las2_h \
-  --las2_h_repo "$LAS2_H_REPO" \
-  --las2_h_source_sha "$LAS2_H_SOURCE_SHA" \
-  --las2_h_checkpoint "$LAS2_H_CHECKPOINT" \
-  --las2_h_checkpoint_sha256 "$LAS2_H_CHECKPOINT_SHA256"
-```
-
-内部按 eye mode 建立两个独立 session：mono 使用正式 mono dataset + DA3，stereo 使用
-LeRobot stereo dataset + FoundationStereo/LAS2-H。同一 eye session 内 teacher 每个 batch
-只推理一次，single/four 共用 GT。`metrics.json` 使用完整 `mono/single_frame` 等 mode key，
-并分别记录 `datasets.mono|stereo`、`teachers.mono|stereo` 以及每个 mode 的精确 provenance。
-可视化分别写入 `visualizations/mono/` 和 `visualizations/stereo/`，不会把两个不同 sample
-universe 画成伪配对。
-
-`metrics.json`、程序 exit code 0、精确 sample count、有限指标和可视化图片共同构成
-评估成功；仅看到进程启动不算完成。完整 split 评估时删除 `--max_batches`。
+正式结果仍须同时满足：程序 exit code 0、冻结 selection 和 checkpoint SHA、精确
+sample count、有限指标、完整 mode/source-position 覆盖，以及可读取的案例和报告产物。
 
 ## 14. 输出与 provenance
 

@@ -1,4 +1,4 @@
-"""StereoVAE data module for legacy evaluation and three-source pretraining."""
+"""StereoVAE data module for three-source, four-mode pretraining."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from torch.utils import data
 from torch.utils.data import default_collate
 
 from .lerobot_data import (
-    EpisodeSequentialDistributedSampler,
     LeRobotStereoDataset,
-    fixed_episode_subset_indices,
 )
 from .mode_sampling import (
     MODE_IDS,
@@ -61,52 +59,10 @@ def _load_root_aliases(value: str | None, argument: str) -> dict[str, str]:
     return aliases
 
 
-class ModeSubset(data.Dataset):
-    """Subset adapter retaining the native get_mode_item contract."""
-    def __init__(self, dataset, indices):
-        self.dataset = dataset
-        self.indices = [int(index) for index in indices]
-        if not self.indices:
-            raise ValueError("mode subset cannot be empty")
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, index):
-        return self.get_mode_item(index, "four_frame")
-
-    def get_mode_item(self, index, temporal_mode):
-        return self.dataset.get_mode_item(self.indices[index], temporal_mode)
-
-
 class StereoDataModule(pl.LightningDataModule):
-    def __init__(self, args, shuffle: bool = True):
+    def __init__(self, args):
         super().__init__()
         self.args = args
-        self.shuffle = shuffle
-
-    def _legacy_stereo_dataset(self, train: bool, split: str | None = None):
-        """Preserve the existing LeRobot evaluation path outside pretraining."""
-        if self.args.train_epoch_repeats != 1:
-            raise ValueError("LeRobot online training requires train_epoch_repeats=1")
-        resolved_split = split or ("train" if train else "val")
-        dataset = LeRobotStereoDataset(
-            self.args.lerobot_episode_manifest,
-            self.args.lerobot_dataset_root,
-            split=resolved_split,
-            expected_rectification_audit_sha256=self.args.lerobot_rectification_audit_sha256,
-            video_cache_capacity=self.args.lerobot_video_cache_capacity,
-            maximum_timestamp_error_s=self.args.lerobot_maximum_timestamp_error_s,
-            single_frame_source_index=self.args.single_frame_source_index,
-        )
-        if not train and split is None:
-            indices = fixed_episode_subset_indices(
-                dataset,
-                int(self.args.lerobot_val_sample_limit),
-                seed=int(getattr(self.args, "seed", 1234)),
-            )
-            dataset = ModeSubset(dataset, indices)
-        return dataset
 
     def _pretrain_dataset(self, train: bool):
         split = "train" if train else "val"
@@ -153,11 +109,7 @@ class StereoDataModule(pl.LightningDataModule):
         }
         return MixedModeDataset(sources)
 
-    def _dataset(self, train: bool, split: str | None = None):
-        if not bool(getattr(self.args, "four_mode_mixed_training", False)):
-            return self._legacy_stereo_dataset(train, split=split)
-        if split is not None:
-            raise ValueError("three-source pretraining does not expose a named test split")
+    def _dataset(self, train: bool):
         return self._pretrain_dataset(train)
 
     def _local_shard(self) -> tuple[int, int]:
@@ -178,8 +130,8 @@ class StereoDataModule(pl.LightningDataModule):
             raise ValueError("invalid LOCAL_RANK/LOCAL_WORLD_SIZE")
         return local_world_size, local_rank
 
-    def _dataloader(self, train: bool, split: str | None = None):
-        dataset = self._dataset(train, split=split)
+    def _dataloader(self, train: bool):
+        dataset = self._dataset(train)
         pin_memory = bool(getattr(self.args, "pin_memory", False))
         persistent_workers = bool(getattr(self.args, "persistent_workers", False))
         if persistent_workers and self.args.num_workers == 0:
@@ -189,73 +141,45 @@ class StereoDataModule(pl.LightningDataModule):
             loader_kwargs["prefetch_factor"] = int(
                 getattr(self.args, "prefetch_factor", 2)
             )
-        if isinstance(dataset, MixedModeDataset):
-            local_world_size, local_rank = self._local_shard()
-            mode_weights = parse_weight_spec(self.args.mode_update_weights, MODE_IDS)
-            mono_weights = parse_weight_spec(
-                self.args.mono_dataset_weights, ("hy", "libero")
-            )
-            mode_batch_sizes = resolve_mode_int_spec(
-                getattr(self.args, "mode_batch_sizes", None),
-                fallback=int(self.args.batch_size),
-            )
-            mode_accumulation_factors = resolve_mode_int_spec(
-                getattr(self.args, "mode_grad_accumulates", None),
-                fallback=int(self.args.grad_accumulates),
-            )
-            if not train:
-                mode_accumulation_factors = {mode_id: 1 for mode_id in MODE_IDS}
-            batch_sampler = MixedModeBatchSampler(
-                dataset.source_lengths,
-                batch_size=self.args.batch_size,
-                mode_batch_sizes=mode_batch_sizes,
-                mode_accumulation_factors=mode_accumulation_factors,
-                seed=int(self.args.mode_schedule_seed),
-                updates_per_epoch=(
-                    int(self.args.mode_updates_per_epoch)
-                    if train
-                    else int(self.args.validation_mode_updates)
-                ),
-                start_update=(int(self.args.mode_schedule_start_update) if train else 0),
-                mode_weights=mode_weights,
-                mono_dataset_weights=mono_weights,
-                shard_num_replicas=local_world_size,
-                shard_rank=local_rank,
-            )
-            return data.DataLoader(
-                dataset,
-                batch_sampler=batch_sampler,
-                num_workers=self.args.num_workers,
-                pin_memory=pin_memory,
-                persistent_workers=persistent_workers,
-                collate_fn=_profiled_collate,
-                **loader_kwargs,
-            )
-        if isinstance(dataset, LeRobotStereoDataset):
-            sampler = EpisodeSequentialDistributedSampler(
-                dataset,
-                shuffle=train and self.shuffle,
-                seed=int(getattr(self.args, "seed", 1234)),
-            )
-        elif dist.is_initialized():
-            sampler = data.distributed.DistributedSampler(
-                dataset,
-                num_replicas=dist.get_world_size(),
-                rank=dist.get_rank(),
-                shuffle=train and self.shuffle,
-            )
-        else:
-            sampler = None
+        local_world_size, local_rank = self._local_shard()
+        mode_weights = parse_weight_spec(self.args.mode_update_weights, MODE_IDS)
+        mono_weights = parse_weight_spec(
+            self.args.mono_dataset_weights, ("hy", "libero")
+        )
+        mode_batch_sizes = resolve_mode_int_spec(
+            getattr(self.args, "mode_batch_sizes", None),
+            fallback=int(self.args.batch_size),
+        )
+        mode_accumulation_factors = resolve_mode_int_spec(
+            getattr(self.args, "mode_grad_accumulates", None),
+            fallback=int(self.args.grad_accumulates),
+        )
+        if not train:
+            mode_accumulation_factors = {mode_id: 1 for mode_id in MODE_IDS}
+        batch_sampler = MixedModeBatchSampler(
+            dataset.source_lengths,
+            batch_size=self.args.batch_size,
+            mode_batch_sizes=mode_batch_sizes,
+            mode_accumulation_factors=mode_accumulation_factors,
+            seed=int(self.args.mode_schedule_seed),
+            updates_per_epoch=(
+                int(self.args.mode_updates_per_epoch)
+                if train
+                else int(self.args.validation_mode_updates)
+            ),
+            start_update=(int(self.args.mode_schedule_start_update) if train else 0),
+            mode_weights=mode_weights,
+            mono_dataset_weights=mono_weights,
+            shard_num_replicas=local_world_size,
+            shard_rank=local_rank,
+        )
         return data.DataLoader(
             dataset,
-            batch_size=self.args.batch_size,
+            batch_sampler=batch_sampler,
             num_workers=self.args.num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
             collate_fn=_profiled_collate,
-            sampler=sampler,
-            shuffle=sampler is None and train and self.shuffle,
-            drop_last=train,
             **loader_kwargs,
         )
 
@@ -264,9 +188,6 @@ class StereoDataModule(pl.LightningDataModule):
 
     def val_dataloader(self):
         return self._dataloader(False)
-
-    def test_dataloader(self):
-        return self._dataloader(False, split="test")
 
     @staticmethod
     def add_data_specific_args(parent_parser):
@@ -278,9 +199,7 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--prefetch_factor", type=int, default=2)
         parser.add_argument("--pin_memory", type=int, choices=(0, 1), default=1)
         parser.add_argument("--persistent_workers", type=int, choices=(0, 1), default=1)
-        parser.add_argument("--train_epoch_repeats", type=int, default=1)
         parser.add_argument("--image_channels", type=int, default=3)
-        parser.add_argument("--four_mode_mixed_training", type=int, choices=(0, 1), default=0)
         parser.add_argument("--hy_manifest", type=str, default=None)
         parser.add_argument("--hy_root_aliases", type=str, default=None)
         parser.add_argument("--libero_manifest", type=str, default=None)
@@ -301,10 +220,6 @@ class StereoDataModule(pl.LightningDataModule):
         parser.add_argument("--stereo_disparity_max_px", type=float, default=None)
         parser.add_argument("--stereo_lr_error_abs_threshold_px", type=float, default=None)
         parser.add_argument("--stereo_lr_error_relative_threshold", type=float, default=None)
-        parser.add_argument("--lerobot_episode_manifest", type=str, default=None)
-        parser.add_argument("--lerobot_dataset_root", type=str, default=None)
-        parser.add_argument("--lerobot_rectification_audit_sha256", type=str, default=None)
         parser.add_argument("--lerobot_video_cache_capacity", type=int, default=12)
         parser.add_argument("--lerobot_maximum_timestamp_error_s", type=float, default=0.05)
-        parser.add_argument("--lerobot_val_sample_limit", type=int, default=512)
         return parser

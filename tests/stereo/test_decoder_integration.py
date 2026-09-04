@@ -13,7 +13,6 @@ class StructuredStereoDecoderTest(unittest.TestCase):
             block="tt",
             window_size=2,
             spatial_pos="rope",
-            patch_embed="linear",
             patch_size=8,
             spatial_depth=2,
             temporal_depth=1,
