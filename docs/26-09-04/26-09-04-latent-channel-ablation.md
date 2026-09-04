@@ -61,3 +61,16 @@ channel 配置，比较 Quality、Rate 和 Speed。历史 48-channel checkpoint 
   non-reentrant activation checkpoint；只在 backward 重算 LPIPS 特征，不改变 loss
   reduction 或 effective global batch。该修复对 Z96/Z24/Z48 三组统一生效。
 - 失败输出保留，不复用、不删除；修复后使用新的唯一输出根重新启动。
+
+## Z96 第二次启动与数值稳定修复
+
+- 第二次输出：
+  `/data/home/frank/experiments/stereo-latent-ablation-bs384-h2002-20260904-v2`。
+- LPIPS activation checkpoint 将训练显存从约 139 GiB 降至约 56 GiB，Z96 完成
+  三个 generator updates 后，在下一次 forward 检测到 non-finite depth prediction；
+  该次停止不是 OOM，Z24/Z48 未启动。
+- W&B 中失败前 RGB、depth、gradient、LPIPS 和 KL loss 均为有限值，学习率按
+  warmup 从 0、5e-6、1e-5 增长。失败发生在 mono/four-frame update 之后。
+- 根因复现为 LPIPS channel normalization 在全零 VGG/ReLU feature 处反向经过
+  `sqrt(0)`，FP32 与 BF16 均会产生 NaN gradient。将 epsilon 放入平方根内部，
+  使零特征梯度有限；正常非零特征、batch、loss 权重和 reduction 合同保持不变。
