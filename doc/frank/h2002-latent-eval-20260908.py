@@ -378,7 +378,7 @@ def main():
           "world_size":world,"sample_target_hashes":hashes,"checkpoints":provenance,
           "rgb_region":"rectangular non-padding content","geometry":"teacher-relative centered log depth",
           "git_sha":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
-          "script_sha256":sha256_file(__file__),"metrics":metrics,
+          "script_sha256":sha256_file(Path(__file__)),"metrics":metrics,
           "elapsed_s":time.monotonic()-started}
         opt.output.parent.mkdir(parents=True,exist_ok=True)
         opt.output.write_text(json.dumps(result,indent=2,allow_nan=False)+"\n")
@@ -389,4 +389,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

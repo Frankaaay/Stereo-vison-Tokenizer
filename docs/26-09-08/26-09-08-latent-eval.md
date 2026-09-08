@@ -19,3 +19,7 @@
 - First run one batch/rank for each dataset, then full LIBERO/UMI/Hy. Stop the serial
   launcher on any failure; no incomplete run is presented as full-test evidence.
 - Prelaunch validation: local Python compile; remote smoke still pending.
+- v1 LIBERO smoke finished tensor/metric work but failed before JSON serialization:
+  `sha256_file(__file__)` supplied str where Path was required. Fixed to Path;
+  retained v1 logs, restart at `stereo-latent-eval-h2002-20260908-v2`.
+  Use localhost rendezvous for this single-node job to avoid hostname resolution delay.

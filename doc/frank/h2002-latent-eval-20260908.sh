@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=safe.directory
 export GIT_CONFIG_VALUE_0=/data/home/frank/runtime/lite-any-stereo-8c97bd4-clean
-root=/data/home/frank/experiments/stereo-latent-eval-h2002-20260908-v1
+root=/data/home/frank/experiments/stereo-latent-eval-h2002-20260908-v2
 train_root=/data/home/frank/experiments/stereo-latent-ablation-permode-h2002-20260904-v16
 test ! -e "$root"
 mkdir -p "$root"
@@ -18,7 +18,7 @@ for phase in smoke full; do
   for dataset in libero umi hy; do
     extra=()
     if [[ "$phase" == smoke ]]; then extra=(--max-batches 1); fi
-    torchrun --standalone --nnodes 1 --nproc_per_node 8 doc/frank/h2002-latent-eval-20260908.py \
+    torchrun --master_addr 127.0.0.1 --master_port 29759 --nnodes 1 --nproc_per_node 8 doc/frank/h2002-latent-eval-20260908.py \
       --run-root "$train_root" --output "$root/$phase-$dataset.json" \
       --dataset "$dataset" --batch-size 4 "${extra[@]}" \
       > "$root/$phase-$dataset.log" 2>&1
