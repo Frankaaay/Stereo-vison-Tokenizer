@@ -55,5 +55,15 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result['difference'],-1)
         self.assertEqual(result['ci95'],[-1,-1])
 
+    def test_shift_statistics_use_matching_interior_baseline(self):
+        rows=[]
+        for condition,value in [('correct',100),('shift_0',1),('shift_16',2)]:
+            for episode in ('a','b'):
+                rows.append(dict(dataset='umi',model='S48',condition=condition,mode='four_frame',
+                    episode_id=episode,metrics={'relative_log_l1':value}))
+        report=exp.paired_summary(rows,100)
+        self.assertEqual(report['perturbations'][0]['baseline'],'shift_0')
+        self.assertEqual(report['perturbations'][0]['difference'],1)
+
 
 if __name__=='__main__': unittest.main()

@@ -13,7 +13,7 @@ case "$phase" in
   full) extra=() ;;
   *) exit 2 ;;
 esac
-root=/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v1
+root=/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v2
 output="$root/$phase"
 mkdir -p "$root"
 test ! -e "$output"

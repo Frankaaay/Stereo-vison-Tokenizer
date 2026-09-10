@@ -124,8 +124,26 @@ def paired_summary(rows, draws=2000):
                         'metric': metric, 'episodes': len(keys), 'difference': float(delta.mean()),
                         'relative_change': float(delta.mean()/baseline) if baseline != 0 else None,
                         'ci95': np.quantile(samples, [.025, .975]).tolist()})
+    perturbations=[]
+    for (dataset,model,condition,mode),a in means.items():
+        if model != 'S48' or condition in ('correct','shift_0'):
+            continue
+        baseline_condition='shift_0' if condition.startswith('shift_') else 'correct'
+        b=means.get((dataset,model,baseline_condition,mode),{})
+        if not b: continue
+        for metric in sorted({k[1] for k in a}&{k[1] for k in b}):
+            keys=sorted(k for k in a if k[1]==metric)
+            if keys != sorted(k for k in b if k[1]==metric):
+                raise ValueError('unpaired perturbation episodes')
+            delta=np.array([a[k]-b[k] for k in keys])
+            rng=np.random.default_rng(1234)
+            samples=delta[rng.integers(0,len(delta),(draws,len(delta)))].mean(1)
+            perturbations.append({'dataset':dataset,'mode':mode,'condition':condition,
+                'baseline':baseline_condition,'metric':metric,'episodes':len(keys),
+                'difference':float(delta.mean()),'ci95':np.quantile(samples,[.025,.975]).tolist()})
     return {'aggregation': 'views and windows within episode; episodes equally weighted; single sources equally weighted',
-            'ci_scope': 'episode sampling only, one training seed', 'scorecard': scorecard, 'paired': comparisons}
+            'ci_scope': 'episode sampling only, one training seed', 'scorecard': scorecard,
+            'paired': comparisons,'perturbations':perturbations}
 
 
 def dataset_for(cfg, name):
@@ -173,6 +191,27 @@ def save_rgb(path, batch, outputs):
         for v in range(tile.shape[0]):
             image = tile[v].add(.5).clamp(0, 1).mul(255).byte().permute(1,2,0).numpy()
             canvas.paste(Image.fromarray(image), (v*256, r*276+20))
+    canvas.save(path)
+
+
+def save_depth(path,batch,outputs,epsilon):
+    from matplotlib import colormaps
+    target=runtime._relative_target_from_batch(batch,epsilon).relative_log_depth
+    mask=batch['valid_mask'][0,:,:,0].cpu()
+    tiles=[target[0,:,:,0].cpu()]
+    for out in outputs.values():
+        prediction,_=native.relative_prediction_from_raw(out.raw_relative_log_depth,batch['valid_mask'])
+        tiles.append(prediction[0,:,:,0].cpu())
+    valid=tiles[0][mask].numpy()
+    low,high=np.quantile(valid,[.02,.98]); high=max(high,low+1e-6)
+    canvas=Image.new('RGB',(768,276*len(tiles))); draw=ImageDraw.Draw(canvas)
+    for r,(label,tile) in enumerate(zip(['LAS2-H relative log target']+list(outputs),tiles)):
+        draw.text((4,r*276),label,fill='white')
+        for v in range(len(tile)):
+            values=((tile[v,0].numpy()-low)/(high-low)).clip(0,1)
+            image=(colormaps['viridis'](values)[...,:3]*255).astype(np.uint8)
+            image[~mask[v,0].numpy()]=0
+            canvas.paste(Image.fromarray(image),(v*256,r*276+20))
     canvas.save(path)
 
 
@@ -274,6 +313,10 @@ def evaluate(opt, args, models, dataset_name, phase, episodes, windows, conditio
                         for v, view in enumerate(VIEWS[dataset_name]):
                             values = sample_metrics(score_batch, out, i, v, model.perceptual_model, args.relative_depth_epsilon, teacher is None)
                             values['forward_ms_per_sample'] = latency
+                            if out.fusion is not None:
+                                attention=out.fusion.attention[i,v].float()
+                                values['fusion_attention_entropy']=float(-(attention*attention.clamp_min(1e-12).log()).sum(-1).mean())
+                                values['fusion_confidence']=float(out.fusion.confidence[i,v].float().mean())
                             if condition.startswith('shift_'):
                                 error=(out.rgb[i,v]-b['video'][i,v,0]).abs()
                                 values['rgb_boundary_l1']=float(torch.cat((error[..., :32],error[..., -32:]),-1).mean())
@@ -288,9 +331,19 @@ def evaluate(opt, args, models, dataset_name, phase, episodes, windows, conditio
                             stream.write(json.dumps(row, allow_nan=False)+'\n'); rows.append(row)
             if source is None and batch_index == 0 and len(models) == 3:
                 save_rgb(opt.output/f'{phase}-{dataset_name}-fixed-case.png', b, originals)
+                if teacher is not None:
+                    save_depth(opt.output/f'{phase}-{dataset_name}-fixed-depth.png',b,originals,args.relative_depth_epsilon)
         stream.flush()
         print(json.dumps({'event':'batch','phase':phase,'dataset':dataset_name,'batch':batch_index+1,
             'batches':len(loader),'elapsed_s':time.monotonic()-started,'peak_gib':torch.cuda.max_memory_allocated()/2**30}),flush=True)
+    expected=len(indices)*len(VIEWS[dataset_name])*sum(
+        (1 if cond=='time_reverse' else 5) for model in models for cond in conditions
+        if cond=='correct' or model=='S48')
+    assert len(rows)==expected,(len(rows),expected)
+    assert len({(r['sample_id'],r['view'],r['model'],r['condition'],r['mode']) for r in rows})==expected
+    per_sample=defaultdict(set)
+    for row in rows: per_sample[row['sample_id']].add(row['target_sha256'])
+    assert all(len(values)==1 for values in per_sample.values())
     return rows
 
 
@@ -328,6 +381,7 @@ def main():
     opt=parser.parse_args()
     opt.output.mkdir(parents=True,exist_ok=False)
     torch.manual_seed(1234); torch.set_num_threads(2)
+    torch.cuda.set_per_process_memory_fraction(.15)
     torch.backends.cuda.matmul.allow_tf32=False; torch.backends.cudnn.allow_tf32=False
     configs={name:json.loads((root/'resolved_config.json').read_text()) for name,root in RUNS.items()}
     ignored={'default_root_dir','stereo_training_input','resume_from_checkpoint','mode_schedule_start_update'}
@@ -359,14 +413,16 @@ def main():
     with torch.inference_mode(), (opt.output/'samples.jsonl').open('x') as stream:
         if opt.smoke:
             rows=evaluate(opt,args,models,'umi','smoke',8,2,conditions,teacher,stream)
+            for dataset in ('hy','libero'):
+                rows+=evaluate(opt,args,models,dataset,'smoke-regression',2,2,['correct'],None,stream)
         else:
             rows=evaluate(opt,args,models,'umi','main',128,8,['correct'],teacher,stream)
             rows+=evaluate(opt,args,{'S48':models['S48']},'umi','diagnostic',64,4,conditions,teacher,stream)
             for dataset in ('hy','libero'):
                 rows+=evaluate(opt,args,models,dataset,'regression',16,2,['correct'],None,stream)
     # Keep diagnostic correct separate: it uses fewer episodes than the main table.
-    report=paired_summary([r for r in rows if r['phase']!='diagnostic'])
-    report['diagnostic']=paired_summary([r for r in rows if r['phase']=='diagnostic'])
+    report=paired_summary([r for r in rows if r['phase']!='diagnostic' and r['condition']=='correct'])
+    report['diagnostic']=paired_summary([r for r in rows if r['phase'] in ('diagnostic','smoke') and r['model']=='S48'])
     report['peak_allocated_gib']=torch.cuda.max_memory_allocated()/2**30
     (opt.output/'report.json').write_text(json.dumps(report,indent=2,allow_nan=False))
     render_report(opt.output,report)

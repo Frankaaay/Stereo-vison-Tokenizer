@@ -26,3 +26,8 @@ shift 分数使用共同内区，另记录 RGB 边界误差；time_reverse 仅 f
 输出根：/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v1。
 先做定向单测和 smoke，检查有限指标、所有输入路径、target checksum 和峰值显存，
 通过后再启动 full（main → diagnostic → regression → report）。
+
+第一版 7ba668d 的 UMI smoke 已通过（exit0）：16 windows、2688 条记录、
+峰值 allocated 3.404 GiB、主体 56.96 秒，失败日志为空。输出 v1 保留。
+补充回归 smoke、深度样例、完整性断言和扰动配对 CI 后使用 v2 输出根。
+评测进程限制为 GPU 总显存的15%，约21 GiB，避免对共用任务造成大幅显存挤占。
