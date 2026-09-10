@@ -1,1128 +1,239 @@
 # Stereo Tokenizer Plan
 
-> 2026-08-25 状态：本文中关于 student disparity/metric-depth 输出、固定
-> `V=3` 和 single/four 交替训练的旧章节已被统一 relative log-depth 设计取代。
-> 当前实现状态、冻结合同与尚待提供的 mono/DA3 接入输入见
-> `docs/26-08-25/26-08-25-mono-stereo-relative-log-depth-implementation.md`。
-> 下文保留为历史设计证据，不再作为新 checkpoint 的输出语义。
+> 更新日期：2026-09-05。实现基线：`hezhou-las2-h`，commit
+> `22ffb8f44da201b3fedc13688960c537dd127519`。
+> 本文按当前源码重写，替代原 disparity-head、固定六路输入、single/four 交替和离线 GT 先行的旧计划。
+> “已实现”表示代码已有该能力；实验状态仅引用带日期的仓库记录，本次没有连接服务器核实作业进度。
 
-# Stereo OmniTokenizer 设计文档
+## 1. 目标与当前阶段
 
-## 1\. 项目目标
+StereoVAE 从零训练一个同时支持单目/双目、单帧/四帧的视觉 VAE，将每个视角压缩成一个 temporal latent slot，重建参考眼 RGB，并学习统一的 relative log-depth 表征。Tokenizer 不实现跨视角世界模型或动作预测。
 
-基于 OmniTokenizer 的 VAE 结构和训练框架，从随机初始化开始训练 Stereo VAE。模型接收三个安装视角的左右 RGB 视频，以每组双目的左相机为参考，重建左视角 RGB 并预测正 disparity。Metric depth 不使用独立神经网络 Head，而是由预测 disparity 和每条样本的相机标定参数计算得到。
+当前重点已从搭建网络转向三件事：完成同合同消融、用统一评测量化质量与效率、冻结可供下游使用的 checkpoint 与 latent 合同。Quality、Rate、Training/Inference Speed 并列报告，不能只凭重建图判断模型优劣。
 
-FoundationStereo 仅用于离线生成训练所需的 disparity GT 和置信度信息，不进入模型训练图之外的推理 pipeline，也不作为模型推理时的依赖。
+| 工作项 | 当前实现/证据 | 下一步 |
+| --- | --- | --- |
+| 四模式模型与三源训练 | 已实现；有历史多卡 smoke 记录 | 按正式实验合同验收完整训练与恢复 |
+| 三视角/两视角 mono 联合输入 | 已实现，保留独立 view 轴 | 各数据源、各模式分别出分数 |
+| Z24/Z48/Z96 latent 消融 | 已实现串行训练入口；9 月 4 日记录 v16 启动 | 验收三组完整结果，形成质量—容量—速度比较 |
+| S48/M48/D48 输入消融 | 已实现输入变换；9 月 4 日记录 M48 启动、D48 串行排队 | 补齐同合同 S48 后才给出因果结论 |
+| Stage A 本体评测 | selection/preflight/run/benchmark/report 已实现 | 完成新时间指标的运行时验证与正式评测 |
+| single-frame rFID | 标准保留，尚无正式实现与运行证据 | 单独冻结实现后补齐 |
+| Gate B/C 下游评测 | 统一标准已有定义，不属于本仓库已完成能力 | 冻结下游仓库、数据、模型和资源后执行 |
 
-### 1\.1 Tokenizer 输入输出 Pipeline
+## 2. 模型合同
+
+### 2.1 输入、输出与边界
+
+模型主类为 `stereo_tokenizer.model.StereoVAE`，公共导入为 `from stereo_tokenizer import StereoVAE`。
+输入必须显式传入 `eye_mode` 与 `temporal_mode`，张量为 `[B,V,E,3,T,256,256]`。
+
+| 路径 | V | E | T | 处理方式 |
+| --- | ---: | ---: | --- | --- |
+| Hy mono | 3 | 1 | 1 或 4 | high、left wrist、right wrist 同一窗口联合输入 |
+| LIBERO mono | 2 | 1 | 1 或 4 | agentview、wrist 同一窗口联合输入 |
+| UMI stereo | 3 | 2 | 1 或 4 | head、left wrist、right wrist 三组校正双目 |
+| 模型通用 mono 接口 | 1–3 | 1 | 1 或 4 | 跳过 StereoFusion |
+
+联合输入是共享权重、合并 batch 计算；模型没有跨 view attention。Stereo 接口仍严格要求 `V=3,E=2`。调用方不得通过复制帧、静默缺眼回退或猜测 shape 改变模式语义。
+
+输出合同：
+
+- raw latent：`[B,V,Cz,1,16,16]`，`Cz ∈ {24,48,96}`，默认 48。
+- RGB：`[B,V,3,T,256,256]`；stereo 重建左参考眼，mono 重建各输入视角。
+- 几何：`raw_relative_log_depth [B,V,1,T,256,256]`。
+- 训练默认从 posterior 采样；确定性评估使用 posterior mean。
+- 不对 raw latent 隐式施加下游 normalization；下游 patchify、视角拼接、latent 统计归一化均须另行冻结。
+
+模型不再输出 student disparity，也不把几何 head 的输出称为 metric depth。教师 disparity 与标定用于构建监督，不代表学生恢复了绝对尺度。
+
+### 2.2 编解码结构
 
 ```mermaid
-flowchart LR
-    IN["六路同步 RGB<br/>[B,3,2,3,4,256,256]"]
-    SE["Shared Spatial Encoder<br/>patch 16×16"]
-    SF["三组 StereoFusion<br/>左参考系"]
-    TE["Temporal Encoder<br/>4 帧 → 1 latent slot"]
-    POST["VAE Posterior<br/>[B,3,48,1,16,16]"]
-    DEC["Shared Decoder Transformer<br/>共享到最后输出投影前"]
-    RGB["RGB Head<br/>三路左相机 4 帧 RGB"]
-    DISP["Disparity Head<br/>三路左相机 4 帧正 disparity"]
-    DEPTH["Calibration conversion<br/>D = fxB / d<br/>仅派生与评估"]
-    ABI["Tokenizer 输出 ABI<br/>[B,3,48,1,16,16]"]
-    DOWNSTREAM["下游世界模型<br/>patchify 与 latent 间 attention 由下游实现"]
-
-    IN --> SE --> SF --> TE --> POST --> DEC
-    DEC --> RGB
-    DEC --> DISP --> DEPTH
-    POST -.-> ABI -.-> DOWNSTREAM
+flowchart TD
+    X["结构化 RGB：B,V,E,3,T,256,256"] --> S["共享 Spatial Encoder：16×16 patches"]
+    S --> E{"eye_mode"}
+    E -->|stereo| F["水平 StereoFusion：左参考系"]
+    E -->|mono| M["各视角特征直通"]
+    F --> T{"temporal_mode"}
+    M --> T
+    T -->|single_frame| P["独立 single projection"]
+    T -->|four_frame| A["双向 temporal attention + 4D→D"]
+    P --> Z["VAE posterior：B,V,Cz,1,16,16"]
+    A --> Z
+    Z --> D["对应 temporal expansion + 共享 Spatial Decoder"]
+    D --> R["RGB head"]
+    D --> G["raw relative log-depth head"]
 ```
 
-主链路输出左参考系 RGB 和 disparity。Depth 不设置神经网络 Head，也不参与训练 Loss；只在评估时由预测或 GT disparity 与对应标定参数即时计算。虚线支路只定义 latent 交给下游世界模型的 ABI；Stereo OmniTokenizer 不实现下游 DiT/Transformer 的 patchify、unpatchify 或 latent slots 之间的 attention。
+当前统一 launcher 的结构参数如下；手写 CLI 或历史 checkpoint 以自身 resolved config 为准。
 
-## 2\. 最终模型配置
+| 参数 | 当前 launcher |
+| --- | --- |
+| 分辨率 / spatial patch / latent grid | 256×256 / 16×16 / 16×16 |
+| embedding dimension | 512 |
+| spatial encoder / decoder | 深度均为 4；`ttww` / `tttt` |
+| window / position | 8×8 token window / RoPE |
+| temporal encoder / decoder | 深度均为 4，四帧双向 attention |
+| attention | 8 heads，head dimension 64 |
+| spatial PEG | `causal_in_peg`，`conv2d_t1_slice` |
+| StereoFusion 搜索 | 每视角半径 `(7,7,7)`，向右图负 x 方向搜索 |
 
-|参数|第一版设定|
-|---|---|
-|输入视角|Head、Left wrist、Right wrist|
-|每个视角输入|Left RGB、Right RGB|
-|输入分辨率|256×256|
-|当前训练 sample|连续同步 4 帧，无 anchor|
-|模式边界|原 `OmniTokenizer` 主类直接改为 Stereo-only；不保留 legacy image-mode，也不维护旁路 `StereoTokenizer` 实现|
-|源视频与采样|源视频约 30 FPS；训练帧间隔 0.1 秒（等效 10 FPS）|
-|Sample stride|0.4 秒，4 帧半开窗口不重叠|
-|OmniTokenizer spatial patch size|16×16 pixels|
-|OmniTokenizer spatial grid|16×16 latent positions|
-|Temporal patch size|4|
-|Embedding dimension|512|
-|Spatial Transformer depth|4|
-|Spatial Encoder block|`ttww`|
-|Spatial Decoder block|`tttt`|
-|Window Attention size|8×8 tokens|
-|Spatial positional encoding|RoPE|
-|Temporal Transformer depth|4|
-|Attention heads|8|
-|Head dimension|64|
-|VAE latent channels|48\(LingBot\-VA\)|
-|RGB 输出|3 通道|
-|Disparity 输出|1 通道|
-|Depth 输出|由 disparity 和标定参数派生|
-|下游 Cross\-view Attention|不属于 Tokenizer，由下游世界模型决定|
-|训练精度|BF16|
-|初始化|全部从零训练；RGB Head 沿用 OmniTokenizer 的结构与初始化规则但不加载预训练权重，Disparity weight 随机、bias 由 train split 扫描冻结|
-|Global batch size|8|
-|训练周期|10 epochs|
-|Validation|有独立 validation Manifest 时，每个 epoch 结束后运行 1 次完整 validation；当前 `pilot_train` 不伪造 validation|
-|Checkpoint|每个 epoch 保存一次|
+`single_frame` 使用独立 projection/expansion，跳过四帧 temporal attention；`four_frame` 先做帧间 attention，再以 `4D→D` 压成一个 slot，解码以 `D→4D` 展开。Spatial Decoder 按帧处理，PEG 只看到 `T=1`，四帧信息交换由 temporal 模块承担。
 
-Spatial Encoder 的 `t` 表示全局 Spatial Attention，`w` 表示 Window Attention。因此 `ttww` 表示前两层使用全局 Attention，后两层使用 8×8 Window Attention。Window Attention 运行在 16×16 OmniTokenizer 网格上，每帧划分为 2×2 个窗口。Spatial Decoder 使用四层全局 Attention。
+StereoFusion 在同一 view/time/row 上用左特征作 query、右特征作 key/value，屏蔽越界候选。融合为 `left + alpha * confidence.detach() * delta`，其中 confidence 来自 attention entropy，`alpha` 零初始化。右眼没有绕过 latent 的 decoder skip connection。
 
-## 3\. 网络架构与张量流
+## 3. 数据与监督
 
-### 3\.1 输入定义
+### 3.1 数据生产合同
 
-每个 sample 包含三个同步安装视角，每个视角包含一组左右双目：
+三源训练复用 `pretrain_data.py`、`lerobot_data.py` 与 `mode_sampling.py` 的现有路径，manifest 保存样本身份与 split，运行时以 node-local alias 解析数据根。
 
-- View 0：Head Left / Head Right；
+- Hy：当前三相机 manifest 合同为 `hy-mono-three-camera-episode-v2`；旧 high-only manifest 不能作为联合三视角输入。
+- LIBERO：同一窗口的 agentview 与 wrist 联合读取。
+- UMI：三组左右目必须同步、完成 rectification，并提供与 resize/letterbox 一致的标定和有效内容 mask。
+- single/four 是显式模式，由数据路径提供匹配的帧数；不再按奇偶 update 从统一四帧 cache 交替裁切。
+- scene window 是 batch 与 logical sample 的统计单位，不能把三个 view 当成三个训练 samples。
+- split 按 episode 身份冻结，记录 manifest SHA256、窗口/帧选择、预处理、校正审计及被排除样本，防止训练与评测泄漏。
 
-- View 1：Left\-wrist Left / Left\-wrist Right；
+坏帧、缺少必需相机、无效窗口或标定问题应在数据合同中显式处理；不能用黑图或复制另一只眼静默补齐。已有 canonical UMI manifest 工具不等于所有 canonical 数据都已验收。
 
-- View 2：Right\-wrist Left / Right\-wrist Right。
+### 3.2 在线教师与 relative log-depth
 
-六路图像不在像素空间拼接。输入保留显式的 View 和 Eye 维度，一次传入模型：
+生产 launcher 默认 stereo teacher 为 LAS2-H，mono teacher 为 DA3。`online_gt.py` 仍有 FoundationStereo/PyTorch/TensorRT backend 支持；它们是显式选择的教师路径，不能在同一对照中未经记录互换。
 
-$X\in\mathbb{R}^{B\times3\times2\times3\times T\times256\times256},\qquad T\in\{1,4\}$
+| 来源 | 在线监督 | 统一目标 |
+| --- | --- | --- |
+| Hy/LIBERO | DA3 positive relative depth | `log(depth)` 后中心化 |
+| UMI | LAS2-H disparity，双向推理与 LR consistency mask | `log(fx * baseline / disparity)` 后中心化 |
 
-其中，三个连续的维度 `3×2×3` 分别表示 View、Eye 和 RGB channel。调用方必须显式传入 `eye_mode=mono|stereo` 与 `temporal_mode=single_frame|four_frame`；`single_frame` 严格要求 `T=1`，`four_frame` 严格要求 `T=4`，不根据 tensor shape 静默推断。
+中心化按每个 sample 执行：先计算各有效 view 在时间和空间上的有效像素均值，再对有监督的 view 等权求中心；预测使用同一 mask 规则去中心。当前实现允许部分 view 没有几何监督，但每个 sample 至少须有一个有效监督 view，否则立即失败。必须报告 valid coverage 与有效样本数。
 
-### 3\.2 Shared Spatial Encoder
+launcher 当前使用 disparity 有效范围 `[0.5,112]` px、LR threshold `max(1 px,0.05*d)`，LAS2-H 默认 4 iterations；这些是现有 recipe 参数，不是可直接套用到新相机的普适常数。DA3 使用 finite、positive、non-padding mask。
 
-将 View、Eye 和 Time 合并到 batch，六路图像使用同一组 Spatial Encoder 参数批量提取特征：
+教师在 callback 中生成监督，不进入 student 推理。增量 GT cache 可选，当前消融关闭；启用后只能复用 teacher/source/weights/preprocessing/mask/frame 合同完全一致的缓存。
 
-$[B,3,2,3,4,256,256]
-\rightarrow
-[B\times3\times2\times4,3,256,256]$
+## 4. 训练与恢复
 
-OmniTokenizer spatial patch size 为 16，因此每张图像得到 16×16 个 spatial tokens。每个 token 对应一个 16×16 像素区域：
+### 4.1 四模式采样和预算
 
-$[B\times3\times2\times4,3,256,256]
-\rightarrow
-[B\times3\times2\times4,512,16,16]$
+四种模式按确定性 logical generator-update schedule 选择，同一 gradient accumulation window 保持模式一致。当前 launcher 默认如下：
 
-恢复显式维度后为：
+| mode（参数顺序） | update 权重 | 每卡 batch | GA | 8 卡 effective batch |
+| --- | ---: | ---: | ---: | ---: |
+| mono/single_frame | 35 | 192 | 1 | 1536 |
+| mono/four_frame | 35 | 40 | 1 | 320 |
+| stereo/single_frame | 15 | 160 | 1 | 1280 |
+| stereo/four_frame | 15 | 36 | 1 | 288 |
 
-$[B,3,2,4,512,16,16]$
+mono 来源权重为 Hy:LIBERO=`9:1`。当前允许各模式 effective batch 不同，因此 update 占比不等于 sample 占比。正式比较同时固定 schedule、per-mode batch/GA、样本顺序与直接计数，不能只对齐 `max_steps`。
 
-这里已经完成 OmniTokenizer 的空间压缩。下游 DiT 的 `(1,2,2)` patchify 不属于 Shared Spatial Encoder，不在此处执行。左右相机共享 Spatial Encoder 参数不等于只计算一次。六路输入仍分别经过编码器，只是使用同一组权重。
+该组合来自 H200 实验记录，不构成其他 GPU 的容量保证。8 卡、40,000 updates、上述权重和 batch 下，计划预算为每模型 **35,392,000 logical samples**；完成验收读取 checkpoint 的实际 per-mode counters。
 
-### 3\.3 StereoFusion
+### 4.2 损失与训练阶段
 
-StereoFusion 在同一视角、同一时刻内融合左右特征：
+已有训练项为 RGB reconstruction、relative log-depth、relative spatial-gradient、KL、LPIPS，以及可选 image GAN、video GAN、feature matching。video GAN 仅用于 four-frame。几何损失按有效像素归一化、有效 view 等权归约；LPIPS 按 view/frame 分块处理并保留总体 mean 语义。
 
-$\text{Head Left} + \text{Head Right}
-\rightarrow
-\text{Head stereo feature}$
+当前首轮消融 recipe：RGB/depth/gradient/LPIPS 权重 `1/1/0.1/1`，KL `1e-6`、warmup 100 updates；generator LR/min LR 均为 `1e-4`、optimizer warmup 20 updates；GAN/feature matching 关闭。精度为 BF16，当前 temporal 路径没有保留早期诊断用的强制 FP32，LPIPS 使用普通 forward 保留激活。
 
-$\text{Left-wrist Left} + \text{Left-wrist Right}
-\rightarrow
-\text{Left-wrist stereo feature}$
+历史训练记录中的 Stage A/B/C 分别涉及基础训练、image GAN、video GAN 阶段；它们与评测的 Gate A/B/C 是两套命名。当前 GAN-off 消融不能与历史 GAN-on checkpoint 直接作单变量比较。
 
-$\text{Right-wrist Left} + \text{Right-wrist Right}
-\rightarrow
-\text{Right-wrist stereo feature}$
+### 4.3 恢复与产物
 
-融合结果以各组双目的左相机为参考：
+复用现有 checkpoint 入口：`resume_from_checkpoint`、`continuation_checkpoint`、`stage_transition_checkpoint`、`discriminator_expansion_checkpoint`。普通恢复、延长预算与改变 discriminator 结构的语义不能混用，必须通过相应校验。
 
-$[B,3,2,4,512,16,16]
-\rightarrow
-[B,3,4,512,16,16]$
+验收需包含完整 state dict、模型超参、teacher/manifest/config provenance、generator/discriminator/batch counters 和 per-mode samples。恢复训练须保持 logical schedule 位置，输入消融合同不匹配不得 resume；不能用 Lightning 的 `global_step` 单独代表 generator 更新数。
 
-右特征在 StereoFusion 后丢弃，不允许通过 skip connection 绕过 VAE bottleneck 直接进入 Decoder。
+当前消融每 2,000 generator updates validation、每 5,000 updates checkpoint，并保存 `last.ckpt`、`resolved_config.json`、`run_manifest.json`。这些是本轮 recipe，取代旧文档统一的“10 epochs、每 epoch 保存”计划。
 
-三个视角复用同一套 StereoFusion 参数。实际搜索 mask 按视角分别构造，允许 Head、Left-wrist、Right-wrist 使用不同的已解析搜索范围 $w_v$；权重共享不等于三个视角使用相同 mask。
+## 5. 当前实验计划
 
-### 3\.4 Temporal Encoder
+### 5.1 Latent channel：Z96 → Z24 → Z48
 
-StereoFusion 后，三个视角分别进入显式 temporal branch，不进行跨视角融合。`four_frame` 路径在每个空间位置形成长度为 4 的序列，加入 learned temporal position 后执行双向 temporal attention，最后通过 sampler 完成 `4×512→512`：
+仅改变 `Cz`，三组均从零训练，同一数据、teacher、随机种子、更新/样本预算、loss 和评测 selection。历史 Z48 只能用于回归参考。
 
-$[B,3,4,512,16,16]
-\rightarrow
-[B,3,1,512,16,16]$
+9 月 4 日记录的正式版本为 **v16**，训练 SHA `f3fba13f5e0585885209dc27539dcf2b3f6600a2`，H200-2、8 卡，顺序 Z96→Z24→Z48，每组 40k updates。记录中 Z96 健康检查覆盖四模式；这不代表三组已经完成。早期 BS384、temporal FP32、LPIPS checkpoint 等失败或测速版本不作为正式三组结果混入。
 
-`single_frame` 路径不复制输入，不加入四帧 temporal position，不调用四帧 temporal attention，也不调用 `4D→D` sampler；StereoFusion 输出直接进入独立的 `LayerNorm(D)→Linear(D,D)→LayerNorm(D)` projection。两条路径随后共享 posterior head，并都输出一个 temporal latent slot。
+交付每组的最终 checkpoint、实际 samples、Stage A scorecard、encoder/decode 延迟、显存与训练 samples/s。相同 grid/dtype 下，Z24 和 Z96 的 latent 标量数分别是 Z48 的 0.5 倍与 2 倍；这只说明表示容量，不能等同于端到端速度或编码文件码率。
 
-训练数据合同仍保持结构化 `T=4` cache。训练按 `generator_updates` 严格 1:1 交替：偶数 optimizer update 运行 `four_frame`，奇数 optimizer update 从显式配置的 `single_frame_source_index` 截取 `T=1` 并运行 `single_frame`。同一 gradient accumulation window 内 `generator_updates` 不变，因此模式不会混合。
+### 5.2 输入因果对照：S48 / M48 / D48
 
-### 3\.5 VAE Posterior
+| 实验 | UMI student 输入 | StereoFusion | 要回答的问题 |
+| --- | --- | --- | --- |
+| S48-correct | `(L,R)` | 执行 | 正确双目基线 |
+| M48-left-only | `L`，三视角 `E=1` | 跳过 | 单目学生在相同监督下的表现 |
+| D48-same-left-trained | `(L,L)` | 执行 | 双路结构本身的贡献 |
 
-Posterior Head 分别预测 48 通道 $\mu$ 和 48 通道 $\log\sigma^2$，通过重参数化得到与 LingBot\-VA 接口对齐的 48 通道 latent：
+三者的 UMI teacher 必须先读取真实 `(L,R)` 生成相同监督，之后才改变 student 输入。Hy/LIBERO 路径保持一致。S 对 D 主要检验真实右眼信息收益，D 对 M 帮助区分双路结构影响；S 对 M 给出整体差异。
 
-$Z\in\mathbb{R}^{B\times3\times48\times1\times16\times16}$
+9 月 4 日记录的 H200-1 **v3** 使用 SHA `7372ab97097ab97827e7054bd86d9173e9f4f2df`，M48→D48 串行、每组 40k updates，batch 与第 4 节一致。已有记录只证明 M48 开始更新，D48 待前者正常结束。**正式因果结论仍需补训本轮同合同 S48**；历史 update-44k 或 H200-2 不同 manifest 的 Z48 都不能替代。
 
-这里的 16×16 是最终 VAE latent grid，不是下游 DiT token grid。
+推理时对 S48 做 SameRGB 干预与 D48 从零训练是不同实验；如纳入报告，必须分别标注，不沿用旧计划中容易混淆的 A/B/C 缩写。
 
-训练 forward 从 posterior 采样 $z=\mu+\sigma\epsilon$；validation、推理和 checkpoint 一致性测试固定使用 posterior mean $\mu$。Tokenizer 对外输出 raw latent，不在模型内部应用下游专用的 scale、mean 或 std normalization；若下游需要 normalization，必须基于冻结训练数据统计另行定义并版本化。
+### 5.3 Loss 消融与后续架构选择
 
-三个视角保留独立的 latent 槽位：
+loss 消融保留为后续工作：以同合同基线逐项检查几何监督、LPIPS/GAN 对 RGB、几何和 latent 下游可用性的影响。具体去除项、是否重训、预算和验收阈值尚未冻结，不在本计划中宣称已启动。
 
-```Plain Text
-Z
-├── Z_head
-├── Z_left_wrist
-└── Z_right_wrist
-```
+先完成 latent 与输入对照，再依据量化结果决定是否调整 fusion、decoder 或引入新结构。任何新结构需建立单变量实验，避免同时改变数据、容量、损失和 GAN 阶段后归因。
 
-### 3\.6 Shared Decoder
+## 6. 评测与验收
 
-解码时将三个视角合并到 batch，使用共享 Decoder 并行恢复：
+### 6.1 Gate A：Tokenizer 本体
 
-$[B,3,48,1,16,16]
-\rightarrow
-[B\times3,48,1,16,16]$
+使用 `python -m evaluation.tokenizer_stage_a` 的 `selection → preflight → run/benchmark → report` 流程。指标定义以[统一评测标准](Stereo%20Tokenizer统一评测标准.md)为准，冻结 checkpoint SHA256、数据身份、preprocessing、teacher/RAFT 资产、精度、seed、posterior 模式与输出版本。
 
-Shared Decoder 将三个视角作为 batch 并行处理。`four_frame` 先执行 `D→4D` expansion、四帧 learned position 和双向 temporal attention；`single_frame` 只执行独立 `D→D` expansion，并跳过所有四帧 temporal 模块。两条路径共享 Spatial Decoder、RGB Head 和 disparity Head。
+| 维度 | 当前指标/实施边界 |
+| --- | --- |
+| RGB | L1、PSNR、SSIM、LPIPS；明确 raw/clamped 和 content crop 口径 |
+| 四帧时间质量 | temporal-delta L1/LPIPS、flow warp、static flicker、motion consistency；总体与 01/12/23 相邻帧分别报告 |
+| 几何 | teacher-relative log-L1/RMSE/SILog、temporal geometry consistency、coverage 与有效样本数 |
+| Rate | latent shape、元素/字节数、时间压缩率，说明输入视角数与 dtype |
+| Speed | encoder、decoder、端到端延迟 p50/p95，吞吐、显存；训练另报 samples/s 和 GPU-hours |
+| 待补齐 | single-frame rFID 的冻结实现及正式运行 |
 
-$[B\times3,512,1,16,16]$
+mono 评测的 DA3 几何口径为原图与重建图的 teacher 对照；stereo 使用 LAS2-H target 与 student geometry head，不得把两者统一解释为真实深度准确率。
 
+新增 RAFT 时间指标已有代码，但 9 月 4 日记录仍缺正式 PyTorch/GPU 验证。先通过对应合成测试和真实数据 preflight，再对所有候选使用同一新版本重跑；旧报告不能补列为空后称已完成新标准。
 
+Hy selection 复用 production manifest/Lance reader，显式记录 Table014 排除和剩余 table 覆盖，排除后 identity join 缺失应失败。不同 selection 或不同排除范围的分数不能直接比较。
 
-PR #3 后两个 Head 均按 frame token 独立输出一帧 patch。因此同一组 Head 可按所选 temporal branch 输出 1 帧或 4 帧：
+当前不纳入原生四帧 rFVD/FVMD、真实 GT disparity EPE/D1/depth accuracy、右眼重建一致性和缺少标注的语义区域拆分。不要复制/插值扩帧去凑视频指标输入。teacher-relative 指标只能说明与教师的一致性。
 
-$\text{RGB Head}:\operatorname{Linear}(512,3\times16\times16)\rightarrow[B,3,3,T,256,256]$
+### 6.2 Gate B/C：下游验收
 
-$\text{Disparity Head}:\operatorname{Linear}(512,1\times16\times16)
-\rightarrow\operatorname{softplus}(d_{\mathrm{raw}})+\epsilon
-\rightarrow\times s_{\mathrm{disp}}
-\rightarrow[B,3,1,T,256,256],\qquad T\in\{1,4\}$
+Gate B 冻结 Tokenizer，在相同数据、latent 使用合同、下游容量和训练预算下比较轻量 WAM 的未来状态与动作预测；Gate C 沿用正式 WAM checkpoint，做 RoboTwin 完整任务闭环 rollout。
 
+两阶段按统一标准冻结目标仓库完整 SHA、真实实例化模型大小、horizon、action/replan 合同、rollout 数与随机种子。当前仓库的 Stage A 完成不等于 Gate B/C 完成；若实际目标环境只有 LIBERO，需先确定与 RoboTwin 标准的范围关系。
 
+### 6.3 完成门槛
 
-RGB 和 disparity 共享 Decoder Transformer，但不拼成统一 4\-channel 输出，分开的原因如下：
+1. 训练完整退出，checkpoint 可严格加载，loss/参数有限，实际 per-mode updates/samples 达到约定预算，配置与数据/teacher 哈希齐全。
+2. 消融仅有预期差异；同一 selection 下覆盖所有数据源和模式，记录坏样本、排除和指标 coverage。
+3. 本体 scorecard 同时交付质量、表示容量、训练/推理效率；几何结论保持 teacher-relative 边界。
+4. 不预设尚未确认的 L1、百分比收益或速度阈值。数值验收阈值须在正式比较前冻结，不能观察结果后选择。
+5. 下游结果独立验收；只有相应 Gate 实际完成后，才声明具备对应下游收益证据。
 
-1. 直接复用成熟 RGB Head；
+## 7. 执行顺序与交付物
 
-2. Disparity Head 可使用独立初始化，并可在后续 ablation 中单独替换为 MLP、卷积细化或残差结构，而不扰动 RGB 路径。
+| 优先级 | 工作 | 交付物 |
+| --- | --- | --- |
+| P0 | 在获准检查时确认现有消融进度、失败原因、最终 checkpoint 与直接 counters | 三组 latent、M/D 的完整状态表；缺失项明确列出 |
+| P1 | 完成 Stage A 新时间指标的运行时门禁，冻结共同 selection | 可复现 preflight 与版本一致的质量/性能报告 |
+| P1 | 补齐同合同 S48，并完成 S/M/D 比较 | 真实双目信息与结构贡献结论 |
+| P2 | 冻结 loss 消融、补齐 single-frame rFID | 独立受控实验与完整本体 scorecard |
+| P2 | 选择 checkpoint，冻结下游代码、ABI 与预算，执行 Gate B/C | 离线 WAM 与闭环任务报告 |
 
-3. 两者值域、统计分布和输出约束不同，分 Head 能避免把 RGB normalization 强加给 disparity
+本次更新只重写计划，不启动或调整服务器任务，不生成数据、下载资产或提交代码。每次正式实验沿用仓库的运行记录要求；服务器绝对路径、tmux、launch hash 与详细异常保留在对应日期记录中。
 
-4. 便于分别监控梯度、定位几何分支失败并做仅改变 Disparity Head 的公平 ablation。
+## 8. 实现与记录索引
 
+- [模型与训练输入](../stereo_tokenizer/model.py)、[Encoder](../stereo_tokenizer/modules/stereo_encoder.py)、[Decoder](../stereo_tokenizer/modules/stereo_decoder.py)、[StereoFusion](../stereo_tokenizer/modules/stereo_fusion.py)。
+- [relative-depth 语义](../stereo_tokenizer/modules/relative_depth.py)、[损失归约](../stereo_tokenizer/modules/stereo_losses.py)、[在线教师](../stereo_tokenizer/online_gt.py)。
+- [三源 DataLoader](../stereo_tokenizer/pretrain_data.py)、[四模式采样](../stereo_tokenizer/mode_sampling.py)、[当前 launcher](../scripts/stereo/train_stereo_vae.sh)、[checkpoint 管理](../stereo_tokenizer/training/checkpoints.py)。
+- [Stage A 入口](../evaluation/tokenizer_stage_a.py)、[指标实现](../evaluation/stage_a/metrics.py)、[统一评测标准](Stereo%20Tokenizer统一评测标准.md)。
+- [mono 联合视角与历史 smoke](../docs/26-09-03/26-09-03-mono-joint-view-training.md)。
+- [latent 消融各版本与 v16 启动记录](../docs/26-09-04/26-09-04-latent-channel-ablation.md)。
+- [单双目消融与 v3 启动记录](../docs/26-09-04/26-09-04-stereo-input-ablation.md)。
+- [Stage A 指标裁剪](../docs/26-09-04/26-09-04-stage-a-metric-pruning.md)、[时间指标与 Hy 路径](../docs/26-09-04/26-09-04-stage-a-temporal-metrics-and-hy.md)。
 
-
-Disparity Head 的 bias 不在扫描数据前写死。完成 train split disparity 统计后，根据最终 normalization scale 和典型 disparity 初始化，使初始 `softplus+bias` 输出处于训练分布的合理位置；RGB Head 继续沿用 OmniTokenizer 的结构与初始化规则。Shared Decoder 不执行下游 DiT 的 patchify 或 unpatchify。
-
-每个视角均输出对应左相机参考系下的 RGB 和 disparity：
-
-```Plain Text
-Head        → Head-left RGB + disparity
-Left wrist  → Left-wrist-left RGB + disparity
-Right wrist → Right-wrist-left RGB + disparity
-```
-
-### 3\.7 Stereo OmniTokenizer 编解码完整数据流
-
-```Plain Text
-[B,3,2,3,4,256,256]
-→ Shared Spatial Encoder
-→ [B,3,2,4,512,16,16]
-→ StereoFusion
-→ [B,3,4,512,16,16]
-→ Temporal Encoder
-→ [B,3,1,512,16,16]
-→ VAE Posterior
-→ [B,3,48,1,16,16]
-→ Shared Decoder
-├→ RGB Head       [B,3,3,4,256,256]
-└→ Disparity Head [B,3,1,4,256,256]
-→ Calibration conversion
-→ Depth            [B,3,1,4,256,256]（仅派生/评估）
-```
-
-### 3\.8 Tokenizer 输出 ABI 与下游责任边界
-
-Stereo OmniTokenizer 的输出接口冻结为：
-
-$Z\in\mathbb{R}^{B\times3\times48\times1\times16\times16}$
-
-
-
-下游世界模型可以参考 LingBot\-VA 对该 VAE latent 使用 `(1,2,2)` patchify。以下内容只用于说明接口兼容关系，不属于本仓库 Stereo OmniTokenizer 的实现、配置或验收范围：
-
-$[B,3,48,1,16,16]
-\rightarrow
-[B,3,1,8,8,192]
-\rightarrow
-[B,3,1,8,8,d_{\mathrm{DiT}}]$
-
-
-
-其中：
-
-$192=C_z\times p_t\times p_h\times p_w
-=48\times1\times2\times2$
-
-
-
-具体排列与投影合同为：
-
-```Plain Text
-B, V, C_z, (T·1), (H·2), (W·2)
-→ B, V, T, H, W, (C_z·1·2·2)
-→ Linear(192, d_DiT)
-```
-
-
-
-如果下游第一版关闭 Cross\-view Attention，可以将 View 合并到 batch，而不是把三个视角拼入同一条 self\-attention sequence：
-
-$[B,3,1,8,8,d_{\mathrm{DiT}}]
-\rightarrow
-[B\times3,64,d_{\mathrm{DiT}}]$
-
-
-
-每个下游 DiT token 覆盖 2×2 个 VAE latent，对应输入图像上约 32×32 像素。对于三个视角、1 个 temporal latent slot，Cross\-view Attention 关闭时共有三条独立的 64\-token sequence，而不是一条 192\-token sequence。Stereo OmniTokenizer 只负责输出 `[B,3,48,1,16,16]`，不提供上述 patchify、投影或 attention 模块。
-
-## 4\. StereoFusion
-
-### 4\.1 输入成立条件
-
-输入左右图必须预先完成 stereo rectification，使同一物理点在左右图中位于同一 token row。StereoFusion 对每个视角、每个时刻独立执行，完成后才进入 Temporal Encoder。
-
-对左 token $F_L(t,y,x)$，只收集右特征：
-
-$F_R(t,y,x-\delta),\qquad \delta\in[0,w]$
-
-越过图像边界的候选由 Attention mask 排除。标准 rectification 下，正视差通常满足：
-
-$x_R=x_L-d$
-
-### 4\.2 水平 Cross\-Attention
-
-左特征生成 Query，右侧水平候选生成 Key 和 Value。每个 Attention head 只在水平候选窗口内计算：
-
-$a_\delta
-=
-\operatorname{softmax}_\delta
-\left(
-\frac{q^Tk_\delta}{\sqrt{d_h}}
-+b_\delta+M_\delta
-\right)$
-
-其中：
-
-- $b_\delta$ 是可学习的 disparity\-offset bias；
-
-- $M_\delta$ 是越界候选 mask；
-
-- $d_h=64$ 是单个 Attention head 的维度。
-
-匹配到的右目特征为：
-
-$F_{\mathrm{match}}
-=
-\sum_\delta a_\delta v_\delta$
-
-### 4\.3 Attention sharpness 与残差融合（门控）
-
-根据 Attention entropy 定义匹配 sharpness。对位置 $(v,y,x)$，令 $K_{\mathrm{valid}}(v,x)$ 为同时满足该视角搜索范围和图像边界的有效候选数，只在有效候选上计算：
-
-$c
-=
-\begin{cases}
-1-\dfrac{H(a)}{\log K_{\mathrm{valid}}}, & K_{\mathrm{valid}}>1\\
-1, & K_{\mathrm{valid}}=1
-\end{cases}$
-
-纹理重复、遮挡或无法可靠匹配的区域通常具有更均匀的 Attention 分布，因此 sharpness 更低。该量是模型内部 attention 分布的尖锐程度，不表述为经过标定的概率置信度。边界位置不能固定使用 $\log(w+1)$，否则无效候选会造成系统性偏差；$K_{\mathrm{valid}}=1$ 时按上式显式定义，避免除以 $\log1=0$。
-
-融合结果为：
-
-$\Delta F_L=W_oF_{\mathrm{match}}$
-
-$F_{\mathrm{fused}}
-=
-F_L+\alpha c\Delta F_L$
-
-第一版明确采用以下初始化：
-
-- 输出投影 $W_o$ 使用正常随机初始化；
-
-- 可学习 gate $\alpha$ 初始化为 0。
-
-因此训练开始时 StereoFusion 近似左目直通，之后再逐渐学习右目贡献。本文不再采用“$\alpha$ 或输出 projection 零初始化”的不确定表述。用于 gate 的 sharpness $c$ 在乘入残差前执行 `detach`；Attention 仍通过匹配特征路径学习，但不能仅通过主动压低 entropy 来放大 gate。
-
-### 4\.4 搜索范围
-
-StereoFusion 运行在宽度为 16 的 OmniTokenizer feature grid 上，因此 token\-space 搜索范围必须满足：
-
-$0\le w\le15$
-
-
-
-第一版三个视角共享同一个结构容量上限：
-
-$w_{\max}=15,\qquad K_{\max}=w_{\max}+1=16$
-
-
-
-每个 StereoFusion 水平 token offset 对应约 16 个输入像素。若 rectification 后某个视角 $v$ 的训练数据需要覆盖的最大像素视差为 $d_{\max,v}^{\mathrm{pixel}}$，该视角运行 mask 按下式换算：
-
-$w_v
-=
-\min\left(15,\left\lceil\frac{d_{\max,v}^{\mathrm{pixel}}}{16}\right\rceil\right)$
-
-当前 100 MCAP 工程 pilot 冻结 `w_v=(7,7,7)`，三个视角均使用 offsets `[0,1,2,3,4,5,6,7]`，即 `K=8`。权重仍只共享一套，三个视角分别构造边界 valid mask；这里三个数据范围恰好相同，不改变“分视角 mask”的实现合同。
-
-## 5\. 输出与几何转换
-
-### 5\.1 正 Disparity
-
-模型先预测 normalized disparity，并通过 `softplus` 保证为正：
-
-$\tilde d
-=
-\operatorname{softplus}(d_{\mathrm{raw}})+\epsilon$
-
-
-
-根据 train split 扫描冻结的 normalization scale $s_{\mathrm{disp}}$ 恢复 256×256 输出坐标中的 pixel disparity：
-
-$\hat d=s_{\mathrm{disp}}\tilde d$
-
-
-
-$\epsilon$ 用于防止 disparity 为 0，避免后续计算 depth 时发生除零。若扫描后决定不做额外 normalization，则显式设置 $s_{\mathrm{disp}}=1$；不能省略该 resolved\-config 字段。
-
-### 5\.2 Metric Depth
-
-模型不设置独立 Depth Head。对于每条样本，根据对应左相机的投影参数和 stereo baseline，将预测 disparity 转换为 metric depth：
-
-$\hat D
-=
-\frac{f_xB}{\hat d}$
-
-其中：
-
-- $f_x$ 是 rectified left camera 的水平焦距；
-
-- $B$ 是该双目相机的 metric baseline；
-
-- $\hat d$ 是以像素为单位的预测 disparity。
-
-$f_x$、$B$ 和 disparity 必须处于相互一致的分辨率与尺度下。图像缩放到 256×256 后，必须同步更新投影矩阵或焦距，不能直接使用缩放前的 $f_x$。
-
-### 5\.3 输出定义
-
-模型直接输出：
-
-$\hat I_L\in\mathbb{R}^{B\times3\times3\times4\times256\times256}$
-
-$\hat d_L\in\mathbb{R}^{B\times3\times1\times4\times256\times256}$
-
-由标定参数派生：
-
-$\hat D_L\in\mathbb{R}^{B\times3\times1\times4\times256\times256}$
-
-需要统一 RGBD 张量时，在通道维拼接 RGB 与派生 depth：
-
-$\operatorname{concat}(\hat I_L,\hat D_L)
-\in
-\mathbb{R}^{B\times3\times4\times4\times256\times256}$
-
-## 6\. 训练监督与 Loss
-
-### 6\.1 GT 生成合同
-
-以下流程属于训练监督合同，不绑定具体数据路径、MCAP 数量或存储规模：
-
-```Plain Text
-六路视频解码与同步
-→ 每组双目立体矫正
-→ FoundationStereo 生成左视角 disparity GT
-→ 生成 valid/confidence mask
-→ 写入训练索引或缓存
-```
-
-FoundationStereo 只负责离线生成 disparity 训练标签。训练不需要单独生成或缓存 depth GT。模型推理时只使用左右 RGB、必要的标定参数以及训练得到的 Stereo VAE；评估需要 metric depth 时，根据 disparity 和标定参数即时计算。
-
-### 6\.2 OmniTokenizer 原有 Loss
-
-保留与 RGB/VAE 训练有关的 OmniTokenizer Loss：
-
-- RGB reconstruction loss；
-
-- LPIPS；
-
-- image/video GAN loss；
-
-- feature matching loss；
-
-- KL loss。
-
-GAN 和 LPIPS 只作用于 RGB，不作用于 disparity。从零训练时使用 KL warmup；GAN 在重建稳定后按训练 gate 启用。
-
-### 6\.3 Masked Disparity Loss
-
-设 $M_p$ 为像素 $p$ 的有效 mask，GT normalized disparity 为 $\tilde d_p^{GT}=d_p^{GT}/s_{\mathrm{disp}}$。Masked SmoothL1 定义为：
-
-$L_{\mathrm{disp}}
-=
-\frac{
-\sum_pM_p\operatorname{SmoothL1}(\tilde d_p,\tilde d_p^{GT})
-}{
-\sum_pM_p+\epsilon
-}$
-
-该 Loss 直接监督模型的 disparity 输出。
-
-多视角聚合时，先对每个视角分别按该视角的有效像素数归一化，再对三个视角等权平均；不能把三个视角的所有有效像素直接混合成一个全局分母。若任一视角在一个训练 batch 中完全没有有效像素，当前第一版 fail closed 并报告数据/采样问题，不静默跳过该视角。
-
-### 6\.4 Disparity Geometry Gradient Loss
-
-使用小权重 masked disparity gradient loss 约束物体边界和局部几何连续性：
-
-$L_{\nabla}
-=
-\frac{
-\sum_pM_p^{\nabla}
-\left|
-\frac{\nabla d_p}{s_{\nabla}}-
-\frac{\nabla d_p^{GT}}{s_{\nabla}}
-\right|_1
-}{
-\sum_pM_p^{\nabla}+\epsilon
-}$
-
-其中 $M^{\nabla}$ 要求参与差分的相邻像素均有效。Gradient Loss 使用 pixel disparity 的差分并显式除以独立的 `geometry_gradient_scale_px`；当前工程 pilot 冻结为 16 px。它不复用 disparity reconstruction 的 128 px normalization scale，也不对 depth 计算 gradient Loss。$\lambda_{\nabla}$ 保持小权重，在短 calibration run 前不写死具体数值。
-
-Gradient Loss 同样先分别汇总每个视角的水平与垂直有效相邻像素并归一化，再对三个视角等权平均。
-
-### 6\.5 总 Loss
-
-总 Loss 为：
-
-$L
-=
-L_{\mathrm{Omni\text{-}original}}
-+\lambda_{\mathrm{disp}}L_{\mathrm{disp}}
-+\lambda_{\nabla}L_{\nabla}$
-
-所有 disparity Loss 都只在有效 mask 内计算，并使用有效元素数量归一化。训练不包含 log\-depth Loss、depth reconstruction Loss 或 depth gradient Loss。$\lambda_{\mathrm{disp}}$、$\lambda_{\nabla}$、disparity normalization scale 和 Disparity Head 初始化必须按第 8 节的数据扫描与 Loss calibration gate 冻结。
-
-KL 保留 OmniTokenizer 的元素求和口径：每个 sample、每个视角对 `[48,1,16,16]` 的全部 latent 元素求和，得到 `[B,V]`，再对 $B\times V$ 取平均。KL 不按 latent 元素数求均值，其最终 warmup 和权重必须按这一口径 calibration。
-
-### 6\.6 第一版训练 Batch 与确定性 Core Loss 合同
-
-训练核心最少接收：
-
-```Plain Text
-video       [B,3,E,3,4,256,256]  RGB，范围由 preprocessing resolved config 冻结
-disparity   [B,3,1,4,256,256]    最终 256×256 坐标中的 pixel disparity
-valid_mask  [B,3,1,4,256,256]    bool
-```
-
-A 使用 `E=1` 或在 `E=2` 输入中只读取左目；B 使用 `E=2`；C 只在评估时把右目替换为左目，不作为训练 mode。训练核心根据 checkpoint/resolved config 中逐视角保存的 $s_{\mathrm{disp},v}$ 将 pixel disparity GT 转为 normalized reconstruction target；gradient 分支直接使用 pixel disparity 并除以独立的 `geometry_gradient_scale_px`。
-
-确定性 core loss 只组合 RGB reconstruction、masked disparity、masked disparity gradient 和 KL。LPIPS、image/video GAN 与 feature matching 作为显式的训练阶段项保留在 core loss 之外，其启用 gate 和权重在 Pilot 冻结前不得通过隐藏默认值生效。
-
-## 7\. 实验设计
-
-### 7\.1 实验总览
-
-|实验|是否训练|输入|StereoFusion|用途|
-|---|---|---|---|---|
-|A：Monocular baseline|是|三个视角的左 RGB|否|测量无右图时的单目重建与深度能力|
-|B：Stereo OmniTokenizer|是|三个视角的正确左右 RGB|是|测量完整双目方案的收益|
-|C：B\-SameRGB|否|将 B 的右输入替换为对应左 RGB|使用 B 原模块|验证 B 是否真正依赖双目视差|
-
-### 7\.2 A
-
-A 只输入三个视角的左 RGB，不输入右 RGB，也不使用 StereoFusion。其有效输入可表示为：
-
-$[B,3,3,4,256,256]$
-
-A 使用与 B 相同的输出定义、latent shape、共享 Decoder 和监督目标，用于回答：
-
-> 在没有右图和双目视差的情况下，当前 VAE 能够通过纹理、尺度和场景先验学习到多少深度信息？
->
->
-
-### 7\.3 B
-
-B 输入同步且完成 rectification 的正确左右 RGB，通过 Shared Spatial Encoder 和 StereoFusion 将右图几何信息写入左参考 latent，最终输出左视角 RGB 和 disparity，并派生 metric depth。
-
-B 用于回答：
-
-> 在相同训练条件下，加入正确右图和 StereoFusion 后，是否比 A 获得更准确、更稳定的几何表征？
->
->
-
-### 7\.4 C
-
-C 不训练新模型，直接复用 B checkpoint。推理时将：
-
-$(I_L,I_R)$
-
-替换为：
-
-$(I_L,I_L)$
-
-该操作保持两路输入的场景语义、颜色和纹理接近，同时移除真实左右相机之间的视差。
-
-如果 C 的 depth/disparity 质量相对 B 明显下降，而 RGB 重建变化较小，说明 B 确实使用了右图几何信息。如果 C 与 B 几乎没有差异，则说明模型可能主要依赖左图单目线索，或 StereoFusion 没有将右图信息有效写入 latent。
-
-### 7\.5 公平比较条件
-
-A 和 B 必须保持以下条件一致：
-
-- 相同的 MCAP/轨迹级数据划分；
-
-- 相同的训练 sample 数、epoch 数和 optimizer step 口径；
-
-- 相同的图像分辨率和 clip 定义；
-
-- 相同的 latent shape；
-
-- 相同的 Decoder；
-
-- 相同的 RGB 和 disparity 监督目标；depth 只作为派生评估量；
-
-- 相同的 Loss 定义和权重；
-
-- 相同的优化器、scheduler 和主要训练超参数；
-
-- 相同的 validation/test 样本及指标实现。
-
-A 与 B 的参数量、FLOPs、训练吞吐和推理延迟需要分别记录，不能将模型质量提升与额外计算开销混在一起判断。
-
-## 8\. 训练前数据准备、扫描与参数冻结
-
-正式数据的准备包含 Manifest、数据盘点、同步检查、预处理、双目矫正、FoundationStereo GT 生成、质量过滤、数据划分、统计扫描以及 Loss calibration，执行顺序固定如下。当前工程 pilot 的已完成状态和正式 split 例外单列于第 8.2 节。
-
-
-
-```Plain Text
-冻结数据与预处理合同
-→ 扫描原始数据
-→ 六路视频完整性与同步检查
-→ resize/letterbox 与标定参数同步变换
-→ stereo rectification
-→ FoundationStereo 生成 disparity/confidence
-→ 保存 raw confidence，执行不依赖训练统计的确定性 valid mask 与质量过滤
-→ 按 episode/trajectory 划分 train/validation/test
-→ 生成并冻结 Manifest
-→ 只扫描 train split 计算统计量
-→ 确定 confidence threshold、最终 valid mask 与其他数据相关参数
-→ 短 calibration run
-→ 冻结 Loss 权重与 Disparity Head 初始化
-→ 输出 resolved config 和数据版本产物
-```
-
-### 8\.1 数据与 Sample 合同
-
-当前每个 sample 使用连续同步的 4 帧，不保留 anchor：
-
-
-
-```Plain Text
-3 个安装视角
-× 每个视角 Left/Right
-× 4 帧
-× RGB
-```
-
-
-
-输入张量为 `[B,3,2,3,4,256,256]`。当前工程 pilot 的相邻采样帧间隔为 0.1 秒，4 个时间戳的首尾差为 0.3 秒，对应半开 sample 窗口 `[t,t+0.4s)`；相邻 sample 起点间隔 0.4 秒且不重叠。训练只打乱 sample，sample 内 4 帧保持时间顺序。episode/trajectory 结尾不足 4 帧的部分直接丢弃，不补帧，也不跨边界拼接。
-
-
-
-以下合同必须在扫描与 GT 生成前冻结：
-
-
-
-- 最终输入分辨率和 resize/letterbox 方法；
-
-- 数据 FPS 与抽帧规则；
-
-- `clip_length=4`、`frame_interval_s=0.1`、`sample_stride_s=0.4`；
-
-- 六路视频同步容差和缺帧处理；
-
-- stereo rectification 方法和搜索方向约定；
-
-- 标定参数缩放、padding 和坐标系变换方式；
-
-- FoundationStereo 版本、checkpoint 和 resolved config；
-
-- disparity、confidence、valid mask 的 dtype、单位、压缩和缓存格式；
-
-- episode/trajectory 级 train/validation/test 划分规则；
-
-- 质量过滤规则及 reason code。
-
-### 8\.2 当前 100 MCAP 工程 Pilot
-
-当前 pilot 扫描 100 个 MCAP、约 22.94 分钟，源六路视频约 30 FPS。3415 个初始候选中移除 2 个同步失败 sample 和 6 个引用不可解码帧的 sample，Manifest v2 最终包含 3407 个 `pilot_train` sample；六路最大同步误差为 12.975 ms，低于 20 ms 门限。H.264 完整性审计和缺帧后解码序号修复均已完成。
-
-图像预处理固定为 `640×480 → resize 256×192 → top/bottom padding 32 → 256×256`，对应 `resize_size=[192,256]`（H,W）和 `padding_ltrb=[0,32,0,32]`。原始 H.264 已完成 stereo rectification，不重复应用 `R`。内参取 `camera_info.P`，baseline 为 `-P_right[0,3]/P_right[0,0]`，正 disparity 定义为 `x_left-x_right>0`。
-
-FoundationStereo cache 已完成 3407/3407，保存 `disparity_left`、`lr_error_px`、`base_valid_mask`，其单 sample shape 均为 `[4,3,256,256]`，并保存 `fx`、`baseline_m` 和版本元数据。Batch 边界必须统一转置并增加 channel 轴为 `[B,3,1,4,256,256]`；不缓存 depth GT。
-
-最终 mask 为：
-
-```Plain Text
-content_mask
-& base_valid_mask
-& isfinite(disparity)
-& isfinite(lr_error_px)
-& (0.5 <= disparity <= 112.0)
-& (lr_error_px <= max(1.0, 0.05 * disparity))
-```
-
-不合格 disparity 直接 mask，不 clamp 后监督。当前 mask 保留全部视角 89.91% 的 base-valid 像素；Head、Left-wrist、Right-wrist 分别为 93.48%、95.96%、80.57%。训练按视角记录 valid ratio 和 loss；某个 sample-view 覆盖率较低时仍保留其 RGB 与其他视角监督，但若整个 batch 的某一视角完全没有有效像素则 fail closed。
-
-当前已由 pilot 扫描冻结的数据参数为：`disparity_normalization_scale=128.0`、`disparity_head_bias=-2.572`、`geometry_gradient_scale_px=16.0`、`stereo_fusion_w=7`、offsets `[0..7]`、disparity 有效范围 `[0.5,112.0]`、LR threshold `max(1.0,0.05d)`。其中 bias 对应 `d=128×(softplus(raw)+eps)` 和全局有效 disparity median 9.42 px。
-
-### 8\.3 Manifest 与数据划分
-
-正式数据按照 90%/5%/5% 划分为 train、validation 和 test。划分必须在 episode/trajectory 或完整 MCAP 级完成，不能先生成 clips 再随机分配。当前工程 pilot 只有 `pilot_train`，smoke-32 和 overfit-128 也是固定训练子集；它们不运行或汇报 validation。训练接口仅在提供独立 validation Manifest 后，才在每个 epoch 末完整遍历一次。
-
-
-
-每条 sample 建议至少记录：
-
-
-
-- `sample_id`；
-
-- `episode_id` / `trajectory_id`；
-
-- `split`；
-
-- 4 帧时间戳；
-
-- 六路视频路径及帧索引；
-
-- 三组 stereo calibration 引用；
-
-- resize/letterbox 参数；
-
-- resize 后的 $f_x,f_y,c_x,c_y$ 和 baseline；
-
-- disparity GT 引用；
-
-- confidence/valid mask 引用；
-
-- FoundationStereo 版本与 resolved config 标识；
-
-- 预处理版本和数据版本；
-
-- 质量检查状态及过滤原因。
-
-
-
-Manifest 级产物必须包含：
-
-
-
-- train/validation/test episode 数和 sample 数；
-
-- 被过滤 sample 数及原因分布；
-
-- Manifest hash；
-
-- 数据版本、预处理版本和标定版本；
-
-- FoundationStereo 版本与配置标识。
-
-
-
-### 8\.4 Train Split 完整数据扫描
-
-统计只能使用冻结 Manifest 的 train split，并且 Head、Left\-wrist、Right\-wrist 三组相机分别统计：
-
-
-
-- 原始数据数量、时长、FPS、缺帧率；
-
-- 六路视频同步误差；
-
-- 可形成完整 4 帧 sample 的比例；
-
-- resize 后 $f_x$、baseline 及其分布；
-
-- disparity 的 min、mean、std、p1、p5、p50、p95、p99、p99\.9、max；
-
-- near\-zero、极端大 disparity 和异常值比例；
-
-- confidence 分布；
-
-- valid mask 覆盖率；
-
-- 遮挡、越界和低置信度比例；
-
-- 水平、垂直 disparity gradient 的 mean、p50、p95、p99；
-
-- 相邻像素同时有效的 gradient\-valid ratio；
-
-- 不同视角、场景和时间段之间的分布差异；
-
-- resize 前后图像、disparity、$f_x$ 和 baseline 的尺度一致性。
-
-
-
-统计产物必须保留全局汇总和分视角结果，不能只保留一个混合均值。异常 sample 应保留 `sample_id` 和过滤 reason code，便于回看原始六路视频、rectification 和 FoundationStereo 输出。
-
-
-
-### 8\.5 由数据扫描确定的参数
-
-以下参数不能在扫描 train split 前写死：
-
-
-
-- disparity normalization scale $s_{\mathrm{disp}}$；
-
-- Disparity Head 的初始 bias；
-
-- StereoFusion 实际搜索范围 $w$；
-
-- FoundationStereo confidence threshold；
-
-- valid mask 规则；
-
-- disparity 异常值过滤或裁剪范围；
-
-- geometry gradient 的尺度参数；
-
-- 每个 epoch 的 sample 数和 optimizer steps。
-
-
-
-### 8\.6 Loss Calibration
-
-数据扫描只能确定 target 尺度，不能完整确定 disparity Loss 相对 RGB、LPIPS、KL、GAN 的训练影响。统计完成后必须运行短 calibration：
-
-
-
-- 暂不加权记录 RGB、LPIPS、KL、disparity、gradient Loss；
-
-- 记录各 Loss 的 mean、p50、p95；
-
-- 记录各 Loss 对 Shared Decoder、RGB Head、Disparity Head 的 gradient norm；
-
-- 记录每个 batch 的有效 disparity 像素数量；
-
-- 检查三个视角是否存在 Loss、有效像素或梯度严重不平衡；
-
-- 检查 Disparity Head 初始输出是否覆盖合理数值范围且无 NaN/Inf。
-
-
-
-完成后再冻结：
-
-
-
-- $\lambda_{\mathrm{disp}}$；
-
-- $\lambda_{\nabla}$；
-
-- $s_{\mathrm{disp}}$；
-
-- Disparity Head bias 和其他初始化参数。
-
-
-
-$\lambda_{\nabla}$ 必须保持小权重。完成数据扫描和 calibration 前，文档及正式训练配置不写猜测性数值。
-
-
-
-### 8\.7 数据更新后的重扫规则
-
-任何数据变化后都必须重新生成 Manifest，并至少重新计算统计和分布漂移报告。以下变化必须重新扫描并重新运行 Loss calibration：
-
-
-
-- 相机、baseline 或焦距变化；
-
-- 输入分辨率或 resize/letterbox 变化；
-
-- 新增不同任务或场景域；
-
-- FoundationStereo 版本或 checkpoint 变化；
-
-- confidence/valid mask 生成逻辑变化；
-
-- disparity 或 gradient 分布明显变化；
-
-- RGB/Disparity Head 或输出归一化方式变化。
-
-
-
-如果只是同分布数据扩容，可以重新生成 Manifest、重算统计并与旧版本比较；在预先冻结的漂移判据内没有明显变化时，可以复用原 Loss 参数。每个训练版本必须同时保存：
-
-
-
-- Manifest hash；
-
-- 数据版本；
-
-- 预处理版本；
-
-- 标定版本；
-
-- FoundationStereo 版本；
-
-- 数据统计文件；
-
-- Loss calibration 报告；
-
-- resolved config。
-
-
-
-Manifest、统计文件、calibration 报告或 resolved config 任一缺失，都不能进入全量训练。
-
-
-
-## 9\. 性能与验收指标
-
-### 9\.1 数据与 GT 验收
-
-- 六路视频可按合同同步；
-
-- 每组双目 rectification 后对应点位于同一行；
-
-- disparity 方向和尺度正确；
-
-- 缩放到 256×256 后的投影参数与图像一致；
-
-- valid/confidence mask 能排除遮挡、越界和低置信度区域；
-
-- 由 disparity GT 与标定即时派生的 metric depth 单位和数值范围正确；
-
-- manifest 数量、划分和版本可复现。
-
-### 9\.2 模型闭环验收
-
-- 原 `OmniTokenizer` 主类改为 Stereo-only，legacy image-mode 和旁路 `StereoTokenizer` 均不保留；
-
-- `four_frame` shape 为 `4 raw frames→T=4 bidirectional attention→1 latent slot→4 reconstructed frames`；
-
-- `single_frame` shape 为 `1 raw frame→single projection→1 latent slot→1 reconstructed frame`，且不得调用或伪装成四帧 temporal 路径；
-
-- 训练按 optimizer update 严格交替，同一 accumulation window 不混合模式，checkpoint resume 后由恢复的 `generator_updates` 选择正确的下一模式；
-
-- 所有中间 shape 与本文合同一致；
-
-- 单独验证 OmniTokenizer 空间链路 `256×256→16×16`，不得出现旧版 32×32 VAE grid；
-
-- Spatial positional encoding 固定为 RoPE，不允许运行配置静默回退到当前 relative-bias 路径；
-
-- 单独验证 VAE posterior 为 `[B,3,48,1,16,16]`；
-
-- 训练默认采样 posterior，validation/推理默认使用 posterior mean；对外 latent 为未额外缩放的 raw latent；
-
-- 验证 Tokenizer 对外只暴露 `[B,3,48,1,16,16]` latent ABI，源码、配置和 checkpoint 中不包含下游 DiT patchify/unpatchify 或 $d_{\mathrm{DiT}}$；
-
-- RGB Head 输出 `[B,3,3,T,256,256]`，Disparity Head 输出 `[B,3,1,T,256,256]`，其中 `T=1|4`，两者最后 projection 参数不共享；
-
-- disparity 始终为正且无 NaN/Inf；
-
-- disparity 与 gradient Loss 分视角归一化后等权平均；任一视角无有效监督时 fail closed；
-
-- StereoFusion sharpness gate 使用 detached confidence，匹配特征路径仍可反向传播；
-
-- 右图信息只能通过 StereoFusion 和 VAE latent 到达 Decoder；
-
-- checkpoint 能够严格保存和恢复；
-
-- 恢复后固定输入输出一致；
-
-- A、B、C 使用同一套评估实现。
-
-### 9\.3 训练性能记录
-
-- images/s/GPU；
-
-- clips/s/GPU 和 global clips/s；
-
-- optimizer step time；
-
-- dataloader wait time；
-
-- validation time；
-
-- checkpoint time；
-
-- 峰值显存；
-
-- GPU 利用率；
-
-- 1/2/4/8 卡扩展效率；
-
-- A/B 参数量和 FLOPs。
-
-### 9\.4 推理性能记录
-
-- Shared Spatial Encoder 延迟；
-
-- StereoFusion 延迟；
-
-- Temporal Encoder 延迟；
-
-- VAE posterior 和 Decoder 延迟；
-
-- 下游 DiT patchify、Transformer 主干和 unpatchify 不属于本项目实现，也不计入 Stereo OmniTokenizer 编解码延迟；
-
-- 总延迟 p50/p95；
-
-- clips/s；
-
-- 峰值显存；
-
-- batch size 和计算精度；
-
-- A/B/C 使用的 checkpoint 和 resolved config。
-
-### 9\.5 第一轮效果检查
-
-- RGB 结构和颜色能否清晰重建；
-
-- disparity 方向和相对大小是否正确；
-
-- depth 前后关系和 metric scale 是否合理；
-
-- 物体边缘是否清楚；
-
-- wrist、夹爪和被操作物体是否混在一起；
-
-- B 是否优于 A；
-
-- 将 B 的右图替换为左图后，C 的几何质量是否明显退化；
-
-- C 的 RGB 重建是否相对稳定。
-
-如果小规模实验不能证明 B 使用了右图，应停止进入全量训练，优先检查同步、rectification、disparity 符号、StereoFusion 搜索范围、gate 梯度和右图信息是否真正写入 latent。
-
-## 10\. 实施阶段
-
-### 10\.1 数据合同与 Manifest
-
-- 按第 8 节冻结字段、同步容差、`clip_length=4`、`clip_stride=4`、标定与预处理合同；
-
-- 在 episode/trajectory 级完成 train/validation/test 划分并生成 Manifest；
-
-- 只扫描 train split，生成统计文件、数据相关参数和分布报告；
-
-- 未生成 Manifest hash、统计文件和 resolved preprocessing config 时停止，不进入训练。
-
-### 10\.2 FoundationStereo GT Pilot
-
-- 先对小规模样本生成 disparity、confidence 和 valid mask；
-
-- 检查方向、尺度、遮挡区域、valid ratio，以及由 disparity 即时派生的 depth 是否合理；
-
-- 验证后再生成 disparity/confidence/valid\-mask 缓存，不缓存 depth GT。
-
-### 10\.3 模型与训练闭环
-
-- 实现 `[B,3,2,3,4,256,256]` 六路 4 帧输入；
-
-- 将 OmniTokenizer spatial patch size 设为 16，冻结 VAE/Tokenizer 的 16×16 空间接口；
-
-- 实现共享 Spatial/Stereo 主干以及独立 single/four temporal branch；four 路径保留 PR #3 的双向 temporal attention，single 路径显式跳过四帧 temporal 模块；
-
-- 将 VAE posterior latent channels 设为 48；
-
-- 实现 Shared Spatial Encoder、StereoFusion、Temporal Encoder、48\-channel VAE posterior 和共享 Decoder；
-
-- Dataset/cache 仍为结构化 `T=4`；模型显式接受 `T=1|4`，训练从 `T=4` batch 中按配置截取 current 帧；
-
-- Tokenizer 只输出 `[B,3,48,1,16,16]` latent，不实现或配置下游 DiT patchify/unpatchify；
-
-- Shared Decoder 最后使用逐帧 patch head：`Linear(512, 3*16*16)` RGB Head 和 `Linear(512, 1*16*16)` Disparity Head；
-
-- Disparity Head 使用独立 bias、normalization scale 和 `softplus+epsilon`，其初始化由 train split 扫描结果冻结；
-
-- 实现标定驱动的 depth 即时转换，但不加入 depth Loss；
-
-- 实现 A/B/C 配置；
-
-- 完成 shape、forward/backward、数值稳定性和严格 checkpoint 测试。
-
-### 10\.4 小数据过拟合
-
-- 分别对 A 和 B 运行小样本过拟合；
-
-- 在 B checkpoint 上执行 C SameRGB 干预；
-
-- 确认 RGB 和 disparity 能拟合且不输出平均结果，并检查派生 depth 的 metric scale；
-
-- 确认 B 的正确左右输入优于 C 的 SameRGB 输入。
-
-### 10\.5 Pilot
-
-- 使用覆盖三个视角的代表性子集训练 A 和 B；
-
-- 测量 Loss、梯度、显存、训练吞吐和 checkpoint；只有提供独立 validation Manifest 后才测量 validation；
-
-- 冻结 StereoFusion 搜索范围、Loss 权重、micro batch、gradient accumulation 和训练 gate；
-
-- 使用实测数据更新独立的 FLOPs、速度与训练时长文档。
-
-### 10\.6 全量训练
-
-- A 和 B 使用相同数据划分、训练周期、Decoder、latent、监督和评估合同；
-
-- C 不训练；
-
-- 每个 epoch 结束后运行 1 次完整 validation；
-
-- 每个 epoch 保存 checkpoint；
-
-- 最终 checkpoint 必须包含完整配置、数据 manifest 标识和成功完成标记。
-
-### 10\.7 评估与交付
-
-- 在相同 test 样本上运行 A、B 和 C；
-
-- 整理 RGB、disparity、depth、valid mask 和 error map；
-
-- 回答 B 是否优于 A，以及移除真实双目视差后 C 是否相对 B 退化；
-
-- 提交 checkpoint、resolved config、manifest、指标、可视化和性能记录。
-
-## 11\. 已冻结与仍待 Pilot 冻结的参数
-
-当前 100 MCAP 工程 pilot 已冻结以下数据参数；它们只对 Manifest v2 有效，正式数据到位后必须重新生成 Manifest、GT 与统计并复核：
-
-- disparity normalization scale $s_{\mathrm{disp}}=128.0$；
-
-- Disparity Head raw bias `-2.572`；
-
-- StereoFusion `w_v=(7,7,7)`、offsets `[0..7]`；
-
-- disparity 搜索方向为 left query 向 right feature 的负 x 方向搜索；
-
-- LR consistency threshold `max(1.0 px,0.05d)`；
-
-- 第 8.2 节 final valid mask；
-
-- disparity 有效范围 `[0.5,112.0]`，mask 而非 clamp；
-
-- geometry gradient scale `16.0 px`。
-
-以下训练参数仍须由 smoke/overfit、Loss calibration 或 Pilot gate 冻结：
-
-- $\lambda_{\mathrm{disp}}$ 和小权重 $\lambda_{\nabla}$；
-
-- KL warmup 长度与目标权重；
-
-- GAN 启用 gate 和权重；
-
-- 每卡 micro batch 和 gradient accumulation；
-
-- A/B 的最终多卡资源安排；
-
-- dataloader 缓存格式和读取配置。
+若历史 README 或实验早期章节与本基线冲突，应回到当前源码及该实验最后一次明确生效的合同核对；例如旧版“mono 单视角”“各模式 batch 必须相等”和早期 LPIPS/FP32 诊断配置均不作为本计划的现行配置。
