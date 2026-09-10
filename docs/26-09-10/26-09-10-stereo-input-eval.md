@@ -53,3 +53,17 @@ Fusion confidence/attention entropy 仅适用于执行 fusion 的模型，不进
 GPU0 总显存10417 MiB（含原任务），GPU1–7 保持原占用5719 MiB。
 实际主选择为128 episodes、1019 windows：127 episodes各8个，1个仅3个有效窗口；
 按既定方案不重复补足，三臂共用这1019个窗口，episode聚合仍等权。
+
+## 修复空监督与共享中心
+
+v2 正式评测在第33 batch退出（exit1）。样本6068356d9ee6a5ab3f2d1836d5dd2946:000468
+右手source2有效像素0，其余视角仍有效。根因为逐view切分后调用中心化函数，
+同时错误地将原始三视角共享中心改为各视角独立中心。v1/v2几何分数作废，文件保留。
+
+修复：完整sample三视角按原函数中心化，再逐view统计。单view无监督时几何为null，
+记录geometry_evaluable/geometry_coverage/geometry_valid_pixels；整sample无监督也标记null。
+RGB独立计分，任何预测NaN/Inf仍直接失败。配对统计跳过null但不把它当0；
+episode内先各view/source平均，再view等权，避免缺失监督改变视角权重。
+三模型共享target/mask，shift族共用内区mask，保持一致的评测支持集。
+增加共享中心、单view空mask、全sample空mask及缺失值配对统计测试。
+修复后使用v3新输出，从同一固定样本选择重跑，不覆盖旧输出。

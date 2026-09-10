@@ -11,6 +11,34 @@ spec.loader.exec_module(exp)
 
 
 class ExperimentTests(unittest.TestCase):
+    def test_geometry_uses_shared_three_view_center(self):
+        raw=torch.tensor([0.,1.,2.]).reshape(1,3,1,1,1,1).expand(1,3,1,1,4,4)
+        batch={'teacher_kind':['da3'],'da3_relative_depth':torch.ones_like(raw),
+            'valid_mask':torch.ones_like(raw,dtype=torch.bool)}
+        result=exp.geometry_metrics(batch,raw,1e-6)[0]
+        self.assertEqual([v['relative_log_l1'] for v in result],[1.,0.,1.])
+        batch['valid_mask'][:,2]=False
+        result=exp.geometry_metrics(batch,raw,1e-6)[0]
+        self.assertEqual([v['relative_log_l1'] for v in result],[.5,.5,None])
+        self.assertEqual(result[2]['geometry_evaluable'],0.)
+        batch['valid_mask'].zero_()
+        result=exp.geometry_metrics(batch,raw,1e-6)[0]
+        self.assertTrue(all(v['relative_log_l1'] is None for v in result))
+
+    def test_missing_depth_does_not_remove_rgb_or_unbalance_views(self):
+        rows=[]
+        for model,offset in [('S48',0),('M48',1)]:
+            for view,values in [('head',[1.,1.]),('hand',[3.,None])]:
+                for value in values:
+                    rows.append(dict(dataset='umi',model=model,condition='correct',mode='four_frame',
+                        view=view,episode_id='e',metrics={'relative_log_l1':None if value is None else value+offset,'rgb_l1':.2}))
+        report=exp.paired_summary(rows,100)
+        s=next(r for r in report['scorecard'] if r['model']=='S48')
+        self.assertEqual(s['metrics']['relative_log_l1'],2.)
+        self.assertEqual(s['metrics']['rgb_l1'],.2)
+        paired=next(r for r in report['paired'] if r['metric']=='relative_log_l1')
+        self.assertEqual(paired['difference'],-1.)
+
     def test_shifts_do_not_wrap_or_modify_left(self):
         video=torch.arange(2*3*2*3*4*4*80).reshape(2,3,2,3,4,4,80).float()
         original=video.clone()

@@ -95,8 +95,17 @@ def paired_summary(rows, draws=2000):
         family = 'single_frame' if row['mode'].startswith('single') else 'four_frame'
         group = (row['dataset'], row['model'], row['condition'], family)
         for key, value in row['metrics'].items():
-            groups[group][(row['episode_id'], key)].append(value)
-    means = {g: {k: float(np.mean(v)) for k, v in data.items()} for g, data in groups.items()}
+            if value is not None:
+                groups[group][(row['episode_id'], key, row.get('view','all'), row['mode'])].append(value)
+    means = {}
+    for group, data in groups.items():
+        per_view=defaultdict(list)
+        for (episode,metric,view,mode),values in data.items():
+            per_view[(episode,metric,view)].append(float(np.mean(values)))
+        per_episode=defaultdict(list)
+        for (episode,metric,view),values in per_view.items():
+            per_episode[(episode,metric)].append(float(np.mean(values)))
+        means[group]={key:float(np.mean(values)) for key,values in per_episode.items()}
     scorecard = []
     for group, data in means.items():
         metrics = {}
@@ -160,24 +169,68 @@ def slice_view(batch, i, v):
             else value for k, value in batch.items()}
 
 
-def sample_metrics(batch, out, i, v, lpips, epsilon, rgb_only=False):
+def geometry_metrics(batch, raw, epsilon):
+    """Center across the original views, then score each supervised view."""
+    if not torch.isfinite(raw).all():
+        raise ValueError('nonfinite depth prediction')
+    results=[]
+    for i in range(len(raw)):
+        b={k:value[i:i+1] if isinstance(value,torch.Tensor) else value for k,value in batch.items()}
+        valid=b['valid_mask']
+        error=None
+        if valid.any():
+            target=runtime._relative_target_from_batch(b,epsilon).relative_log_depth
+            prediction,_=native.relative_prediction_from_raw(raw[i:i+1],valid)
+            error=prediction-target
+        views=[]
+        for v in range(raw.shape[1]):
+            mask=valid[0,v]; count=int(mask.sum())
+            values={'relative_log_l1':None,'relative_log_rmse':None,'relative_log_silog':None,
+                'geometry_valid_pixels':count,'geometry_coverage':count/mask.numel(),
+                'geometry_evaluable':float(count>0)}
+            if count:
+                e=error[0,v][mask].double()
+                values.update(relative_log_l1=float(e.abs().mean()),
+                    relative_log_rmse=float(e.square().mean().sqrt()),
+                    relative_log_silog=float((e.square().mean()-e.mean().square()).clamp_min(0).sqrt()))
+            views.append(values)
+        results.append(views)
+    return results
+
+
+def sample_metrics(batch, out, i, v, lpips, epsilon, rgb_only=False, geometry=None):
     b = slice_view(batch, i, v)
     o = SimpleNamespace(rgb=out.rgb[i:i+1, v:v+1],
                         raw_relative_log_depth=out.raw_relative_log_depth[i:i+1, v:v+1])
-    # Regression uses the same metric implementation; geometric results are discarded.
-    if rgb_only:
-        b['da3_relative_depth'] = torch.ones_like(o.raw_relative_log_depth)
-        b['valid_mask'] = torch.ones_like(o.raw_relative_log_depth, dtype=torch.bool)
-    accum = native.empty_accumulator(out.rgb.device, 1)
-    native.update_metrics(accum, b, o, epsilon, lpips, metric_frame_microbatch=4)
-    values = native.finalize_metrics(accum, ('view',))
-    flat = {k: val for k, val in values.items() if isinstance(val, float)}
+    # RGB metrics have no dependency on depth supervision availability.
+    prediction=o.rgb.float(); target=b['video'][:,:,0].float()
+    if 'non_padding_mask' in b:
+        mask=b['non_padding_mask'].reshape(-1,*prediction.shape[-2:]).bool()
+        assert torch.equal(mask,mask[:1].expand_as(mask))
+        positions=mask[0].nonzero(); lo=positions.min(0).values; hi=positions.max(0).values+1
+        assert int(mask[0].sum())==int((hi-lo).prod())
+        prediction=prediction[...,lo[0]:hi[0],lo[1]:hi[1]]
+        target=target[...,lo[0]:hi[0],lo[1]:hi[1]]
+    p=native._flatten_rgb_frames(prediction); t=native._flatten_rgb_frames(target)
+    mse=(p-t).square().mean((1,2,3))
+    flat={'rgb_l1':float((p-t).abs().mean()),
+        'rgb_psnr_db_global':float(-10*mse.mean().clamp_min(1e-12).log10()),
+        'rgb_psnr_db_frame_mean':float((-10*mse.clamp_min(1e-12).log10()).mean()),
+        'rgb_ssim_frame_mean':float(native._ssim_sum(p,t,4)/len(p)),
+        'rgb_lpips_frame_mean':float(native._lpips_sum(lpips,p*2,t*2,4)/len(p))}
+    if prediction.shape[3]>1:
+        pd=native._flatten_rgb_frames(prediction[:,:,:,1:]-prediction[:,:,:,:-1])
+        td=native._flatten_rgb_frames(target[:,:,:,1:]-target[:,:,:,:-1])
+        flat['temporal_delta_l1']=float((pd-td).abs().mean())
+        flat['temporal_delta_lpips_frame_mean']=float(native._lpips_sum(lpips,pd,td,4)/len(pd))
     if not rgb_only:
-        flat.update({k: val for k, val in values['views']['view'].items() if isinstance(val, float)})
+        if geometry is None:
+            geometry=geometry_metrics(batch,out.raw_relative_log_depth,epsilon)
+        flat.update(geometry[i][v])
     latent = out.latent[i, v].float()
     flat['latent_variance'] = float(latent.var(unbiased=False))
     flat['rgb_out_of_range'] = float(((o.rgb < -.5) | (o.rgb > .5)).float().mean())
-    if not all(math.isfinite(x) for x in flat.values()):
+    if not all(x is None or math.isfinite(x) for x in flat.values()):
         raise ValueError('nonfinite metric')
     return flat
 
@@ -309,9 +362,10 @@ def evaluate(opt, args, models, dataset_name, phase, episodes, windows, conditio
                             'warmup':3,'repeats':5,'p50_ms_per_sample':float(np.median(timings)),
                             'p95_ms_per_sample':float(np.quantile(timings,.95)),
                             'shared_gpu':True,'caveat':'latency affected by co-tenant workload'}))
+                    geometry=None if teacher is None else geometry_metrics(score_batch,out.raw_relative_log_depth,args.relative_depth_epsilon)
                     for i, sid in enumerate(batch['sample_id']):
                         for v, view in enumerate(VIEWS[dataset_name]):
-                            values = sample_metrics(score_batch, out, i, v, model.perceptual_model, args.relative_depth_epsilon, teacher is None)
+                            values = sample_metrics(score_batch, out, i, v, model.perceptual_model, args.relative_depth_epsilon, teacher is None, geometry)
                             values['forward_ms_per_sample'] = latency
                             if out.fusion is not None:
                                 attention=out.fusion.attention[i,v].float()
