@@ -33,3 +33,18 @@ shift 分数使用共同内区，另记录 RGB 边界误差；time_reverse 仅 f
 评测进程限制为 GPU 总显存的15%，约21 GiB，避免对共用任务造成大幅显存挤占。
 Fusion confidence/attention entropy 仅适用于执行 fusion 的模型，不进入 M48 缺失指标的
 配对比较；共有指标仍严格要求相同 episode 集合。
+
+## 正式启动
+
+代码 SHA `249b58a3085b59ad6a990faefd08d6159739a7bc`，本机/远端源码同步，
+训练实现相对原 S48 启动代码无差异。H200-1 定向测试 5/5 通过。
+第二版 smoke exit0：UMI 16 windows + Hy4 + LIBERO4，共2988条记录，
+逐条指标有限，UMI16个 target checksum 各自跨模型/条件唯一。
+184个主对照指标 CI、235个扰动指标 CI 已生成，RGB/深度固定样例和 shift 曲线均存在。
+峰值 allocated 3.404 GiB，UMI 主体56.54秒、Hy6.42秒、LIBERO4.05秒。
+
+2026-09-10 10:05:55 CST 正式启动：tmux `stereo-eval-full-h2001-20260910`。
+输出：`/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v2/full`。
+日志：`/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v2/full.log`。
+退出标记：同根 `full.exit_code.txt`。预计主体25–40分钟，报告计算再约1–2分钟，
+共用 GPU 负载可能改变实际耗时。正式结果不使用 smoke 指标。
