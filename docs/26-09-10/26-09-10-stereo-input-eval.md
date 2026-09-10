@@ -48,3 +48,8 @@ Fusion confidence/attention entropy 仅适用于执行 fusion 的模型，不进
 日志：`/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v2/full.log`。
 退出标记：同根 `full.exit_code.txt`。预计主体25–40分钟，报告计算再约1–2分钟，
 共用 GPU 负载可能改变实际耗时。正式结果不使用 smoke 指标。
+
+10:07:32 CST 一次健康检查：main 已到19/255 batches，峰值 allocated 3.181 GiB，
+GPU0 总显存10417 MiB（含原任务），GPU1–7 保持原占用5719 MiB。
+实际主选择为128 episodes、1019 windows：127 episodes各8个，1个仅3个有效窗口；
+按既定方案不重复补足，三臂共用这1019个窗口，episode聚合仍等权。
