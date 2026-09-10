@@ -76,3 +76,7 @@ v3 smoke exit0、2988条记录、所有可评测指标有限，16个UMI样本tar
 tmux `stereo-eval-full-v3-h2001-20260910`；输出根改为
 `/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v3`。
 新旧main selection逐项完全一致，仍为1019 windows，未剔除失败样本。
+
+10:26:46 CST 正式健康检查到52/255 batches，已越过旧故障点33，session活跃，
+峰值allocated3.181GiB。原故障sample/source2/righthand在三模型中均写入几何null、
+有效像素0，RGB指标正常，target checksum一致。预计剩余约25–35分钟，含诊断与报告。
