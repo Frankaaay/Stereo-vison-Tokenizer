@@ -67,3 +67,12 @@ episode内先各view/source平均，再view等权，避免缺失监督改变视�
 三模型共享target/mask，shift族共用内区mask，保持一致的评测支持集。
 增加共享中心、单view空mask、全sample空mask及缺失值配对统计测试。
 修复后使用v3新输出，从同一固定样本选择重跑，不覆盖旧输出。
+
+修复 SHA `70ce093`，H200-1 定向测试7/7通过。实际失败样本缓存mask回归通过：
+source2有效像素38768/8896/0，前两视角可计分，右手几何为null。
+独立合成数据检查 RGB/temporal 指标与原公式差异小于1e-5。
+v3 smoke exit0、2988条记录、所有可评测指标有限，16个UMI样本target哈希跨条件一致，
+峰值allocated3.404GiB。2026-09-10 10:23:27 CST 重启正式评测。
+tmux `stereo-eval-full-v3-h2001-20260910`；输出根改为
+`/data/home/frank/experiments/stereo-input-eval-h2001-20260910-v3`。
+新旧main selection逐项完全一致，仍为1019 windows，未剔除失败样本。
