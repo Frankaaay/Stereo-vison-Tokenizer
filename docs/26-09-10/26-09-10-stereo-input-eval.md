@@ -31,3 +31,5 @@ shift 分数使用共同内区，另记录 RGB 边界误差；time_reverse 仅 f
 峰值 allocated 3.404 GiB、主体 56.96 秒，失败日志为空。输出 v1 保留。
 补充回归 smoke、深度样例、完整性断言和扰动配对 CI 后使用 v2 输出根。
 评测进程限制为 GPU 总显存的15%，约21 GiB，避免对共用任务造成大幅显存挤占。
+Fusion confidence/attention entropy 仅适用于执行 fusion 的模型，不进入 M48 缺失指标的
+配对比较；共有指标仍严格要求相同 episode 集合。

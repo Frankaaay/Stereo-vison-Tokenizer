@@ -112,10 +112,10 @@ def paired_summary(rows, draws=2000):
                 b = means.get((dataset, right, 'correct', mode), {})
                 if not a or not b:
                     continue
-                if set(a) != set(b):
-                    raise ValueError('unpaired episode metrics')
-                for metric in sorted({k[1] for k in a}):
+                for metric in sorted({k[1] for k in a}&{k[1] for k in b}):
                     keys = sorted(k for k in a if k[1] == metric)
+                    if keys != sorted(k for k in b if k[1] == metric):
+                        raise ValueError('unpaired episode metrics')
                     delta = np.array([a[k] - b[k] for k in keys])
                     rng = np.random.default_rng(1234)
                     samples = delta[rng.integers(0, len(delta), (draws, len(delta)))].mean(1)

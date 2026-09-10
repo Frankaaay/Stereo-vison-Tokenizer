@@ -50,6 +50,7 @@ class ExperimentTests(unittest.TestCase):
             for model,offset in [('S48',0),('M48',1),('D48',2)]:
                 rows.append(dict(dataset='umi',model=model,condition='correct',mode='four_frame',
                     episode_id=str(episode),metrics={'relative_log_l1':float(episode+offset)}))
+                if model=='S48': rows[-1]['metrics']['fusion_confidence']=.5
         report=exp.paired_summary(list(reversed(rows)),100)
         result=next(x for x in report['paired'] if x['comparison']=='S48-M48')
         self.assertEqual(result['difference'],-1)
