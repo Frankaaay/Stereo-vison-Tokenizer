@@ -23,3 +23,15 @@
   `sha256_file(__file__)` supplied str where Path was required. Fixed to Path;
   retained v1 logs, restart at `stereo-latent-eval-h2002-20260908-v2`.
   Use localhost rendezvous for this single-node job to avoid hostname resolution delay.
+- v2 code: `18ac10c2d4a51364e8e36ec3231c3010705b7867`; tmux
+  `latent-eval-20260908-v2`. All three 8-GPU smokes passed, each with 32 identical
+  samples per model and five temporal settings; JSON results are readable and finite.
+- Full native test inventory: Hy 133,467 windows, LIBERO 1,828 two-view windows,
+  UMI 38,810 windows. These are H200-2 counts, not historical H200-1 counts.
+- Full LIBERO health snapshot: rank 0 at batch 31/58, 38.10 seconds elapsed;
+  steps 11--31 took 23.16 seconds. All eight GPUs active, approximately 20,303 MiB
+  device memory each; no traceback/OOM/ValueError. Full UMI and Hy follow automatically.
+- Initial all-dataset ETA is 2--4 hours, extrapolated conservatively from LIBERO
+  and one-batch Hy/UMI smokes; their full-run throughput is not yet measured.
+- The user-owned unreviewed plan remains untouched. This final status addition is
+  kept locally; the running evaluation stays on the code SHA above.
