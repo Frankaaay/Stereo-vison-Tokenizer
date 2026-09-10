@@ -10,8 +10,9 @@ flowchart TD
     C --> Z["Posterior → latent<br/>每组 C48 × K × 16 × 16"]
     Z --> W["Wan normalization<br/>各组 latent → DiT / WAM"]
     Z --> D["Wan decoder stem + middle + stage 0、1<br/>64×64 / C1024 / T"]
-    D --> R["Wan decoder stage 2、3 + RGB head<br/>unpatchify → 256×256 RGB"]
-    D --> G["Depth：轻量 CNN<br/>64² → 128² → 256²"]
+    D --> F["共享 Wan decoder stage 2、3<br/>128×128 / C256 / T"]
+    F --> R["原始 RGB head：C256 → C12<br/>unpatchify → 256×256 RGB"]
+    F --> G["新增 depth head：C256 → C4<br/>unpatchify → 256×256 relative log-depth"]
     W --> S["Semantic：latent 直接分支<br/>16² 网格 / C192 / 3 层 Transformer<br/>输出 K 个时间位置的 C768 特征"]
 ```
 
@@ -19,7 +20,7 @@ flowchart TD
 
 从 Wan2.2 TI2V-5B 的 VAE 权重开始训练，保留完整 encoder、posterior 和 RGB decoder，增加两处 V1 式 StereoFusion，以及深度、语义两个辅助头。
 
-RGB 重建保留图像细节，双目融合引入几何信息。Depth 从 RGB decoder 的 64×64 特征接出；semantic 从下游使用的归一化 latent 直接接出，通过小型 Transformer 学习容易读出的语义。两条监督路径均经过 latent，无 encoder skip。
+RGB 重建保留图像细节，双目融合引入几何信息。Depth 与 RGB 共享完整 Wan decoder，仅末端输出头独立；semantic 从下游使用的归一化 latent 直接接出，通过小型 Transformer 学习容易读出的语义。两条监督路径均经过 latent，无 encoder skip。
 
 当前结构按相机组独立编码、共享权重，跨组交互交给下游 DiT/WAM；视角 merge 的最终位置仍列为待讨论项。
 
@@ -58,9 +59,10 @@ RGB 重建保留图像细节，双目融合引入几何信息。Depth 从 RGB de
 | --- | --- |
 | post-latent 投影 → stem → ResBlock / Attention / ResBlock | `1024 × 5 × 16 × 16` |
 | stage 0：残差块 + 时空上采样 | `1024 × 9 × 32 × 32` |
-| stage 1：残差块 + 时空上采样；depth 接点 | `1024 × 17 × 64 × 64` |
+| stage 1：残差块 + 时空上采样 | `1024 × 17 × 64 × 64` |
 | stage 2：残差块 + 空间上采样 | `512 × 17 × 128 × 128` |
-| stage 3 → RMS norm / SiLU / RGB 输出卷积 | `12 × 17 × 128 × 128` |
+| stage 3：RGB / depth 共享特征 | `256 × 17 × 128 × 128` |
+| 原始 RGB head：RMS norm → SiLU → 输出卷积 | `12 × 17 × 128 × 128` |
 | 2×2 unpatchify | `3 × 17 × 256 × 256` |
 
 保留 encoder 每级 2 个、decoder 每级 3 个残差块，以及原始上下采样残差、patch 排列、因果卷积和首帧缓存逻辑。RGB loss 使用未 clamp 的输出。
@@ -83,7 +85,14 @@ confidence 来自 attention entropy，alpha 零初始化。两层 fusion 参数�
 
 ### 5.1 相对深度
 
-从 RGB decoder 的 `decoder.upsamples[1]` 输出接出，轻量 CNN 经通道投影和 `64² → 128² → 256²` 上采样，输出单通道 relative log-depth。具体宽度和残差块数待定。
+与 RGB 共享完整 Wan decoder，从最后一级残差特征 `[B,V,256,T,128,128]` 接出独立输出头：
+
+```text
+RMSNorm → SiLU → CausalConv3d（3×3×3，256→4）
+→ Wan 2×2 unpatchify → [B,V,1,T,256,256]
+```
+
+原始 RGB head 及权重保持不变。Depth 输出为无界的 raw relative log-depth，不加 sigmoid 或正值约束；两种损失共同训练共享 decoder。
 
 监督沿用 [V1 relative depth](../stereo_tokenizer/modules/relative_depth.py)：mono 使用 DA3 的 `log(depth)`；stereo 使用 LAS2-H 的 `log(fx × baseline / disparity)`。每个 view 先在有效时间、空间像素上求均值，再对有效 view 等权求共同 sample center；目标和预测分别按此规则去中心。
 
@@ -137,6 +146,6 @@ RGB、LPIPS 和几何监督沿用 V1。KL 约束 raw posterior，权重按新的
 ## 7. 待确定
 
 - 视角 merge 最终放在 tokenizer 还是 DiT；语义监督是否采用 PE。
-- Fusion 搜索半径与分头数、depth CNN 宽度/层数、K 个 latent 位置与 T 帧语义目标的时间对应方式。
+- Fusion 搜索半径与分头数、K 个 latent 位置与 T 帧语义目标的时间对应方式。
 - 视频采样间隔、单双目及单帧/视频比例、loss 权重和阶段切换标准。
 - 权重版本与哈希、学习率、batch/GA、训练预算及三层评测的具体指标。
