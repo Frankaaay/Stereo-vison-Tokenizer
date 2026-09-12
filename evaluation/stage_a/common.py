@@ -72,18 +72,24 @@ class _FrozenRAFT:
     def __call__(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         if first.shape != second.shape or first.ndim != 4 or first.shape[1] != 3:
             raise ValueError("RAFT inputs must be matching [N,3,H,W] tensors")
-        if first.shape[-2] % 8 or first.shape[-1] % 8:
-            raise ValueError("RAFT input height and width must be divisible by 8")
+        height, width = first.shape[-2:]
+        # RAFT's correlation pyramid needs at least 128 pixels per dimension.
+        # Pad only the inference input: never resize the metric coordinate system.
+        pad_h = max(128, (height + 7) // 8 * 8) - height
+        pad_w = max(128, (width + 7) // 8 * 8) - width
         outputs = []
         for start in range(0, first.shape[0], self.microbatch):
             end = min(first.shape[0], start + self.microbatch)
             first_batch, second_batch = self.transforms(
                 first[start:end].float(), second[start:end].float()
             )
+            if pad_h or pad_w:
+                first_batch = torch.nn.functional.pad(first_batch, (0, pad_w, 0, pad_h), mode="replicate")
+                second_batch = torch.nn.functional.pad(second_batch, (0, pad_w, 0, pad_h), mode="replicate")
             predictions = self.model(first_batch, second_batch)
             if not isinstance(predictions, list) or not predictions:
                 raise RuntimeError("RAFT did not return iterative flow predictions")
-            outputs.append(predictions[-1].float())
+            outputs.append(predictions[-1].float()[..., :height, :width])
         return torch.cat(outputs, dim=0)
 
     def provenance(self) -> dict[str, object]:
@@ -96,6 +102,7 @@ class _FrozenRAFT:
             "microbatch": self.microbatch,
             "precision": "fp32",
             "flow_unit": "content-crop pixels",
+            "spatial_adapter": "replicate_pad_bottom_right_to_multiple8_min128_then_crop_flow; no_resize",
             "static_flow_max_px": STATIC_FLOW_MAX_PX,
             "dynamic_flow_min_px": DYNAMIC_FLOW_MIN_PX,
             "forward_backward_relative_threshold": FLOW_FB_RELATIVE_THRESHOLD,

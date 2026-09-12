@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT=/gpfs/jiuquyun/projects/Frank/stereo-vae
 REPO=$ROOT/Stereo-vison-Tokenizer
 PY=$ROOT/runtime/wan22-eval-20260911/bin/python
-OUT=$ROOT/outputs/wan22-ganoff124k-20260911-v2
+OUT=$ROOT/outputs/wan22-ganoff124k-20260911-v3
 OLD=/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a
 ASSETS=/gpfs/jiuquyun/checkpoints/Frank/stereo-vae
 export TORCH_HOME=$ASSETS/runtime-assets/torch
@@ -43,7 +43,7 @@ for cam in head_left head_right left_wrist_left left_wrist_right right_wrist_lef
 done
 run_cell umi stereo umi-stereo "$OLD/20260902-stagec-update162500-baseline-v1/selections/umi-canonical-test-1024-seed1234.json"
 for cam in head_left left_wrist_left; do
-    run_cell libero mono "libero-$cam" "$OUT/libero-original256-action-false.json" --stage-a-camera-key "observation.images.cam_$cam"
+    run_cell libero mono "libero-$cam" "$ROOT/outputs/wan22-ganoff124k-20260911-v2/libero-original256-action-false.json" --stage-a-camera-key "observation.images.cam_$cam"
 done
 run_cell hy mono hy-threeview "$ROOT/outputs/wan22-ganoff124k-20260911-v1/hy-all-test-excluding-table014.json" \
   --hy_root_aliases '{"hy_primary":"/gpfs/jiuquyun/datasets/PRETRAIN_DATA/Hy-Embodied-0.5-VLA-Data"}'

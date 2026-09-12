@@ -17,4 +17,11 @@
 - 用户授权 action 全部 false。在 Frank 输出目录 wan22-ganoff124k-20260911-v2 创建独立 mapping/config；field action=false、20项element action=false；相机映射与图像mask资产保持相同。共享原始配置未修改。
 - v2/libero-original256-action-false.json 保留256个窗口所有非配置字段及顺序，仅更换配置路径/SHA，记录原selection/mapping SHA和修复来源；不能声称selection文件哈希未变化。
 - 启动脚本改用v2输出和修复后的LIBERO selection，Hy仍指向v1冻结的180975窗口selection，不重新抽样。bash -n、git diff --check通过；修复后的512个camera-window解码验证通过前不启动GPU重试。
+- 修复commit 5bbc295，已push并同步H100。CPU Job 5308实际逐一解码两个LIBERO相机各256窗口，均DECODE_PASS，sacct COMPLETED/0:0。
+- 旧依赖作业5233已取消并由sacct确认。新smoke Job 5309已RUNNING（1 H100），正式Job 5310（1 H100/normal/48小时）依赖afterok:5309。
+- 一次健康检查显示新smoke已完成前两个UMI cell，峰值allocated约4.14 GiB。此时尚未完成整套GPU smoke，不能报告正式评测已执行。
+- 5309随后完成UMI 7项及LIBERO 2项，在Hy的RAFT内容裁剪推理中因高宽非8倍数失败，5310依赖不满足。
+- 定向修复 _FrozenRAFT：推理输入仅在底部/右侧replicate padding到8倍数且至少128像素（RAFT correlation pyramid要求）；输出光流裁回原内容尺寸，不resize、不缩放flow向量、不修改RGB/mask/窗口身份。新协议记录在flow provenance；原已满足尺寸的输入计算路径不变。
+- 新增不规则尺寸、原生整除尺寸、低于128尺寸和microbatch边界的坐标保持测试。静态py_compile、bash -n、diff检查通过；GPU smoke尚待执行。
+- 新输出目录v3；继续引用v2的LIBERO action=false selection和v1的Hy全部窗口selection，保留旧失败证据。
 - checkpoint/环境/源代码哈希与原 selection 证据见前一日准备记录。结果未生成前不报告模型质量优劣。

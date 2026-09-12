@@ -5,6 +5,29 @@ import torch
 
 from evaluation.wan.adapter import WanReconstructor
 from evaluation.wan.selection import all_hy_windows
+from evaluation.stage_a.common import _FrozenRAFT
+
+
+@pytest.mark.parametrize("height,width", [(145, 251), (128, 256), (65, 77)])
+def test_raft_padding_preserves_coordinates_and_microbatches(height, width):
+    raft = _FrozenRAFT.__new__(_FrozenRAFT)
+    raft.microbatch = 2
+    raft.transforms = lambda a, b: (a, b)
+    seen = []
+    def model(a, b):
+        seen.append(a.clone())
+        assert a.shape[-2] % 8 == a.shape[-1] % 8 == 0
+        assert min(a.shape[-2:]) >= 128
+        # Coordinate-dependent output detects shifted crops or resized vectors.
+        return [a[:, :2]]
+    raft.model = model
+    inputs = torch.rand(3, 3, height, width)
+    output = raft(inputs, inputs)
+    assert torch.equal(output, inputs[:, :2])
+    assert [x.shape[0] for x in seen] == [2, 1]
+    for actual, original in zip(seen, (inputs[:2], inputs[2:])):
+        assert torch.equal(actual[..., :height, :width], original)
+        assert torch.equal(actual[..., -1, -1], original[..., -1, -1])
 
 
 class RecordingVAE:
