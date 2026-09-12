@@ -24,4 +24,10 @@
 - 定向修复 _FrozenRAFT：推理输入仅在底部/右侧replicate padding到8倍数且至少128像素（RAFT correlation pyramid要求）；输出光流裁回原内容尺寸，不resize、不缩放flow向量、不修改RGB/mask/窗口身份。新协议记录在flow provenance；原已满足尺寸的输入计算路径不变。
 - 新增不规则尺寸、原生整除尺寸、低于128尺寸和microbatch边界的坐标保持测试。静态py_compile、bash -n、diff检查通过；GPU smoke尚待执行。
 - 新输出目录v3；继续引用v2的LIBERO action=false selection和v1的Hy全部窗口selection，保留旧失败证据。
+- 修复commit 6b2f86ad02e1ae66db7b5294233a78094386f8c2，已push及H100同步。5311在push完成前运行了旧代码测试，不计入新修复证据；同步后Job5312重新执行27/27测试通过。
+- GPU smoke Job5313完成全部10/10 cell，sacct COMPLETED/0:0，Hy结果hy-threeview.json存在。Hy第一个窗口4.4625秒、allocated峰值4.184 GiB，RAFT尺寸异常已消除。5310已取消。
+- 尚未提交v3正式作业：Hy180975窗口首样本粗略外推224小时，不能据此给出稳定ETA，但存在明显超过normal单卡48小时的风险。需要先做稳定吞吐估计并按固定selection分片，或另行确认资源/队列；不提交预计无法完成且没有续跑机制的整批作业。
+- 用户收敛范围：只做原UMI1024窗口/7 cell、LIBERO256窗口/2 cell；跳过Hy；只保留原RGB指标与temporal-delta L1/LPIPS，不实例化或调用RAFT。
+- Wan入口去除RAFT依赖和调用；复用StageA1MetricSuite的无flow路径。通用Stage A验证默认不变，仅Wan入口关闭RAFT资产门禁。
+- 输出改为wan22-ganoff124k-20260912-v4-original-metrics。GPU数量保持1卡串行，不未经授权扩大至16卡。新GPU smoke通过后直接启动正式评测；ETA依据新运行实测。
 - checkpoint/环境/源代码哈希与原 selection 证据见前一日准备记录。结果未生成前不报告模型质量优劣。

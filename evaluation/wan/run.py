@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from evaluation.stage_a import runtime
-from evaluation.stage_a.common import _FrozenRAFT, _checkpoint_provenance, _dataset_provenance, _environment_provenance, _jsonable, _source_provenance
+from evaluation.stage_a.common import _checkpoint_provenance, _dataset_provenance, _environment_provenance, _jsonable, _source_provenance
 from evaluation.stage_a.data import CanonicalStageADataset
 from evaluation.stage_a.metrics import StageA1MetricSuite
 from evaluation.stage_a.quality import _run_parser, _hydrate_checkpoint_semantics, _validate_run, _mode_batch
@@ -17,13 +17,16 @@ from .adapter import WanReconstructor, SOURCE_SHA, WEIGHT_SHA
 
 def main():
     parser = _run_parser()
+    for action in parser._actions:
+        if action.dest in {"raft_checkpoint", "raft_checkpoint_sha256"}:
+            action.required = False
     parser.add_argument("--wan-source-root", required=True)
     parser.add_argument("--wan-checkpoint", required=True)
     args = parser.parse_args()
     if not args.rgb_only or args.num_visualizations:
         raise ValueError("paired evaluation requires --rgb-only and --num_visualizations 0")
     _hydrate_checkpoint_semantics(args)
-    _validate_run(args)
+    _validate_run(args, require_raft=False)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
@@ -41,7 +44,6 @@ def main():
     device = torch.device("cuda")
     baseline = runtime.load_model(args, device).requires_grad_(False)
     wan = WanReconstructor(args.wan_source_root, args.wan_checkpoint, device)
-    flow = _FrozenRAFT(args.raft_checkpoint, args.raft_checkpoint_sha256, device=device, microbatch=args.raft_microbatch)
     suites = {name: StageA1MetricSuite(relative_depth_epsilon=args.relative_depth_epsilon) for name in ("gan_off", "wan22")}
     specs = runtime.evaluation_specs(args, args.eval_eye_mode)
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -67,7 +69,7 @@ def main():
                 }
                 for name, output in outputs.items():
                     metric_batch = mode if name == "gan_off" else {**mode, "video": mode["video"][:, :, :1]}
-                    suites[name].update(mode_id, metric_batch, output, dataset.view_names, baseline.perceptual_model, flow)
+                    suites[name].update(mode_id, metric_batch, output, dataset.view_names, baseline.perceptual_model)
             count += len(batch["sample_id"])
             audit.flush()
             if index % 10 == 0:
@@ -83,7 +85,7 @@ def main():
         "status": "smoke" if args.max_batches is not None else "formal", "sample_count": count,
         "dataset": _dataset_provenance(dataset), "checkpoint": checkpoint,
         "wan": {"source_sha": SOURCE_SHA, "checkpoint_sha256": WEIGHT_SHA, "latent_shapes_per_view": wan.latent_shapes, "temporal_adapter": "repeat_last_4_to_5_decode_crop_first_4", "output": "official clamp [-1,1] then /2; raw overshoot is not a cross-model quality score"},
-        "precision": "fp32_tf32_off_posterior_mean", "metrics": metrics, "flow_teacher": flow.provenance(),
+        "precision": "fp32_tf32_off_posterior_mean", "metrics": metrics, "flow_teacher": None,
         "elapsed_s": time.monotonic() - started, "peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
         "provenance": {**source, "environment": environment, "resolved_args": _jsonable(vars(args))},
     }

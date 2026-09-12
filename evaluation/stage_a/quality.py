@@ -69,7 +69,7 @@ def _hydrate_checkpoint_semantics(args) -> None:
         )
 
 
-def _validate_run(args) -> None:
+def _validate_run(args, *, require_raft=True) -> None:
     if args.bf16:
         raise ValueError("Stage A quality metrics are frozen to FP32")
     if args.eval_eye_mode not in {"mono", "stereo"}:
@@ -107,6 +107,8 @@ def _validate_run(args) -> None:
         raise FileExistsError(
             f"refusing to overwrite visualization directory {args.visualization_dir}"
         )
+    if not require_raft:
+        return
     if args.raft_microbatch < 1:
         raise ValueError("--raft-microbatch must be positive")
     if not args.raft_checkpoint.is_file():
