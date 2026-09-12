@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT=/gpfs/jiuquyun/projects/Frank/stereo-vae
 REPO=$ROOT/Stereo-vison-Tokenizer
 PY=$ROOT/runtime/wan22-eval-20260911/bin/python
-OUT=$ROOT/outputs/wan22-ganoff124k-20260911-v1
+OUT=$ROOT/outputs/wan22-ganoff124k-20260911-v2
 OLD=/gpfs/jiuquyun/projects/hezhou/experiments/stereo-tokenizer-stage-a
 ASSETS=/gpfs/jiuquyun/checkpoints/Frank/stereo-vae
 export TORCH_HOME=$ASSETS/runtime-assets/torch
@@ -15,11 +15,6 @@ mkdir -p "$OUT"
 trap 'code=$?; printf "%s\n" "$code" > "$OUT/$phase.exit_code.txt"' EXIT
 if [[ "$phase" == prepare ]]; then
     "$PY" -m pytest tests/evaluation/test_stage_a_evaluation.py tests/evaluation/test_wan_evaluation.py -q -p no:cacheprovider
-    "$PY" -m evaluation.wan.selection \
-      --identity-contract "$OLD/contracts/checkpoint-stagec-update162500/hy-split-identities.json" \
-      --hy-manifest "$ROOT/runtime/h100-manifests-20260902-ebb013a/hy.jsonl" \
-      --hy-manifest-sha256 6d6f9a6cf14bc502f4471cd4c9e5617e5fe35b4d9de1412b44eb3d8293ba5497 \
-      --output "$OUT/hy-all-test-excluding-table014.json"
     exit 0
 fi
 [[ "$phase" == smoke || "$phase" == full ]]
@@ -48,7 +43,7 @@ for cam in head_left head_right left_wrist_left left_wrist_right right_wrist_lef
 done
 run_cell umi stereo umi-stereo "$OLD/20260902-stagec-update162500-baseline-v1/selections/umi-canonical-test-1024-seed1234.json"
 for cam in head_left left_wrist_left; do
-    run_cell libero mono "libero-$cam" "$OLD/20260902-stagec-update162500-baseline-v1/selections/libero-canonical-test-256-seed1234.json" --stage-a-camera-key "observation.images.cam_$cam"
+    run_cell libero mono "libero-$cam" "$OUT/libero-original256-action-false.json" --stage-a-camera-key "observation.images.cam_$cam"
 done
-run_cell hy mono hy-threeview "$OUT/hy-all-test-excluding-table014.json" \
+run_cell hy mono hy-threeview "$ROOT/outputs/wan22-ganoff124k-20260911-v1/hy-all-test-excluding-table014.json" \
   --hy_root_aliases '{"hy_primary":"/gpfs/jiuquyun/datasets/PRETRAIN_DATA/Hy-Embodied-0.5-VLA-Data"}'
